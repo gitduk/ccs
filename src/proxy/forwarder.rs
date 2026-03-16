@@ -23,29 +23,31 @@ pub async fn forward_request(
     body: Bytes,
     incoming_headers: &HeaderMap,
 ) -> Result<reqwest::Response> {
-    let url = format!("{}/v1/messages", provider.base_url.trim_end_matches('/'));
+    let (url, auth_header_name, auth_header_value) = match provider.api_format {
+        ApiFormat::Anthropic => (
+            format!("{}/v1/messages", provider.base_url.trim_end_matches('/')),
+            "x-api-key",
+            api_key.to_string(),
+        ),
+        ApiFormat::OpenAI => (
+            format!("{}/chat/completions", provider.base_url.trim_end_matches('/')),
+            "authorization",
+            format!("Bearer {api_key}"),
+        ),
+    };
 
     let mut request = client.post(&url);
 
-    // Set auth headers based on format
-    match provider.api_format {
-        ApiFormat::Anthropic => {
-            request = request.header("x-api-key", api_key);
-            // Forward anthropic-version and anthropic-beta if present
-            if let Some(v) = incoming_headers.get("anthropic-version") {
-                request = request.header("anthropic-version", v);
-            }
-            if let Some(v) = incoming_headers.get("anthropic-beta") {
-                request = request.header("anthropic-beta", v);
-            }
+    // Set auth header
+    request = request.header(auth_header_name, auth_header_value);
+
+    // Forward anthropic-specific headers for Anthropic format
+    if provider.api_format == ApiFormat::Anthropic {
+        if let Some(v) = incoming_headers.get("anthropic-version") {
+            request = request.header("anthropic-version", v);
         }
-        ApiFormat::OpenAI => {
-            let url = format!(
-                "{}/chat/completions",
-                provider.base_url.trim_end_matches('/')
-            );
-            request = client.post(&url);
-            request = request.header("authorization", format!("Bearer {api_key}"));
+        if let Some(v) = incoming_headers.get("anthropic-beta") {
+            request = request.header("anthropic-beta", v);
         }
     }
 

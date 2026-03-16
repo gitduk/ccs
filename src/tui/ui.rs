@@ -13,6 +13,7 @@ const GREEN: Color = Color::Green;
 const YELLOW: Color = Color::Yellow;
 const RED: Color = Color::Red;
 const DIM: Color = Color::DarkGray;
+const HIGHLIGHT_BG_INDEX: u8 = 236;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
@@ -114,7 +115,7 @@ fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
     .height(1);
 
     // 256-color palette for subtle highlight bar
-    const HIGHLIGHT_BG: Color = Color::Indexed(236); // dark gray
+    const HIGHLIGHT_BG: Color = Color::Indexed(HIGHLIGHT_BG_INDEX);
 
     let rows: Vec<Row> = app
         .provider_ids
@@ -152,9 +153,9 @@ fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
         rows,
         [
             Constraint::Length(3),
-            Constraint::Percentage(25),
             Constraint::Length(12),
-            Constraint::Percentage(55),
+            Constraint::Length(12),
+            Constraint::Min(30),
         ],
     )
     .header(header)
@@ -176,8 +177,6 @@ fn draw_keybindings(f: &mut Frame, app: &App, area: Rect) {
         _ => "Start",
     };
     let hints = Line::from(vec![
-        key_hint("↑↓", "Navigate"),
-        Span::raw("  "),
         key_hint("s", "Switch"),
         Span::raw("  "),
         key_hint("a", "Add"),
@@ -189,6 +188,8 @@ fn draw_keybindings(f: &mut Frame, app: &App, area: Rect) {
         key_hint("t", "Test"),
         Span::raw("  "),
         key_hint("p", proxy_label),
+        Span::raw("  "),
+        key_hint("r", "Reload"),
         Span::raw("  "),
         key_hint("q", "Quit"),
     ]);

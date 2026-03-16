@@ -2,11 +2,14 @@ use serde_json::json;
 
 use crate::config::{ApiFormat, Provider};
 
+const TEST_TIMEOUT_SECS: u64 = 10;
+const TEST_MODEL: &str = "claude-haiku-4-5-20251001";
+
 /// Test provider connectivity. Returns a human-readable result string.
 pub async fn test_connectivity(provider: &Provider) -> String {
     let api_key = match provider.resolve_api_key() {
         Ok(k) => k,
-        Err(e) => return format!("Config error: {e}"),
+        Err(_) => return "Config error: Failed to resolve API key".to_string(),
     };
 
     let client = reqwest::Client::new();
@@ -15,7 +18,7 @@ pub async fn test_connectivity(provider: &Provider) -> String {
         ApiFormat::Anthropic => {
             let url = format!("{}/v1/messages", provider.base_url.trim_end_matches('/'));
             let body = json!({
-                "model": "claude-haiku-4-5-20251001",
+                "model": TEST_MODEL,
                 "max_tokens": 1,
                 "messages": [{"role": "user", "content": "hi"}]
             });
@@ -24,7 +27,7 @@ pub async fn test_connectivity(provider: &Provider) -> String {
         ApiFormat::OpenAI => {
             let url = format!("{}/chat/completions", provider.base_url.trim_end_matches('/'));
             let body = json!({
-                "model": "claude-haiku-4-5-20251001",
+                "model": TEST_MODEL,
                 "max_tokens": 1,
                 "messages": [{"role": "user", "content": "hi"}]
             });
@@ -38,7 +41,7 @@ pub async fn test_connectivity(provider: &Provider) -> String {
         .header("content-type", "application/json")
         .header("anthropic-version", "2023-06-01")
         .json(&request_body)
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(TEST_TIMEOUT_SECS))
         .send()
         .await
     {

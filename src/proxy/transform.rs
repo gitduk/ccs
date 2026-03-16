@@ -6,6 +6,9 @@ use uuid::Uuid;
 use crate::config::Provider;
 use crate::error::{AppError, Result};
 
+// Default model names
+const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
+
 // ─── Request: Anthropic → OpenAI ────────────────────────────────────────────
 
 /// Convert an Anthropic Messages API request to OpenAI Chat Completions format.
@@ -13,7 +16,7 @@ pub fn anthropic_to_openai_request(req: &Value, provider: &Provider) -> Result<V
     let model = req
         .get("model")
         .and_then(|m| m.as_str())
-        .unwrap_or("claude-sonnet-4-20250514");
+        .unwrap_or(DEFAULT_MODEL);
     let mapped_model = provider.map_model(model);
 
     let mut messages: Vec<Value> = Vec::new();
@@ -432,6 +435,12 @@ pub fn openai_stream_to_anthropic(
                 Ok(c) => c,
                 Err(e) => {
                     tracing::error!("Stream read error: {e}");
+                    // Send error event to client before breaking
+                    let error_event = format!(
+                        "event: error\ndata: {}\n\n",
+                        serde_json::json!({"type": "error", "error": {"message": "Stream read error"}})
+                    );
+                    yield Ok(Bytes::from(error_event));
                     break;
                 }
             };

@@ -4,16 +4,15 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use futures::StreamExt;
-use reqwest::Client;
 
-use super::SharedConfig;
+use super::SharedState;
 use crate::config::ApiFormat;
 use crate::error::AppError;
 use crate::proxy::{forwarder, transform};
 
 /// Health check endpoint.
-pub async fn health_check(State(config): State<SharedConfig>) -> impl IntoResponse {
-    let config = config.read().await;
+pub async fn health_check(State(state): State<SharedState>) -> impl IntoResponse {
+    let config = state.config.read().await;
     let id = match config.current_provider() {
         Ok((id, _p)) => id.to_string(),
         Err(_) => "none".to_string(),
@@ -22,21 +21,46 @@ pub async fn health_check(State(config): State<SharedConfig>) -> impl IntoRespon
     axum::Json(serde_json::json!({
         "status": "ok",
         "provider": id,
+        "version": env!("CARGO_PKG_VERSION"),
     }))
+}
+
+/// Reload configuration from disk.
+pub async fn reload_config(State(state): State<SharedState>) -> impl IntoResponse {
+    match crate::config::load_config() {
+        Ok(fresh_config) => {
+            let mut config = state.config.write().await;
+            *config = fresh_config;
+            (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({
+                    "status": "ok",
+                    "message": "Configuration reloaded"
+                }))
+            )
+        }
+        Err(e) => {
+            tracing::error!("Failed to reload config: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({
+                    "status": "error",
+                    "message": "Failed to reload configuration"
+                }))
+            )
+        }
+    }
 }
 
 /// Main handler for POST /v1/messages.
 pub async fn handle_messages(
-    State(shared_config): State<SharedConfig>,
+    State(state): State<SharedState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    // Reload config from file for hot-switch support
+    // Read config without hot-reload on every request
     let provider = {
-        let mut config = shared_config.write().await;
-        if let Ok(fresh) = crate::config::load_config() {
-            *config = fresh;
-        }
+        let config = state.config.read().await;
         let (_id, provider) = config.current_provider()?;
         provider.clone()
     };
@@ -60,9 +84,8 @@ pub async fn handle_messages(
         body
     };
 
-    let client = Client::new();
     let response = forwarder::forward_request(
-        &client,
+        &state.http_client,
         &provider,
         &api_key,
         upstream_body,

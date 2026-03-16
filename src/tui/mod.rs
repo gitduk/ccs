@@ -34,6 +34,11 @@ pub fn run_tui() -> Result<()> {
     let mut app = App::new()?;
     let mut server: Option<ServerHandle> = None;
 
+    // Auto-start proxy if there's a current provider configured
+    if !app.config.current.is_empty() && !app.config.providers.is_empty() {
+        start_server_background(&mut app, &mut server);
+    }
+
     let result = run_loop(&mut terminal, &mut app, &mut server);
 
     // Stop server on exit
@@ -156,6 +161,9 @@ fn handle_normal_key(
         KeyCode::Char('p') => {
             toggle_server(app, server);
         }
+        KeyCode::Char('r') => {
+            let _ = app.reload_config();
+        }
         _ => {}
     }
     Ok(())
@@ -169,29 +177,33 @@ fn toggle_server(app: &mut App, server: &mut Option<ServerHandle>) {
         app.server_status = ServerStatus::Stopped;
         app.set_message("Proxy stopped", MessageKind::Info);
     } else {
-        // Check if there's a current provider
-        if app.config.current.is_empty() || app.config.providers.is_empty() {
-            app.set_message("No provider configured. Add one first.", MessageKind::Error);
-            return;
-        }
-
-        // Start the server
-        let config = app.config.clone();
-        let listen = config.listen.clone();
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-
-        app.server_status = ServerStatus::Starting;
-
-        let task = tokio::spawn(async move {
-            if let Err(e) = crate::proxy::start_server_with_shutdown(config, shutdown_rx).await {
-                tracing::error!("Proxy server error: {e}");
-            }
-        });
-
-        *server = Some(ServerHandle { task, shutdown_tx });
-        app.server_status = ServerStatus::Running;
-        app.set_message(format!("Proxy started on {listen}"), MessageKind::Success);
+        start_server_background(app, server);
     }
+}
+
+fn start_server_background(app: &mut App, server: &mut Option<ServerHandle>) {
+    // Check if there's a current provider
+    if app.config.current.is_empty() || app.config.providers.is_empty() {
+        app.set_message("No provider configured. Add one first.", MessageKind::Error);
+        return;
+    }
+
+    // Start the server
+    let config = app.config.clone();
+    let listen = config.listen.clone();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    app.server_status = ServerStatus::Starting;
+
+    let task = tokio::spawn(async move {
+        if let Err(e) = crate::proxy::start_server_with_shutdown(config, shutdown_rx).await {
+            tracing::error!("Proxy server error: {e}");
+        }
+    });
+
+    *server = Some(ServerHandle { task, shutdown_tx });
+    app.server_status = ServerStatus::Running;
+    app.set_message(format!("Proxy started on {listen}"), MessageKind::Success);
 }
 
 fn handle_editing_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {

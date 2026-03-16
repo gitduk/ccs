@@ -6,27 +6,37 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::routing::{get, post};
+use reqwest::Client;
 use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 
 use crate::config::AppConfig;
 
-pub type SharedConfig = Arc<RwLock<AppConfig>>;
+pub struct AppState {
+    pub config: Arc<RwLock<AppConfig>>,
+    pub http_client: Client,
+}
+
+pub type SharedState = Arc<AppState>;
 
 /// Build the axum router.
-pub fn build_router(config: SharedConfig) -> Router {
+pub fn build_router(state: SharedState) -> Router {
     Router::new()
         .route("/v1/messages", post(handler::handle_messages))
         .route("/health", get(handler::health_check))
+        .route("/reload", post(handler::reload_config))
         .layer(CorsLayer::permissive())
-        .with_state(config)
+        .with_state(state)
 }
 
 /// Start the proxy server (CLI mode, shuts down on Ctrl+C / SIGTERM).
 pub async fn start_server(config: AppConfig) -> crate::error::Result<()> {
     let listen = config.listen.clone();
-    let shared = Arc::new(RwLock::new(config));
-    let app = build_router(shared);
+    let state = Arc::new(AppState {
+        config: Arc::new(RwLock::new(config)),
+        http_client: Client::new(),
+    });
+    let app = build_router(state);
 
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     tracing::info!("CCS proxy listening on {listen}");
@@ -44,8 +54,11 @@ pub async fn start_server_with_shutdown(
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> crate::error::Result<()> {
     let listen = config.listen.clone();
-    let shared = Arc::new(RwLock::new(config));
-    let app = build_router(shared);
+    let state = Arc::new(AppState {
+        config: Arc::new(RwLock::new(config)),
+        http_client: Client::new(),
+    });
+    let app = build_router(state);
 
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     tracing::info!("CCS proxy listening on {listen}");

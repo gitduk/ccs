@@ -3,6 +3,9 @@ use ratatui::widgets::TableState;
 use crate::config::{self, ApiFormat, AppConfig, Provider};
 use crate::error::Result;
 
+// UI constants
+const MESSAGE_TIMEOUT_SECS: u64 = 3;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Mode {
     Normal,
@@ -316,7 +319,7 @@ impl App {
 
     pub fn delete_confirmed(&mut self) -> Result<()> {
         if let Some(id) = self.confirm_action.take() {
-            self.config.providers.swap_remove(&id);
+            self.config.providers.shift_remove(&id);
             if self.config.current == id {
                 self.config.current = self
                     .config
@@ -356,8 +359,34 @@ impl App {
     /// Clear message if it has expired (after 3 seconds).
     pub fn tick_message(&mut self) {
         if let Some((_, _, created)) = &self.message {
-            if created.elapsed() > std::time::Duration::from_secs(3) {
+            if created.elapsed() > std::time::Duration::from_secs(MESSAGE_TIMEOUT_SECS) {
                 self.message = None;
+            }
+        }
+    }
+
+    /// Reload configuration from disk.
+    pub fn reload_config(&mut self) -> Result<()> {
+        match config::load_config() {
+            Ok(fresh_config) => {
+                self.config = fresh_config;
+                self.refresh_ids();
+
+                // Reselect current provider if it exists
+                if let Some(idx) = self.provider_ids.iter().position(|id| id == &self.config.current) {
+                    self.table_state.select(Some(idx));
+                } else if !self.provider_ids.is_empty() {
+                    self.table_state.select(Some(0));
+                } else {
+                    self.table_state.select(None);
+                }
+
+                self.set_message("Configuration reloaded", MessageKind::Success);
+                Ok(())
+            }
+            Err(e) => {
+                self.set_message(format!("Failed to reload config: {e}"), MessageKind::Error);
+                Err(e)
             }
         }
     }
