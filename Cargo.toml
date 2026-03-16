@@ -1,0 +1,37 @@
+[package]
+name = "ccs"
+version = "0.1.0"
+edition = "2021"
+description = "Claude Code Switch - Lightweight API proxy for routing Claude Code traffic"
+
+[dependencies]
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+colored = "2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+indexmap = { version = "2", features = ["serde"] }
+
+# Async + HTTP
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
+axum = "0.7"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+tower-http = { version = "0.6", features = ["cors"] }
+
+# Streaming
+futures = "0.3"
+bytes = "1"
+async-stream = "0.3"
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Utilities
+thiserror = "2"
+dirs = "6"
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
