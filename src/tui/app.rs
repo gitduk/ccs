@@ -45,6 +45,7 @@ pub struct ProviderForm {
     pub is_new: bool,
     pub fields: Vec<FormField>,
     pub focused: usize,
+    pub error: Option<String>,
 }
 
 pub struct FormField {
@@ -109,6 +110,23 @@ impl FormField {
         if self.cursor < self.value.len() {
             self.cursor += 1;
         }
+    }
+
+    pub fn delete_word_back(&mut self) {
+        if self.is_toggle || self.cursor == 0 {
+            return;
+        }
+        let mut pos = self.cursor;
+        // Skip trailing spaces
+        while pos > 0 && self.value[..pos].ends_with(' ') {
+            pos -= 1;
+        }
+        // Delete until next space
+        while pos > 0 && !self.value[..pos].ends_with(' ') {
+            pos -= 1;
+        }
+        self.value.drain(pos..self.cursor);
+        self.cursor = pos;
     }
 
     pub fn home(&mut self) {
@@ -204,7 +222,6 @@ impl App {
         if let Some(id) = self.selected_id().map(|s| s.to_string()) {
             self.config.current = id.clone();
             config::save_config(&self.config)?;
-            self.set_message(format!("Switched to '{id}'"), MessageKind::Success);
         }
         Ok(())
     }
@@ -219,6 +236,7 @@ impl App {
                 FormField::toggle("Format", "anthropic"),
             ],
             focused: 0,
+            error: None,
         });
         self.mode = Mode::Editing;
     }
@@ -243,6 +261,7 @@ impl App {
                 FormField::toggle("Format", &provider.api_format.to_string()),
             ],
             focused: 1,
+            error: None,
         });
         self.mode = Mode::Editing;
     }
@@ -258,17 +277,19 @@ impl App {
         let format_str = form.fields[3].value.trim().to_string();
         let is_new = form.is_new;
 
-        if id.is_empty() {
-            self.set_message("ID cannot be empty", MessageKind::Error);
-            return Ok(());
-        }
-        if base_url.is_empty() {
-            self.set_message("Base URL cannot be empty", MessageKind::Error);
-            return Ok(());
-        }
-
-        if is_new && self.config.providers.contains_key(&id) {
-            self.set_message(format!("Provider '{id}' already exists"), MessageKind::Error);
+        let validation_error = if id.is_empty() {
+            Some("ID cannot be empty".to_string())
+        } else if base_url.is_empty() {
+            Some("Base URL cannot be empty".to_string())
+        } else if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+            Some("Base URL must start with http:// or https://".to_string())
+        } else if is_new && self.config.providers.contains_key(&id) {
+            Some(format!("Provider '{id}' already exists"))
+        } else {
+            None
+        };
+        if let Some(err) = validation_error {
+            self.form.as_mut().unwrap().error = Some(err);
             return Ok(());
         }
 
@@ -304,8 +325,6 @@ impl App {
         self.mode = Mode::Normal;
         self.form = None;
 
-        let action = if is_new { "Added" } else { "Updated" };
-        self.set_message(format!("{action} '{id}'"), MessageKind::Success);
 
         Ok(())
     }
@@ -363,6 +382,37 @@ impl App {
                 self.message = None;
             }
         }
+    }
+
+    pub fn move_provider_up(&mut self) -> Result<()> {
+        let Some(idx) = self.table_state.selected() else { return Ok(()); };
+        // Can't move past index 0, and index 1 can't move up past pinned "anthropic"
+        if idx <= 1 { return Ok(()); }
+        self.config.providers.move_index(idx, idx - 1);
+        self.refresh_ids();
+        self.table_state.select(Some(idx - 1));
+        config::save_config(&self.config)?;
+        Ok(())
+    }
+
+    pub fn move_provider_down(&mut self) -> Result<()> {
+        let Some(idx) = self.table_state.selected() else { return Ok(()); };
+        if idx + 1 >= self.provider_ids.len() { return Ok(()); }
+        // "anthropic" is pinned at position 0 and cannot move
+        if self.provider_ids.get(idx).map(|s| s == "anthropic").unwrap_or(false) {
+            return Ok(());
+        }
+        self.config.providers.move_index(idx, idx + 1);
+        self.refresh_ids();
+        self.table_state.select(Some(idx + 1));
+        config::save_config(&self.config)?;
+        Ok(())
+    }
+
+    pub fn toggle_fallback(&mut self) -> Result<()> {
+        self.config.fallback = !self.config.fallback;
+        config::save_config(&self.config)?;
+        Ok(())
     }
 
     /// Reload configuration from disk.

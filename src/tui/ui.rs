@@ -6,35 +6,27 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use super::app::{App, Mode, ServerStatus};
-
-const CYAN: Color = Color::Cyan;
-const GREEN: Color = Color::Green;
-const YELLOW: Color = Color::Yellow;
-const RED: Color = Color::Red;
-const DIM: Color = Color::DarkGray;
-const HIGHLIGHT_BG_INDEX: u8 = 236;
+use super::app::{App, MessageKind, Mode};
+use super::theme::{self as t};
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // title + proxy status
-            Constraint::Min(6),   // main content
+            Constraint::Length(1), // title bar
+            Constraint::Min(0),    // main content
             Constraint::Length(1), // keybindings
         ])
         .split(f.area());
 
     draw_title_bar(f, app, chunks[0]);
-    draw_provider_table(f, app, chunks[1]);
+    draw_main(f, app, chunks[1]);
     draw_keybindings(f, app, chunks[2]);
 
-    // Draw overlays
     match &app.mode {
         Mode::Editing => draw_form(f, app),
         Mode::Confirm => draw_confirm(f, app),
         Mode::Message => {
-            // Dismiss on next tick
             app.mode = Mode::Normal;
         }
         Mode::Normal => {}
@@ -42,38 +34,47 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_title_bar(f: &mut Frame, app: &App, area: Rect) {
-    let (indicator, status_text, color) = match &app.server_status {
-        ServerStatus::Stopped => ("○", "Stopped", DIM),
-        ServerStatus::Starting => ("◌", "Starting...", YELLOW),
-        ServerStatus::Running => ("●", "Running", GREEN),
-        ServerStatus::Error(_) => ("✗", "Error", RED),
-    };
-
-    let status_part = format!("{indicator} {status_text} ");
-
-    // Left side: title; right side: proxy status
-    // Calculate padding to right-align the status
+    let fallback_label = if app.config.fallback { "Fallback on  " } else { "Fallback off " };
     let title_left = " CCS  Claude Code Switch";
     let version = format!("  v{}", env!("CARGO_PKG_VERSION"));
     let left_len = title_left.len() + version.len();
-    let right_len = status_part.len();
+    let right_len = fallback_label.len();
     let gap = (area.width as usize).saturating_sub(left_len + right_len);
 
-    let line = Line::from(vec![
-        Span::styled(" CCS ", Style::default().fg(Color::Black).bg(CYAN)),
+    let spans: Vec<Span> = vec![
+        Span::styled(" CCS ", Style::default().fg(Color::Black).bg(t::PRIMARY)),
         Span::raw(" "),
         Span::styled(
             "Claude Code Switch",
-            Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(version, Style::default().fg(DIM)),
+        Span::styled(version, Style::default().fg(t::MUTED)),
         Span::raw(" ".repeat(gap)),
         Span::styled(
-            status_part,
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
+            fallback_label,
+            if app.config.fallback {
+                Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(t::MUTED)
+            },
         ),
-    ]);
+    ];
+    let line = Line::from(spans);
     f.render_widget(Paragraph::new(line), area);
+}
+
+fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
+    let table_height = (app.provider_ids.len() as u16 + 3).max(4).min(area.height * 2 / 3);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(table_height),
+            Constraint::Min(0),
+        ])
+        .split(area);
+
+    draw_provider_table(f, app, chunks[0]);
+    draw_detail_panel(f, app, chunks[1]);
 }
 
 fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
@@ -82,40 +83,34 @@ fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
             Line::from(""),
             Line::from(Span::styled(
                 "  No providers configured",
-                Style::default().fg(DIM),
+                Style::default().fg(t::MUTED),
             )),
             Line::from(""),
             Line::from(vec![
-                Span::styled("  Press ", Style::default().fg(DIM)),
-                Span::styled("a", Style::default().fg(YELLOW).add_modifier(Modifier::BOLD)),
-                Span::styled(" to add a provider, or edit ", Style::default().fg(DIM)),
+                Span::styled("  Press ", Style::default().fg(t::MUTED)),
+                Span::styled("a", Style::default().fg(t::WARNING).add_modifier(Modifier::BOLD)),
+                Span::styled(" to add a provider, or edit ", Style::default().fg(t::MUTED)),
                 Span::styled(
                     config_path_display(),
-                    Style::default().fg(CYAN),
+                    Style::default().fg(t::PRIMARY),
                 ),
             ]),
         ])
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(DIM))
-                .title(" Providers "),
+                .border_style(Style::default().fg(t::MUTED)),
         );
         f.render_widget(empty, area);
         return;
     }
 
     let header = Row::new(vec![
-        Cell::from("  "),
-        Cell::from("ID"),
-        Cell::from("Format"),
-        Cell::from("Base URL"),
+        Cell::from("  ID").style(Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD)),
+        Cell::from("Format").style(Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD)),
+        Cell::from("Base URL").style(Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD)),
     ])
-    .style(Style::default().fg(DIM))
     .height(1);
-
-    // 256-color palette for subtle highlight bar
-    const HIGHLIGHT_BG: Color = Color::Indexed(HIGHLIGHT_BG_INDEX);
 
     let rows: Vec<Row> = app
         .provider_ids
@@ -124,27 +119,30 @@ fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
             let provider = &app.config.providers[id];
             let is_current = id == &app.config.current;
 
-            let id_style = if is_current {
-                Style::default().fg(GREEN)
+            let id_cell = if is_current {
+                Cell::from(Line::from(vec![
+                    Span::styled("▶ ", Style::default().fg(t::SUCCESS)),
+                    Span::styled(id.as_str(), Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD)),
+                ]))
             } else {
-                Style::default()
-            };
-            let marker = if is_current {
-                Span::styled(" ● ", Style::default().fg(GREEN))
-            } else {
-                Span::raw("   ")
-            };
-            let format_color = if provider.api_format == crate::config::ApiFormat::OpenAI {
-                YELLOW
-            } else {
-                CYAN
+                Cell::from(Span::styled(
+                    format!("  {}", id),
+                    Style::default().fg(t::TEXT),
+                ))
             };
 
+            let format_color = t::format_color(&provider.api_format);
+
             Row::new(vec![
-                Cell::from(marker),
-                Cell::from(Span::styled(id.as_str(), id_style)),
-                Cell::from(Span::styled(provider.api_format.to_string(), Style::default().fg(format_color))),
-                Cell::from(Span::styled(provider.base_url.as_str(), Style::default().fg(DIM))),
+                id_cell,
+                Cell::from(Span::styled(
+                    provider.api_format.to_string(),
+                    Style::default().fg(format_color),
+                )),
+                Cell::from(Span::styled(
+                    provider.base_url.as_str(),
+                    Style::default().fg(t::MUTED),
+                )),
             ])
         })
         .collect();
@@ -152,8 +150,7 @@ fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
     let table = Table::new(
         rows,
         [
-            Constraint::Length(3),
-            Constraint::Length(12),
+            Constraint::Length(14),
             Constraint::Length(12),
             Constraint::Min(30),
         ],
@@ -162,45 +159,123 @@ fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(DIM))
-            .title(" Providers ")
-            .title_style(Style::default().fg(CYAN)),
+            .border_style(Style::default().fg(t::MUTED)),
     )
-    .row_highlight_style(Style::default().bg(HIGHLIGHT_BG));
+    .row_highlight_style(Style::default().bg(t::HIGHLIGHT_BG));
 
     f.render_stateful_widget(table, area, &mut app.table_state);
 }
 
-fn draw_keybindings(f: &mut Frame, app: &App, area: Rect) {
-    let proxy_label = match &app.server_status {
-        ServerStatus::Running => "Stop",
-        _ => "Start",
+fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
+    // Show error toast only when not in editing mode (errors in form are shown inline)
+    if app.mode == Mode::Normal {
+        if let Some((msg, MessageKind::Error, _)) = &app.message {
+            let toast = Paragraph::new(Line::from(vec![
+                Span::styled(" ✗ ", Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD)),
+                Span::styled(msg.as_str(), Style::default().fg(t::TEXT)),
+            ]))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(t::ERROR)),
+            );
+            f.render_widget(toast, area);
+            return;
+        }
+    }
+
+    let Some(id) = app
+        .table_state
+        .selected()
+        .and_then(|i| app.provider_ids.get(i))
+    else {
+        f.render_widget(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(t::MUTED)),
+            area,
+        );
+        return;
     };
-    let hints = Line::from(vec![
-        key_hint("s", "Switch"),
-        Span::raw("  "),
-        key_hint("a", "Add"),
-        Span::raw("  "),
-        key_hint("e", "Edit"),
-        Span::raw("  "),
-        key_hint("d", "Delete"),
-        Span::raw("  "),
-        key_hint("t", "Test"),
-        Span::raw("  "),
-        key_hint("p", proxy_label),
-        Span::raw("  "),
-        key_hint("r", "Reload"),
-        Span::raw("  "),
-        key_hint("q", "Quit"),
-    ]);
-    f.render_widget(Paragraph::new(hints).style(Style::default().fg(DIM)), area);
+
+    let Some(provider) = app.config.providers.get(id) else {
+        return;
+    };
+
+    let title = " Provider ";
+
+    let api_key_display = if provider.api_key.is_empty() {
+        Span::styled("(not set)", Style::default().fg(t::MUTED))
+    } else if provider.api_key.starts_with('$') {
+        Span::styled(provider.api_key.as_str(), Style::default().fg(t::WARNING))
+    } else {
+        let len = provider.api_key.len();
+        let masked = if len > 8 {
+            format!("{}···{}", &provider.api_key[..4], &provider.api_key[len - 4..])
+        } else {
+            "····".to_string()
+        };
+        Span::styled(masked, Style::default().fg(t::MUTED))
+    };
+
+    let format_color = t::format_color(&provider.api_format);
+
+    let label_style = Style::default().fg(t::MUTED);
+    let value_style = Style::default().fg(t::TEXT);
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  URL      ", label_style),
+            Span::styled(provider.base_url.as_str(), value_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Format   ", label_style),
+            Span::styled(provider.api_format.to_string(), Style::default().fg(format_color)),
+        ]),
+        Line::from(vec![
+            Span::styled("  API Key  ", label_style),
+            api_key_display,
+        ]),
+    ];
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(t::MUTED))
+        .title(title)
+        .title_style(Style::default().fg(t::MUTED));
+
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-fn key_hint<'a>(key: &'a str, desc: &'a str) -> Span<'a> {
-    Span::styled(
-        format!(" {key} {desc} "),
-        Style::default().fg(Color::White),
-    )
+fn draw_keybindings(f: &mut Frame, app: &App, area: Rect) {
+    let fallback_key_color = if app.config.fallback { t::SUCCESS } else { t::PRIMARY };
+    let mut spans: Vec<Span> = vec![Span::raw(" ")];
+    let keys: &[(&str, &str, Color)] = &[
+        ("s", "Switch", t::PRIMARY),
+        ("a", "Add", t::PRIMARY),
+        ("e", "Edit", t::PRIMARY),
+        ("d", "Delete", t::PRIMARY),
+        ("t", "Test", t::PRIMARY),
+        ("J/K", "Move", t::PRIMARY),
+        ("f", "Failover", fallback_key_color),
+        ("r", "Reload", t::PRIMARY),
+        ("q", "Quit", t::PRIMARY),
+    ];
+    for (i, (key, desc, color)) in keys.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(
+            format!("[{}]", key),
+            Style::default().fg(*color),
+        ));
+        spans.push(Span::styled(
+            format!(" {}", desc),
+            Style::default().fg(t::MUTED),
+        ));
+    }
+
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_form(f: &mut Frame, app: &App) {
@@ -212,21 +287,17 @@ fn draw_form(f: &mut Frame, app: &App) {
         " Edit Provider "
     };
 
-    let area = centered_rect(60, 60, f.area());
-    // Ensure minimum height
-    let area = if area.height < 12 {
-        centered_rect(60, 90, f.area())
-    } else {
-        area
-    };
+    // Fixed height: fields*2 + hint(3) + borders(2) + padding(2)
+    let dialog_height = (form.fields.len() as u16) * 2 + 3 + 2 + 2;
+    let area = centered_fixed(60, dialog_height, f.area());
 
     f.render_widget(Clear, area);
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(CYAN))
+        .border_style(Style::default().fg(t::PRIMARY))
         .title(title)
-        .title_style(Style::default().fg(CYAN).add_modifier(Modifier::BOLD))
+        .title_style(Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD))
         .padding(Padding::new(2, 2, 1, 1));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -235,8 +306,7 @@ fn draw_form(f: &mut Frame, app: &App) {
         .fields
         .iter()
         .map(|_| Constraint::Length(2))
-        .chain(std::iter::once(Constraint::Length(2))) // save/cancel hint
-        .chain(std::iter::once(Constraint::Min(0)))
+        .chain(std::iter::once(Constraint::Length(3)))
         .collect();
 
     let chunks = Layout::default()
@@ -247,23 +317,23 @@ fn draw_form(f: &mut Frame, app: &App) {
     for (i, field) in form.fields.iter().enumerate() {
         let is_focused = i == form.focused;
         let label_style = if is_focused {
-            Style::default().fg(CYAN).add_modifier(Modifier::BOLD)
+            Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD)
         } else if !field.editable {
-            Style::default().fg(DIM)
+            Style::default().fg(t::MUTED)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(t::TEXT)
         };
 
         let value_display = if field.is_toggle {
             let (left, right) = if field.value == "anthropic" {
                 (
-                    Span::styled(" anthropic ", Style::default().fg(CYAN).add_modifier(Modifier::REVERSED)),
-                    Span::styled(" openai ", Style::default().fg(DIM)),
+                    Span::styled(" anthropic ", Style::default().fg(t::format_color(&crate::config::ApiFormat::Anthropic)).add_modifier(Modifier::REVERSED)),
+                    Span::styled(" openai ", Style::default().fg(t::MUTED)),
                 )
             } else {
                 (
-                    Span::styled(" anthropic ", Style::default().fg(DIM)),
-                    Span::styled(" openai ", Style::default().fg(YELLOW).add_modifier(Modifier::REVERSED)),
+                    Span::styled(" anthropic ", Style::default().fg(t::MUTED)),
+                    Span::styled(" openai ", Style::default().fg(t::format_color(&crate::config::ApiFormat::OpenAI)).add_modifier(Modifier::REVERSED)),
                 )
             };
             Line::from(vec![
@@ -271,11 +341,6 @@ fn draw_form(f: &mut Frame, app: &App) {
                 left,
                 Span::raw(" "),
                 right,
-                if is_focused {
-                    Span::styled("  ←→/Space toggle", Style::default().fg(DIM))
-                } else {
-                    Span::raw("")
-                },
             ])
         } else {
             let display_val = if field.label == "API Key"
@@ -283,7 +348,6 @@ fn draw_form(f: &mut Frame, app: &App) {
                 && !field.value.starts_with('$')
                 && !is_focused
             {
-                // Mask API key when not focused
                 let len = field.value.len();
                 if len > 8 {
                     format!("{}...{}", &field.value[..4], &field.value[len - 4..])
@@ -295,14 +359,11 @@ fn draw_form(f: &mut Frame, app: &App) {
             };
 
             if is_focused && field.editable {
-                // Show cursor
                 let cursor_pos = field.cursor.min(display_val.len());
                 let before = display_val[..cursor_pos].to_string();
-                let cursor_char = display_val[cursor_pos..]
-                    .chars()
-                    .next()
-                    .unwrap_or(' ');
-                let after_start = cursor_pos + cursor_char.len_utf8().min(display_val.len() - cursor_pos);
+                let cursor_char = display_val[cursor_pos..].chars().next().unwrap_or(' ');
+                let after_start =
+                    cursor_pos + cursor_char.len_utf8().min(display_val.len() - cursor_pos);
                 let after = display_val[after_start..].to_string();
                 Line::from(vec![
                     Span::styled(format!("{:<10}", field.label), label_style),
@@ -315,7 +376,7 @@ fn draw_form(f: &mut Frame, app: &App) {
                 ])
             } else {
                 let val_style = if !field.editable {
-                    Style::default().fg(DIM)
+                    Style::default().fg(t::MUTED)
                 } else {
                     Style::default()
                 };
@@ -329,17 +390,24 @@ fn draw_form(f: &mut Frame, app: &App) {
         f.render_widget(Paragraph::new(value_display), chunks[i]);
     }
 
-    // Save/Cancel hint
     let hint_idx = form.fields.len();
     if hint_idx < chunks.len() {
-        let hints = Line::from(vec![
-            Span::raw("          "),
-            Span::styled("Enter", Style::default().fg(GREEN)),
-            Span::styled(" Save  ", Style::default().fg(DIM)),
-            Span::styled("Esc", Style::default().fg(YELLOW)),
-            Span::styled(" Cancel", Style::default().fg(DIM)),
-        ]);
-        f.render_widget(Paragraph::new(hints), chunks[hint_idx]);
+        let mut hint_lines = vec![
+            Line::from(vec![
+                Span::raw("          "),
+                Span::styled("Enter", Style::default().fg(t::SUCCESS)),
+                Span::styled(" Save  ", Style::default().fg(t::MUTED)),
+                Span::styled("Esc", Style::default().fg(t::WARNING)),
+                Span::styled(" Cancel", Style::default().fg(t::MUTED)),
+            ]),
+            Line::from(""),
+        ];
+        if let Some(err) = &form.error {
+            hint_lines.push(
+                Line::from(Span::styled(format!("✗ {}", err), Style::default().fg(t::ERROR))),
+            );
+        }
+        f.render_widget(Paragraph::new(hint_lines), chunks[hint_idx]);
     }
 }
 
@@ -357,24 +425,24 @@ fn draw_confirm(f: &mut Frame, app: &App) {
         Line::from(""),
         Line::from(vec![
             Span::raw("  Delete "),
-            Span::styled(id, Style::default().fg(RED).add_modifier(Modifier::BOLD)),
+            Span::styled(id, Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD)),
             Span::raw(" ?"),
         ]),
         Line::from(""),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled("y", Style::default().fg(GREEN)),
-            Span::styled(" Yes    ", Style::default().fg(DIM)),
-            Span::styled("n", Style::default().fg(YELLOW)),
-            Span::styled(" No", Style::default().fg(DIM)),
+            Span::styled("y", Style::default().fg(t::SUCCESS)),
+            Span::styled(" Yes    ", Style::default().fg(t::MUTED)),
+            Span::styled("n", Style::default().fg(t::WARNING)),
+            Span::styled(" No", Style::default().fg(t::MUTED)),
         ]),
     ];
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(RED))
+        .border_style(Style::default().fg(t::ERROR))
         .title(" Confirm ")
-        .title_style(Style::default().fg(RED).add_modifier(Modifier::BOLD));
+        .title_style(Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD));
 
     f.render_widget(Paragraph::new(text).block(block), area);
 }
@@ -397,6 +465,28 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+fn centered_fixed(percent_x: u16, height: u16, r: Rect) -> Rect {
+    let height = height.min(r.height);
+    let v_margin = (r.height - height) / 2;
+    let vert = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(v_margin),
+            Constraint::Length(height),
+            Constraint::Min(0),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vert[1])[1]
 }
 
 fn config_path_display() -> String {

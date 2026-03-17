@@ -1,4 +1,5 @@
 mod app;
+pub mod theme;
 mod ui;
 
 use std::io;
@@ -34,10 +35,7 @@ pub fn run_tui() -> Result<()> {
     let mut app = App::new()?;
     let mut server: Option<ServerHandle> = None;
 
-    // Auto-start proxy if there's a current provider configured
-    if !app.config.current.is_empty() && !app.config.providers.is_empty() {
-        start_server_background(&mut app, &mut server);
-    }
+    start_server_background(&mut app, &mut server);
 
     let result = run_loop(&mut terminal, &mut app, &mut server);
 
@@ -110,10 +108,10 @@ fn handle_key(
     app: &mut App,
     code: KeyCode,
     modifiers: KeyModifiers,
-    server: &mut Option<ServerHandle>,
+    _server: &mut Option<ServerHandle>,
 ) -> Result<()> {
     match &app.mode {
-        Mode::Normal => handle_normal_key(app, code, server),
+        Mode::Normal => handle_normal_key(app, code),
         Mode::Editing => handle_editing_key(app, code, modifiers),
         Mode::Confirm => handle_confirm_key(app, code),
         Mode::Message => {
@@ -125,11 +123,7 @@ fn handle_key(
     }
 }
 
-fn handle_normal_key(
-    app: &mut App,
-    code: KeyCode,
-    server: &mut Option<ServerHandle>,
-) -> Result<()> {
+fn handle_normal_key(app: &mut App, code: KeyCode) -> Result<()> {
     // Clear any status bar message on next key press
     if app.message.is_some() {
         app.message = None;
@@ -158,27 +152,15 @@ fn handle_normal_key(
         KeyCode::Char('t') => {
             test_selected(app);
         }
-        KeyCode::Char('p') => {
-            toggle_server(app, server);
-        }
+        KeyCode::Char('K') => { let _ = app.move_provider_up(); }
+        KeyCode::Char('J') => { let _ = app.move_provider_down(); }
+        KeyCode::Char('f') => { let _ = app.toggle_fallback(); }
         KeyCode::Char('r') => {
             let _ = app.reload_config();
         }
         _ => {}
     }
     Ok(())
-}
-
-fn toggle_server(app: &mut App, server: &mut Option<ServerHandle>) {
-    if server.is_some() {
-        // Stop the server
-        let handle = server.take().unwrap();
-        let _ = handle.shutdown_tx.send(true);
-        app.server_status = ServerStatus::Stopped;
-        app.set_message("Proxy stopped", MessageKind::Info);
-    } else {
-        start_server_background(app, server);
-    }
 }
 
 fn start_server_background(app: &mut App, server: &mut Option<ServerHandle>) {
@@ -240,12 +222,32 @@ fn handle_editing_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> 
                 }
             }
         }
+        KeyCode::Up | KeyCode::Char('k') if modifiers.contains(KeyModifiers::CONTROL) => {
+            let len = form.fields.len();
+            for offset in 1..len {
+                let prev = (form.focused + len - offset) % len;
+                if form.fields[prev].editable {
+                    form.focused = prev;
+                    break;
+                }
+            }
+        }
         KeyCode::Up => {
             let len = form.fields.len();
             for offset in 1..len {
                 let prev = (form.focused + len - offset) % len;
                 if form.fields[prev].editable {
                     form.focused = prev;
+                    break;
+                }
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') if modifiers.contains(KeyModifiers::CONTROL) => {
+            let len = form.fields.len();
+            for offset in 1..len {
+                let next = (form.focused + offset) % len;
+                if form.fields[next].editable {
+                    form.focused = next;
                     break;
                 }
             }
@@ -261,25 +263,28 @@ fn handle_editing_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> 
             }
         }
         _ => {
+            let ctrl = modifiers.contains(KeyModifiers::CONTROL);
             let field = &mut form.fields[form.focused];
             if field.is_toggle {
                 match code {
                     KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => {
                         field.toggle_value();
                     }
+                    KeyCode::Char('h') | KeyCode::Char('l') if ctrl => {
+                        field.toggle_value();
+                    }
                     _ => {}
                 }
             } else {
                 match code {
-                    KeyCode::Char(c) => {
-                        if !modifiers.contains(KeyModifiers::CONTROL) {
-                            field.insert(c);
-                        }
-                    }
+                    KeyCode::Char(c) if !ctrl => field.insert(c),
+                    KeyCode::Char('w') if ctrl => field.delete_word_back(),
                     KeyCode::Backspace => field.backspace(),
                     KeyCode::Delete => field.delete(),
                     KeyCode::Left => field.move_left(),
                     KeyCode::Right => field.move_right(),
+                    KeyCode::Char('h') if ctrl => field.move_left(),
+                    KeyCode::Char('l') if ctrl => field.move_right(),
                     KeyCode::Home => field.home(),
                     KeyCode::End => field.end(),
                     _ => {}

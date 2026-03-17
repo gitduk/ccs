@@ -1,6 +1,6 @@
 [package]
 name = "ccs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Claude Code Switch - Lightweight API proxy for routing Claude Code traffic"
 
@@ -35,3 +35,4 @@ dirs = "6"
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+

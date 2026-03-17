@@ -12,6 +12,8 @@ pub struct AppConfig {
     #[serde(default = "default_listen")]
     pub listen: String,
     pub providers: IndexMap<String, Provider>,
+    #[serde(default)]
+    pub fallback: bool,
 }
 
 fn default_listen() -> String {
@@ -88,8 +90,22 @@ pub fn load_config() -> Result<AppConfig> {
         return Ok(default_config());
     }
     let content = std::fs::read_to_string(&path)?;
-    let config: AppConfig = serde_json::from_str(&content)?;
+    let mut config: AppConfig = serde_json::from_str(&content)?;
+    ensure_default_provider(&mut config);
     Ok(config)
+}
+
+/// Ensure the built-in Anthropic provider is always present and pinned first.
+fn ensure_default_provider(config: &mut AppConfig) {
+    config.providers.entry("anthropic".to_string()).or_insert_with(|| Provider {
+        base_url: "https://api.anthropic.com".to_string(),
+        api_key: "$ANTHROPIC_API_KEY".to_string(),
+        api_format: ApiFormat::Anthropic,
+        model_map: HashMap::new(),
+    });
+    if let Some(idx) = config.providers.get_index_of("anthropic") {
+        config.providers.move_index(idx, 0);
+    }
 }
 
 /// Save config to file, creating parent directory if needed.
@@ -104,9 +120,20 @@ pub fn save_config(config: &AppConfig) -> Result<()> {
 }
 
 fn default_config() -> AppConfig {
+    let mut providers = IndexMap::new();
+    providers.insert(
+        "anthropic".to_string(),
+        Provider {
+            base_url: "https://api.anthropic.com".to_string(),
+            api_key: "$ANTHROPIC_API_KEY".to_string(),
+            api_format: ApiFormat::Anthropic,
+            model_map: HashMap::new(),
+        },
+    );
     AppConfig {
-        current: String::new(),
+        current: "anthropic".to_string(),
         listen: default_listen(),
-        providers: IndexMap::new(),
+        providers,
+        fallback: false,
     }
 }

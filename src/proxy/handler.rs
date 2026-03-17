@@ -58,60 +58,119 @@ pub async fn handle_messages(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    // Read config without hot-reload on every request
-    let provider = {
+    // Build the candidate provider list
+    let (pool, do_cycle) = {
         let config = state.config.read().await;
-        let (_id, provider) = config.current_provider()?;
-        provider.clone()
+        if config.fallback {
+            let current_idx = config.providers.get_index_of(&config.current).unwrap_or(0);
+            let is_current_anthropic = config.current == "anthropic";
+            let len = config.providers.len();
+            let list: Vec<crate::config::Provider> = (0..len)
+                .map(|i| (current_idx + i) % len)
+                .filter_map(|i| config.providers.get_index(i).map(|(k, v)| (k.clone(), v.clone())))
+                .filter(|(k, _)| k != "anthropic" || is_current_anthropic)
+                .map(|(_, v)| v)
+                .collect();
+            (list, true)
+        } else {
+            let (_, p) = config.current_provider()?;
+            (vec![p.clone()], false)
+        }
     };
-    let api_key = provider.resolve_api_key()?;
 
-    // Check if streaming from original request body
     let is_stream = serde_json::from_slice::<serde_json::Value>(&body)
         .ok()
         .and_then(|v| v.get("stream").and_then(|s| s.as_bool()))
         .unwrap_or(false);
 
-    // Determine if we need format conversion
-    let is_openai = provider.api_format == ApiFormat::OpenAI;
+    // Cycle infinitely; terminate when a full round of consecutive failures occurs
+    let round_size = pool.len();
+    let max_failures = round_size * 3;
+    let mut consecutive_failures = 0usize;
+    let mut last_status = None;
 
-    // Transform request body if needed
-    let upstream_body = if is_openai {
-        let request_json: serde_json::Value = serde_json::from_slice(&body)?;
-        let transformed = transform::anthropic_to_openai_request(&request_json, &provider)?;
-        Bytes::from(serde_json::to_vec(&transformed)?)
-    } else {
-        body
-    };
+    for provider in pool.iter().cycle() {
+        let api_key = match provider.resolve_api_key() {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::warn!("Skipping provider {}: {e}", provider.base_url);
+                consecutive_failures += 1;
+                if !do_cycle || consecutive_failures >= max_failures {
+                    break;
+                }
+                continue;
+            }
+        };
 
-    let response = forwarder::forward_request(
-        &state.http_client,
-        &provider,
-        &api_key,
-        upstream_body,
-        &headers,
-    )
-    .await?;
+        let is_openai = provider.api_format == ApiFormat::OpenAI;
+        let upstream_body = if is_openai {
+            let request_json: serde_json::Value = serde_json::from_slice(&body)?;
+            let transformed = transform::anthropic_to_openai_request(&request_json, provider)?;
+            Bytes::from(serde_json::to_vec(&transformed)?)
+        } else {
+            body.clone()
+        };
 
-    let status = response.status();
-
-    if !status.is_success() {
-        // Forward error response as-is
-        let error_body = response.bytes().await?;
-        tracing::warn!("Upstream returned {status}: {}", String::from_utf8_lossy(&error_body));
-        return Ok((
-            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-            [("content-type", "application/json")],
-            error_body,
+        let response = match forwarder::forward_request(
+            &state.http_client,
+            provider,
+            &api_key,
+            upstream_body,
+            &headers,
         )
-            .into_response());
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("Provider {} network error: {e}, trying next", provider.base_url);
+                consecutive_failures += 1;
+                if !do_cycle || consecutive_failures >= max_failures {
+                    break;
+                }
+                continue;
+            }
+        };
+
+        let status = response.status();
+
+        // 5xx or 429: try next provider
+        if status.as_u16() >= 500 || status.as_u16() == 429 {
+            tracing::warn!("Provider {} returned {status}, trying next", provider.base_url);
+            last_status = Some(status);
+            consecutive_failures += 1;
+            if !do_cycle || consecutive_failures >= max_failures {
+                break;
+            }
+            continue;
+        }
+
+        // 4xx: client error, forward as-is without retrying
+        if !status.is_success() {
+            let error_body = response.bytes().await?;
+            tracing::warn!("Upstream returned {status}: {}", String::from_utf8_lossy(&error_body));
+            return Ok((
+                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                [("content-type", "application/json")],
+                error_body,
+            )
+                .into_response());
+        }
+
+        // Success
+        return if is_stream {
+            handle_streaming_response(response, is_openai).await
+        } else {
+            handle_buffered_response(response, is_openai).await
+        };
     }
 
-    if is_stream {
-        handle_streaming_response(response, is_openai).await
-    } else {
-        handle_buffered_response(response, is_openai).await
-    }
+    let code = last_status.unwrap_or(StatusCode::BAD_GATEWAY);
+    Ok((
+        StatusCode::from_u16(code.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+        [("content-type", "application/json")],
+        Bytes::from(r#"{"error":"all providers failed"}"#),
+    )
+        .into_response())
 }
 
 /// Handle non-streaming response.
