@@ -66,11 +66,16 @@ fn run_loop(
     server: &mut Option<ServerHandle>,
     db_change_rx: Option<mpsc::Receiver<()>>,
 ) -> Result<()> {
+    // /proc reads are cheap but not free — throttle to every 8 frames (~2 s).
+    let mut proc_tick: u8 = 0;
     loop {
         // Check if server task has ended unexpectedly
         check_server_status(app, server);
-        // Check if background proxy process is still alive
-        check_bg_proxy_status(app);
+        // Check if background proxy process is still alive (throttled).
+        if proc_tick == 0 {
+            check_bg_proxy_status(app);
+        }
+        proc_tick = proc_tick.wrapping_add(1) % 8;
         // When background proxy is active, reload metrics whenever the DB file
         // changes (inotify-driven, not a timer).  Drain all pending events so
         // we reload at most once per frame even if many writes batched up.
@@ -109,19 +114,12 @@ fn run_loop(
 fn check_bg_proxy_status(app: &mut App) {
     if let Some(pid) = app.bg_proxy_pid {
         if !app::is_process_alive(pid) {
-            app.bg_proxy_pid = None;
-            if let Some(path) = app::pid_file_path() {
-                let _ = std::fs::remove_file(&path);
-            }
+            app.on_bg_proxy_died();
             app.set_message("Background proxy exited", MessageKind::Info);
         }
     }
 }
 
-/// Start an inotify watcher on the SQLite DB file (and its WAL file if
-/// present).  Returns a receiver that yields `()` whenever the DB is modified
-/// by an external process.  Returns `None` if the DB path is unavailable or
-/// the watcher fails to initialise (non-fatal; falls back to no live updates).
 /// Start an inotify watcher on the SQLite DB directory.
 /// Returns `(Receiver, Watcher)` — the caller must hold the Watcher alive
 /// for its Drop impl to keep the kernel watch descriptor open.

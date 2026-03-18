@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 
-use rusqlite;
 
 use ratatui::widgets::TableState;
 
@@ -230,14 +229,7 @@ impl App {
             table_state.select(Some(idx));
         }
 
-        let db_path = config.resolve_db_path();
-        let db = crate::db::open(&db_path).unwrap_or_else(|e| {
-            tracing::warn!("Failed to open DB at {db_path}: {e}");
-            Arc::new(Mutex::new(
-                rusqlite::Connection::open_in_memory()
-                    .expect("in-memory SQLite unavailable — system may be out of file descriptors"),
-            ))
-        });
+        let db = crate::db::open_with_fallback(&config.resolve_db_path());
 
         let metrics = {
             let conn = db.lock().unwrap();
@@ -549,8 +541,19 @@ impl App {
         if let Some(pid) = self.bg_proxy_pid.take() {
             kill_process(pid);
         }
+        self.remove_pid_file();
+    }
+
+    /// Called when the background proxy is found to have exited on its own.
+    /// Clears the in-memory PID and removes the PID file (no kill needed).
+    pub fn on_bg_proxy_died(&mut self) {
+        self.bg_proxy_pid = None;
+        self.remove_pid_file();
+    }
+
+    fn remove_pid_file(&self) {
         if let Some(path) = pid_file_path() {
-            let _ = std::fs::remove_file(&path);
+            remove_pid_file_at(&path);
         }
     }
 
@@ -595,10 +598,16 @@ pub fn load_bg_proxy_pid() -> Option<u32> {
     if is_process_alive(pid) {
         Some(pid)
     } else {
-        if let Err(e) = std::fs::remove_file(&path) {
-            tracing::warn!("Could not remove stale PID file {}: {e}", path.display());
-        }
+        remove_pid_file_at(&path);
         None
+    }
+}
+
+fn remove_pid_file_at(path: &std::path::Path) {
+    if let Err(e) = std::fs::remove_file(path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!("Could not remove PID file {}: {e}", path.display());
+        }
     }
 }
 

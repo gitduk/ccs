@@ -6,7 +6,6 @@ pub mod transform;
 use std::sync::Arc;
 
 use axum::Router;
-use rusqlite;
 use axum::routing::{get, post};
 use std::time::Duration;
 
@@ -47,13 +46,18 @@ pub fn build_router(state: SharedState) -> Router {
         .with_state(state)
 }
 
+fn build_http_client() -> Client {
+    Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(300))
+        .build()
+        .expect("Failed to build HTTP client")
+}
+
 /// Start the proxy server (CLI mode, shuts down on Ctrl+C / SIGTERM).
 pub async fn start_server(config: AppConfig) -> crate::error::Result<()> {
     let listen = config.listen.clone();
-    let db_path = config.resolve_db_path();
-    let db = crate::db::open(&db_path).unwrap_or_else(|_| {
-        Arc::new(std::sync::Mutex::new(rusqlite::Connection::open_in_memory().unwrap()))
-    });
+    let db = crate::db::open_with_fallback(&config.resolve_db_path());
     // Load persisted metrics so the in-memory counters continue from wherever
     // the previous session left off.  Without this, the first upsert would
     // overwrite the DB with counts starting from zero.
@@ -63,11 +67,7 @@ pub async fn start_server(config: AppConfig) -> crate::error::Result<()> {
     };
     let state = Arc::new(AppState {
         config: Arc::new(RwLock::new(config)),
-        http_client: Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(300))
-            .build()
-            .expect("Failed to build HTTP client"),
+        http_client: build_http_client(),
         metrics: Arc::new(std::sync::Mutex::new(initial_metrics)),
         db,
     });
@@ -94,11 +94,7 @@ pub async fn start_server_with_shutdown(
     let listen = shared_config.read().await.listen.clone();
     let state = Arc::new(AppState {
         config: shared_config,
-        http_client: Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(300))
-            .build()
-            .expect("Failed to build HTTP client"),
+        http_client: build_http_client(),
         metrics,
         db,
     });

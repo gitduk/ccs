@@ -323,7 +323,12 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let Ok(m) = app.metrics.lock() else { return };
-    let by_provider = m.by_provider.clone();
+    // Collect only what we'll render — avoids cloning the entire HashMap.
+    let provider_stats: Vec<crate::proxy::metrics::ProviderStats> = app
+        .provider_ids
+        .iter()
+        .map(|id| m.by_provider.get(id).cloned().unwrap_or_default())
+        .collect();
     let mut model_entries: Vec<(String, u64, u64)> = m
         .by_model
         .iter()
@@ -344,9 +349,8 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
         Line::from(Span::styled("Token Usage", Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD))),
         Line::from(""),
     ];
-    lines.extend(app.provider_ids.iter().enumerate().map(|(i, id)| {
+    lines.extend(app.provider_ids.iter().zip(provider_stats.iter()).enumerate().map(|(i, (id, s))| {
         let color = t::provider_color(i);
-        let s = by_provider.get(id).cloned().unwrap_or_default();
         Line::from(vec![
             Span::styled(
                 format!("{:<width$}", id, width = id_col_width),
@@ -479,20 +483,29 @@ fn api_key_display_len(key: &str) -> usize {
     }
 }
 
+/// Mask a raw API key for display: `abcd···wxyz` (long) or `····` (short).
+/// Returns the key unchanged if it is empty or starts with `$` (env-var ref).
+fn mask_api_key_str(key: &str) -> Option<String> {
+    if key.is_empty() || key.starts_with('$') {
+        return None;
+    }
+    let n = key.chars().count();
+    Some(if n > 8 {
+        let prefix: String = key.chars().take(4).collect();
+        let suffix: String = key.chars().skip(n - 4).collect();
+        format!("{prefix}···{suffix}")
+    } else {
+        "····".to_string()
+    })
+}
+
 fn masked_api_key(key: &str) -> Cell<'static> {
     if key.is_empty() {
         Cell::from(Span::styled("(not set)", Style::default().fg(t::MUTED)))
     } else if key.starts_with('$') {
         Cell::from(Span::styled(key.to_string(), Style::default().fg(t::WARNING)))
     } else {
-        let chars: Vec<char> = key.chars().collect();
-        let masked = if chars.len() > 8 {
-            let prefix: String = chars[..4].iter().collect();
-            let suffix: String = chars[chars.len() - 4..].iter().collect();
-            format!("{}···{}", prefix, suffix)
-        } else {
-            "····".to_string()
-        };
+        let masked = mask_api_key_str(key).unwrap_or_default();
         Cell::from(Span::styled(masked, Style::default().fg(t::MUTED)))
     }
 }
@@ -617,19 +630,8 @@ fn draw_form(f: &mut Frame, app: &App) {
                 right,
             ])
         } else {
-            let display_val = if field.label == "API Key"
-                && !field.value.is_empty()
-                && !field.value.starts_with('$')
-                && !is_focused
-            {
-                let chars: Vec<char> = field.value.chars().collect();
-                if chars.len() > 8 {
-                    let prefix: String = chars[..4].iter().collect();
-                    let suffix: String = chars[chars.len() - 4..].iter().collect();
-                    format!("{}...{}", prefix, suffix)
-                } else {
-                    "****".to_string()
-                }
+            let display_val = if field.label == "API Key" && !is_focused {
+                mask_api_key_str(&field.value).unwrap_or_else(|| field.value.clone())
             } else {
                 field.value.clone()
             };

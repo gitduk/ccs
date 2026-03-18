@@ -15,6 +15,18 @@ pub fn open(path: &str) -> Result<SharedDb> {
     Ok(Arc::new(Mutex::new(conn)))
 }
 
+/// Open the SQLite DB at `path`, falling back to an in-memory DB on failure.
+/// Logs a warning on disk-open failure so callers don't need to repeat this.
+pub fn open_with_fallback(path: &str) -> SharedDb {
+    open(path).unwrap_or_else(|e| {
+        tracing::warn!("Failed to open DB at {path}: {e}; using in-memory fallback");
+        Arc::new(Mutex::new(
+            Connection::open_in_memory()
+                .expect("in-memory SQLite unavailable — system may be out of file descriptors"),
+        ))
+    })
+}
+
 fn init_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS provider_stats (
@@ -38,7 +50,7 @@ pub fn load_metrics(conn: &Connection) -> TokenMetrics {
     if let Ok(mut stmt) = conn.prepare(
         "SELECT provider_id, input, output, requests, failures FROM provider_stats",
     ) {
-        let _ = stmt.query_map([], |row| {
+        match stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, u64>(1)?,
@@ -46,35 +58,39 @@ pub fn load_metrics(conn: &Connection) -> TokenMetrics {
                 row.get::<_, u64>(3)?,
                 row.get::<_, u64>(4)?,
             ))
-        })
-        .map(|rows| {
-            for row in rows.flatten() {
-                let s = metrics.by_provider.entry(row.0).or_default();
-                s.input = row.1;
-                s.output = row.2;
-                s.requests = row.3;
-                s.failures = row.4;
+        }) {
+            Ok(rows) => {
+                for row in rows.flatten() {
+                    let s = metrics.by_provider.entry(row.0).or_default();
+                    s.input = row.1;
+                    s.output = row.2;
+                    s.requests = row.3;
+                    s.failures = row.4;
+                }
             }
-        });
+            Err(e) => tracing::warn!("Failed to load provider stats: {e}"),
+        }
     }
 
     if let Ok(mut stmt) =
         conn.prepare("SELECT model_name, input, output FROM model_stats")
     {
-        let _ = stmt.query_map([], |row| {
+        match stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, u64>(1)?,
                 row.get::<_, u64>(2)?,
             ))
-        })
-        .map(|rows| {
-            for row in rows.flatten() {
-                let s = metrics.by_model.entry(row.0).or_default();
-                s.input = row.1;
-                s.output = row.2;
+        }) {
+            Ok(rows) => {
+                for row in rows.flatten() {
+                    let s = metrics.by_model.entry(row.0).or_default();
+                    s.input = row.1;
+                    s.output = row.2;
+                }
             }
-        });
+            Err(e) => tracing::warn!("Failed to load model stats: {e}"),
+        }
     }
 
     metrics
