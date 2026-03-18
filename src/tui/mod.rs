@@ -218,7 +218,13 @@ fn handle_normal_key(app: &mut App, code: KeyCode, server: &mut Option<ServerHan
     }
 
     match code {
-        KeyCode::Char('q') | KeyCode::Esc => app.confirm(ConfirmAction::Quit),
+        KeyCode::Char('q') | KeyCode::Esc => {
+            if app.bg_proxy_pid.is_some() {
+                app.should_quit = true;
+            } else {
+                app.confirm(ConfirmAction::Quit);
+            }
+        }
         KeyCode::Up | KeyCode::Char('k') => app.select_prev(),
         KeyCode::Down | KeyCode::Char('j') => app.select_next(),
         KeyCode::Char('s') => {
@@ -227,13 +233,13 @@ fn handle_normal_key(app: &mut App, code: KeyCode, server: &mut Option<ServerHan
         }
         KeyCode::Char('a') => app.start_add(),
         KeyCode::Char('e') => {
-            if app.selected_id().is_some() {
+            if app.selected_name().is_some() {
                 app.start_edit();
             }
         }
         KeyCode::Char('d') => {
-            if let Some(id) = app.selected_id().map(|s| s.to_string()) {
-                app.confirm(ConfirmAction::Delete(id));
+            if let Some(name) = app.selected_name().map(|s| s.to_string()) {
+                app.confirm(ConfirmAction::Delete(name));
             }
         }
         KeyCode::Char('t') => {
@@ -314,18 +320,18 @@ fn handle_editing_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers, ser
             app.mode = Mode::Normal;
         }
         KeyCode::Enter | KeyCode::Char('s') if code == KeyCode::Enter || modifiers.contains(KeyModifiers::CONTROL) => {
-            // For new providers the ID comes from the form's first field;
+            // For new providers the name comes from the form's first field;
             // for edits it's the currently selected provider.
-            let provider_id = if form.is_new {
-                let id = form.fields[0].value.trim().to_string();
-                if id.is_empty() { None } else { Some(id) }
+            let provider_name = if form.is_new {
+                let name = form.fields[0].value.trim().to_string();
+                if name.is_empty() { None } else { Some(name) }
             } else {
-                app.selected_id().map(|s| s.to_string())
+                app.selected_name().map(|s| s.to_string())
             };
             app.save_form()?;
             sync_proxy_config(app, server);
-            if let Some(id) = provider_id {
-                test_provider_by_id(app, &id);
+            if let Some(name) = provider_name {
+                test_provider_by_name(app, &name);
             }
         }
         KeyCode::Tab | KeyCode::Down => form.focus_next(),
@@ -381,33 +387,33 @@ fn handle_confirm_key(app: &mut App, code: KeyCode, server: &Option<ServerHandle
 }
 
 fn test_selected(app: &mut App) {
-    let Some(id) = app.selected_id().map(|s| s.to_string()) else {
+    let Some(name) = app.selected_name().map(|s| s.to_string()) else {
         return;
     };
-    test_provider_by_id(app, &id);
+    test_provider_by_name(app, &name);
 }
 
-fn test_provider_by_id(app: &mut App, id: &str) {
-    let Some(provider) = app.config.providers.get(id) else {
+fn test_provider_by_name(app: &mut App, name: &str) {
+    let Some(provider) = app.config.providers.get(name) else {
         return;
     };
     let provider = provider.clone();
     let tx = app.test_tx.clone();
-    let id_owned = id.to_string();
+    let name_owned = name.to_string();
 
-    app.pending_tests.insert(id_owned.clone());
-    app.set_message(format!("Testing {id}…"), MessageKind::Info);
+    app.pending_tests.insert(name_owned.clone());
+    app.set_message(format!("Testing {name}…"), MessageKind::Info);
 
     tokio::spawn(async move {
         let result = crate::test_provider::test_connectivity(&provider).await;
-        let _ = tx.send((id_owned, result));
+        let _ = tx.send((name_owned, result));
     });
 }
 
 fn start_background_tests(app: &mut App) {
-    let ids: Vec<String> = app.config.providers.keys().cloned().collect();
-    for id in ids {
-        test_provider_by_id(app, &id);
+    let names: Vec<String> = app.config.providers.keys().cloned().collect();
+    for name in names {
+        test_provider_by_name(app, &name);
     }
 }
 

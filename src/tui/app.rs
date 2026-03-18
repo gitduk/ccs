@@ -48,7 +48,7 @@ pub struct App {
     pub config: AppConfig,
     pub mode: Mode,
     pub table_state: TableState,
-    pub provider_ids: Vec<String>,
+    pub provider_names: Vec<String>,
     pub form: Option<ProviderForm>,
     pub message: Option<(String, MessageKind, std::time::Instant)>,
     pub confirm_action: Option<ConfirmAction>,
@@ -218,13 +218,13 @@ impl ProviderForm {
 impl App {
     pub fn new() -> Result<Self> {
         let config = config::load_config()?;
-        let provider_ids: Vec<String> = config.providers.keys().cloned().collect();
+        let provider_names: Vec<String> = config.providers.keys().cloned().collect();
 
         let mut table_state = TableState::default();
-        if !provider_ids.is_empty() {
-            let idx = provider_ids
+        if !provider_names.is_empty() {
+            let idx = provider_names
                 .iter()
-                .position(|id| id == &config.current)
+                .position(|name| name == &config.current)
                 .unwrap_or(0);
             table_state.select(Some(idx));
         }
@@ -242,7 +242,7 @@ impl App {
             config,
             mode: Mode::Normal,
             table_state,
-            provider_ids,
+            provider_names,
             form: None,
             message: None,
             confirm_action: None,
@@ -259,30 +259,30 @@ impl App {
     }
 
     pub fn refresh_ids(&mut self) {
-        self.provider_ids = self.config.providers.keys().cloned().collect();
+        self.provider_names = self.config.providers.keys().cloned().collect();
     }
 
-    pub fn selected_id(&self) -> Option<&str> {
+    pub fn selected_name(&self) -> Option<&str> {
         self.table_state
             .selected()
-            .and_then(|i| self.provider_ids.get(i))
+            .and_then(|i| self.provider_names.get(i))
             .map(|s| s.as_str())
     }
 
     pub fn select_next(&mut self) {
-        if self.provider_ids.is_empty() {
+        if self.provider_names.is_empty() {
             return;
         }
         let i = self
             .table_state
             .selected()
-            .map(|i| (i + 1) % self.provider_ids.len())
+            .map(|i| (i + 1) % self.provider_names.len())
             .unwrap_or(0);
         self.table_state.select(Some(i));
     }
 
     pub fn select_prev(&mut self) {
-        if self.provider_ids.is_empty() {
+        if self.provider_names.is_empty() {
             return;
         }
         let i = self
@@ -290,7 +290,7 @@ impl App {
             .selected()
             .map(|i| {
                 if i == 0 {
-                    self.provider_ids.len() - 1
+                    self.provider_names.len() - 1
                 } else {
                     i - 1
                 }
@@ -300,8 +300,8 @@ impl App {
     }
 
     pub fn switch_to_selected(&mut self) -> Result<()> {
-        if let Some(id) = self.selected_id().map(|s| s.to_string()) {
-            self.config.current = id.clone();
+        if let Some(name) = self.selected_name().map(|s| s.to_string()) {
+            self.config.current = name.clone();
             config::save_config(&self.config)?;
         }
         Ok(())
@@ -311,7 +311,7 @@ impl App {
         self.form = Some(ProviderForm {
             is_new: true,
             fields: vec![
-                FormField::text("ID", ""),
+                FormField::text("Name", ""),
                 FormField::text("Base URL", ""),
                 FormField::text("API Key", ""),
                 FormField::toggle("Format", "anthropic"),
@@ -323,20 +323,20 @@ impl App {
     }
 
     pub fn start_edit(&mut self) {
-        let Some(id) = self.selected_id() else {
+        let Some(name) = self.selected_name() else {
             return;
         };
-        let Some(provider) = self.config.providers.get(id) else {
+        let Some(provider) = self.config.providers.get(name) else {
             return;
         };
 
-        let mut id_field = FormField::text("ID", id);
-        id_field.editable = false;
+        let mut name_field = FormField::text("Name", name);
+        name_field.editable = false;
 
         self.form = Some(ProviderForm {
             is_new: false,
             fields: vec![
-                id_field,
+                name_field,
                 FormField::text("Base URL", &provider.base_url),
                 FormField::text("API Key", &provider.api_key),
                 FormField::toggle("Format", &provider.api_format.to_string()),
@@ -352,20 +352,20 @@ impl App {
             return Ok(());
         };
 
-        let id = form.fields[0].value.trim().to_string();
+        let name = form.fields[0].value.trim().to_string();
         let base_url = form.fields[1].value.trim().trim_end_matches('/').to_string();
         let api_key = form.fields[2].value.trim().to_string();
         let format_str = form.fields[3].value.trim().to_string();
         let is_new = form.is_new;
 
-        let validation_error = if id.is_empty() {
-            Some("ID cannot be empty".to_string())
+        let validation_error = if name.is_empty() {
+            Some("Name cannot be empty".to_string())
         } else if base_url.is_empty() {
             Some("Base URL cannot be empty".to_string())
         } else if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
             Some("Base URL must start with http:// or https://".to_string())
-        } else if is_new && self.config.providers.contains_key(&id) {
-            Some(format!("Provider '{id}' already exists"))
+        } else if is_new && self.config.providers.contains_key(&name) {
+            Some(format!("Provider '{name}' already exists"))
         } else {
             None
         };
@@ -385,19 +385,19 @@ impl App {
             api_key,
             api_format,
             // For new providers get() returns None → unwrap_or_default() → empty map.
-            model_map: self.config.providers.get(&id).map(|p| p.model_map.clone()).unwrap_or_default(),
+            model_map: self.config.providers.get(&name).map(|p| p.model_map.clone()).unwrap_or_default(),
         };
 
         let is_first = self.config.providers.is_empty();
-        self.config.providers.insert(id.clone(), provider);
+        self.config.providers.insert(name.clone(), provider);
         if is_first {
-            self.config.current = id.clone();
+            self.config.current = name.clone();
         }
 
         config::save_config(&self.config)?;
         self.refresh_ids();
         if is_new {
-            if let Some(idx) = self.provider_ids.iter().position(|s| s == &id) {
+            if let Some(idx) = self.provider_names.iter().position(|s| s == &name) {
                 self.table_state.select(Some(idx));
             }
         }
@@ -434,8 +434,8 @@ impl App {
             Some(ConfirmAction::Quit) => {
                 self.should_quit = true;
             }
-            Some(ConfirmAction::Delete(id)) => {
-                self.do_delete(&id)?;
+            Some(ConfirmAction::Delete(name)) => {
+                self.do_delete(&name)?;
             }
             None => {}
         }
@@ -443,27 +443,27 @@ impl App {
         Ok(())
     }
 
-    fn do_delete(&mut self, id: &str) -> Result<()> {
+    fn do_delete(&mut self, name: &str) -> Result<()> {
         if let Ok(conn) = self.db.lock() {
-            let _ = crate::db::delete_provider(&conn, id);
+            let _ = crate::db::delete_provider(&conn, name);
         }
         if let Ok(mut m) = self.metrics.lock() {
-            m.by_provider.remove(id);
+            m.by_provider.remove(name);
         }
-        self.config.providers.shift_remove(id);
-        if self.config.current == id {
+        self.config.providers.shift_remove(name);
+        if self.config.current == name {
             self.config.current = self.config.providers.keys().next().cloned().unwrap_or_default();
         }
         config::save_config(&self.config)?;
         self.refresh_ids();
         if let Some(selected) = self.table_state.selected() {
-            if selected >= self.provider_ids.len() && !self.provider_ids.is_empty() {
-                self.table_state.select(Some(self.provider_ids.len() - 1));
-            } else if self.provider_ids.is_empty() {
+            if selected >= self.provider_names.len() && !self.provider_names.is_empty() {
+                self.table_state.select(Some(self.provider_names.len() - 1));
+            } else if self.provider_names.is_empty() {
                 self.table_state.select(None);
             }
         }
-        self.set_message(format!("Deleted '{id}'"), MessageKind::Success);
+        self.set_message(format!("Deleted '{name}'"), MessageKind::Success);
         Ok(())
     }
 
@@ -492,7 +492,7 @@ impl App {
 
     pub fn move_provider_down(&mut self) -> Result<()> {
         let Some(idx) = self.table_state.selected() else { return Ok(()); };
-        if idx + 1 >= self.provider_ids.len() { return Ok(()); }
+        if idx + 1 >= self.provider_names.len() { return Ok(()); }
         self.config.providers.move_index(idx, idx + 1);
         self.refresh_ids();
         self.table_state.select(Some(idx + 1));
@@ -508,9 +508,9 @@ impl App {
 
     /// Drain completed background test results into test_results.
     pub fn drain_test_results(&mut self) {
-        while let Ok((id, result)) = self.test_rx.try_recv() {
-            self.pending_tests.remove(&id);
-            self.test_results.insert(id, result);
+        while let Ok((name, result)) = self.test_rx.try_recv() {
+            self.pending_tests.remove(&name);
+            self.test_results.insert(name, result);
         }
     }
 
@@ -565,9 +565,9 @@ impl App {
                 self.refresh_ids();
 
                 // Reselect current provider if it exists
-                if let Some(idx) = self.provider_ids.iter().position(|id| id == &self.config.current) {
+                if let Some(idx) = self.provider_names.iter().position(|name| name == &self.config.current) {
                     self.table_state.select(Some(idx));
-                } else if !self.provider_ids.is_empty() {
+                } else if !self.provider_names.is_empty() {
                     self.table_state.select(Some(0));
                 } else {
                     self.table_state.select(None);

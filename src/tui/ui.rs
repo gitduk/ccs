@@ -1,7 +1,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Clear, Padding, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Padding, Paragraph, Row, Table, Wrap};
 use ratatui::Frame;
 
 use super::app::{App, ConfirmAction, MessageKind, Mode};
@@ -70,10 +70,10 @@ fn draw_title_bar(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
-    let table_height = (app.provider_ids.len() as u16 + 2).max(3).min(area.height * 2 / 3);
+    let table_height = (app.provider_names.len() as u16 + 2).max(3).min(area.height * 2 / 3);
     let detail_height = 3u16;
     // stats: blank + title + N provider rows + bottom border
-    let n_providers = app.provider_ids.len() as u16;
+    let n_providers = app.provider_names.len() as u16;
     let stats_min_height = 3 + n_providers;
     // model: blank + title + N model rows + bottom border
     let n_models = app.metrics.lock().map(|m| m.by_model.len() as u16).unwrap_or(0);
@@ -105,7 +105,7 @@ fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
-    if app.provider_ids.is_empty() {
+    if app.provider_names.is_empty() {
         let empty = Paragraph::new(vec![
             Line::from(""),
             Line::from(Span::styled(
@@ -134,9 +134,12 @@ fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
 
     let url_col = col_width("Base URL", app.config.providers.values().map(|p| p.base_url.len()));
     let key_col = col_width("API Key",  app.config.providers.values().map(|p| api_key_display_len(&p.api_key)));
+    // Name col = longest name + 2 for the " ◀" indicator + 4 gap
+    let max_name_len = app.provider_names.iter().map(|name| name.len()).max().unwrap_or(0).max("Name".len());
+    let name_col = (max_name_len + 2 + 4) as u16;
 
     let header = Row::new(vec![
-        Cell::from("ID").style(Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD)),
+        Cell::from("Name").style(Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD)),
         Cell::from("Format").style(Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD)),
         Cell::from("Base URL").style(Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD)),
         Cell::from("API Key").style(Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD)),
@@ -146,12 +149,12 @@ fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
     let selected = app.table_state.selected();
 
     let rows: Vec<Row> = app
-        .provider_ids
+        .provider_names
         .iter()
         .enumerate()
-        .map(|(i, id)| {
-            let provider = &app.config.providers[id];
-            let is_current = id == &app.config.current;
+        .map(|(i, name)| {
+            let provider = &app.config.providers[name];
+            let is_current = name == &app.config.current;
             let is_selected = selected == Some(i);
 
             // Cursor triangle shown only on the selected row.
@@ -160,21 +163,23 @@ fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 ("  ", Style::default())
             };
-            // Current provider ID is green+bold regardless of cursor position.
-            let id_style = if is_current {
+            // Current provider name is green+bold regardless of cursor position.
+            let name_style = if is_current {
                 Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(t::TEXT)
             };
-            let id_cell = Cell::from(Line::from(vec![
-                Span::styled(id.as_str(), id_style),
+            // Pad name to max_name_len so the cursor indicator stays in a fixed column.
+            let padded_name = format!("{:<width$}", name.as_str(), width = max_name_len);
+            let name_cell = Cell::from(Line::from(vec![
+                Span::styled(padded_name, name_style),
                 Span::styled(indicator, indicator_style),
             ]));
 
             let api_key_cell = masked_api_key(&provider.api_key);
 
             Row::new(vec![
-                id_cell,
+                name_cell,
                 Cell::from(Span::styled(provider.api_format.to_string(), Style::default().fg(t::MUTED))),
                 Cell::from(Span::styled(provider.base_url.as_str(), Style::default().fg(t::MUTED))),
                 api_key_cell,
@@ -185,7 +190,7 @@ fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
     let table = Table::new(
         rows,
         [
-            Constraint::Length(14),
+            Constraint::Length(name_col),
             Constraint::Length(12),
             Constraint::Length(url_col),
             Constraint::Length(key_col),
@@ -233,18 +238,18 @@ fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
     let label = Style::default().fg(t::MUTED);
     let title_line = Line::from(Span::styled("Info", Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD)));
 
-    let Some(id) = app
+    let Some(name) = app
         .table_state
         .selected()
-        .and_then(|i| app.provider_ids.get(i))
+        .and_then(|i| app.provider_names.get(i))
     else {
         f.render_widget(Paragraph::new(vec![Line::from(""), title_line]).block(block), area);
         return;
     };
 
     let mut lines = vec![Line::from(""), title_line];
-    if app.pending_tests.contains(id.as_str()) {
-        let prev = app.test_results.get(id.as_str());
+    if app.pending_tests.contains(name.as_str()) {
+        let prev = app.test_results.get(name.as_str());
         let latency_str = prev.map(|r| fmt_latency(r.latency_ms)).unwrap_or_else(|| "—".to_string());
         let models_str = prev.and_then(|r| r.model_count).map(|n| format!("{n} models")).unwrap_or_else(|| "—".to_string());
         lines.push(Line::from(vec![
@@ -255,7 +260,7 @@ fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("   Models ", label),
             Span::styled(models_str, Style::default().fg(t::MUTED)),
         ]));
-    } else if let Some(r) = app.test_results.get(id.as_str()) {
+    } else if let Some(r) = app.test_results.get(name.as_str()) {
         let (status_str, status_style) = match &r.status {
             TestStatus::Ok => ("✓ OK".to_string(), Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD)),
             TestStatus::AuthFailed => ("✗ Auth failed".to_string(), Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD)),
@@ -286,27 +291,39 @@ fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_keybindings(f: &mut Frame, app: &App, area: Rect) {
     let bg_label = if app.bg_proxy_pid.is_some() { "BgStop" } else { "BgProxy" };
-    let keys: &[(&str, &str, Color)] = &[
-        ("s", "Switch",   t::SUCCESS),
-        ("a", "Add",      t::SUCCESS),
-        ("e", "Edit",     t::SUCCESS),
-        ("f", "Fallback", t::SUCCESS),
-        ("c", "Clear",    t::SUCCESS),
-        ("q", "Quit",     t::SUCCESS),
+    // (key, desc, key_color, desc_color)
+    let all_keys: &[(&str, &str, Color, Color)] = &[
+        ("s", "Switch",   t::SUCCESS, t::MUTED),
+        ("a", "Add",      t::SUCCESS, t::MUTED),
+        ("e", "Edit",     t::SUCCESS, t::MUTED),
+        ("f", "Fallback", t::SUCCESS, t::MUTED),
+        ("c", "Clear",    t::SUCCESS, t::MUTED),
+        ("q", "Quit",     t::SUCCESS, t::MUTED),
+        ("S", bg_label,   t::SUCCESS, t::MUTED),
+        ("h", "Help",     t::MUTED,   t::MUTED),
     ];
-    let bg_key = ("S", bg_label, t::SUCCESS);
+
+    let max_width = area.width as usize;
     let mut spans: Vec<Span> = vec![Span::raw(" ")];
-    for (i, (key, desc, color)) in keys.iter().enumerate() {
-        if i > 0 { spans.push(Span::raw("  ")); }
-        spans.push(Span::styled(format!("[{}]", key), Style::default().fg(*color)));
-        spans.push(Span::styled(format!(" {}", desc), Style::default().fg(t::MUTED)));
+    let mut used = 1usize;
+    let mut first = true;
+
+    for (key, desc, key_color, desc_color) in all_keys.iter() {
+        let sep = if first { 0 } else { 2 };
+        // "[k]" (3) + " " (1) + desc
+        let item_len = sep + 3 + 1 + desc.len();
+        if used + item_len > max_width {
+            break;
+        }
+        if !first {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(format!("[{}]", key), Style::default().fg(*key_color)));
+        spans.push(Span::styled(format!(" {}", desc), Style::default().fg(*desc_color)));
+        used += item_len;
+        first = false;
     }
-    spans.push(Span::raw("  "));
-    spans.push(Span::styled(format!("[{}]", bg_key.0), Style::default().fg(bg_key.2)));
-    spans.push(Span::styled(format!(" {}", bg_key.1), Style::default().fg(t::MUTED)));
-    spans.push(Span::raw("  "));
-    spans.push(Span::styled("[h]", Style::default().fg(t::MUTED)));
-    spans.push(Span::styled(" Help", Style::default().fg(t::MUTED)));
+
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -324,12 +341,12 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let Ok(m) = app.metrics.lock() else { return };
-    // Collect (id, stats) pairs, then sort by failure rate ascending so the
+    // Collect (name, stats) pairs, then sort by failure rate ascending so the
     // most reliable providers appear at the top.
     let mut provider_rows: Vec<(&str, crate::proxy::metrics::ProviderStats)> = app
-        .provider_ids
+        .provider_names
         .iter()
-        .map(|id| (id.as_str(), m.by_provider.get(id).cloned().unwrap_or_default()))
+        .map(|name| (name.as_str(), m.by_provider.get(name).cloned().unwrap_or_default()))
         .collect();
     let mut model_entries: Vec<(String, u64, u64)> = m
         .by_model
@@ -349,7 +366,7 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
     model_entries.sort_by(|a, b| (b.1 + b.2).cmp(&(a.1 + a.2)));
 
     let muted = Style::default().fg(t::MUTED);
-    let id_col_width = app.provider_ids.iter().map(|s| s.len()).max().unwrap_or(8).max(8);
+    let id_col_width = app.provider_names.iter().map(|s| s.len()).max().unwrap_or(8).max(8);
 
     let dash_line = Line::from(Span::styled("╌".repeat(inner.width as usize), Style::default().fg(t::MUTED)));
 
@@ -359,11 +376,11 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
         Line::from(Span::styled("Token Usage", Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD))),
         Line::from(""),
     ];
-    lines.extend(provider_rows.iter().map(|(id, s)| {
-        let color = t::provider_color(id);
+    lines.extend(provider_rows.iter().map(|(name, s)| {
+        let color = t::provider_color(name);
         Line::from(vec![
             Span::styled(
-                format!("{:<width$}", id, width = id_col_width),
+                format!("{:<width$}", name, width = id_col_width),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
             Span::styled("  In ",  muted),
@@ -716,21 +733,11 @@ fn draw_confirm(f: &mut Frame, app: &App) {
             Span::styled("Clear all usage data", Style::default().fg(t::ERROR)),
             Span::raw(" ?"),
         ]),
-        Some(ConfirmAction::Quit) => {
-            if app.bg_proxy_pid.is_some() {
-                Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled("Quit TUI", Style::default().fg(t::WARNING)),
-                    Span::styled("  (background proxy keeps running)", Style::default().fg(t::SUCCESS)),
-                ])
-            } else {
-                Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled("Quit", Style::default().fg(t::ERROR)),
-                    Span::raw(" ?"),
-                ])
-            }
-        }
+        Some(ConfirmAction::Quit) => Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Quit", Style::default().fg(t::ERROR)),
+            Span::raw(" ?"),
+        ]),
         None => Line::from(""),
     };
 
@@ -751,9 +758,10 @@ fn draw_confirm(f: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(t::ERROR))
         .title(" Confirm ")
-        .title_style(Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD));
+        .title_style(Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD))
+        .padding(Padding::horizontal(1));
 
-    f.render_widget(Paragraph::new(text).block(block), area);
+    f.render_widget(Paragraph::new(text).block(block).wrap(Wrap { trim: false }), area);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
