@@ -151,13 +151,18 @@ impl FormField {
         let mut pos = self.cursor;
         // Skip trailing spaces (step back by char boundary)
         while pos > 0 {
-            let c = self.value[..pos].chars().next_back().unwrap();
+            // SAFETY: pos is always maintained as a valid UTF-8 char boundary
+            // by insert/backspace/move_left; next_back() on a non-empty slice
+            // is always Some, but we use expect for a clear panic message.
+            let c = self.value[..pos].chars().next_back()
+                .expect("pos is a valid UTF-8 char boundary");
             if c != ' ' { break; }
             pos -= c.len_utf8();
         }
         // Delete until next space
         while pos > 0 {
-            let c = self.value[..pos].chars().next_back().unwrap();
+            let c = self.value[..pos].chars().next_back()
+                .expect("pos is a valid UTF-8 char boundary");
             if c == ' ' { break; }
             pos -= c.len_utf8();
         }
@@ -228,7 +233,10 @@ impl App {
         let db_path = config.resolve_db_path();
         let db = crate::db::open(&db_path).unwrap_or_else(|e| {
             tracing::warn!("Failed to open DB at {db_path}: {e}");
-            Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap()))
+            Arc::new(Mutex::new(
+                rusqlite::Connection::open_in_memory()
+                    .expect("in-memory SQLite unavailable — system may be out of file descriptors"),
+            ))
         });
 
         let metrics = {
@@ -413,12 +421,16 @@ impl App {
     }
 
     pub fn clear_metrics(&mut self) {
-        if let Ok(mut m) = self.metrics.lock() {
-            *m = TokenMetrics::new();
-        }
-        if let Ok(conn) = self.db.lock() {
-            let _ = crate::db::clear_all(&conn);
-        }
+        // Acquire both locks together so the DB and in-memory state are cleared
+        // atomically from the perspective of any concurrent reader: no other
+        // thread holds both locks simultaneously, so lock ordering (db first,
+        // then metrics) is deadlock-free.
+        let Ok(conn) = self.db.lock() else { return };
+        let Ok(mut m) = self.metrics.lock() else { return };
+        let _ = crate::db::clear_all(&conn);
+        *m = TokenMetrics::new();
+        drop(conn);
+        drop(m);
         self.set_message("Usage data cleared", MessageKind::Success);
     }
 
@@ -583,14 +595,29 @@ pub fn load_bg_proxy_pid() -> Option<u32> {
     if is_process_alive(pid) {
         Some(pid)
     } else {
-        let _ = std::fs::remove_file(&path);
+        if let Err(e) = std::fs::remove_file(&path) {
+            tracing::warn!("Could not remove stale PID file {}: {e}", path.display());
+        }
         None
     }
 }
 
-/// Check whether a process with the given PID is alive (Linux: /proc/<pid>).
+/// Check whether a process with the given PID is alive AND is a `ccs` process.
+///
+/// We verify the comm name to guard against PID reuse: the kernel recycles
+/// PIDs after a process exits, so a bare `/proc/<pid>` existence check can
+/// silently point at an unrelated process that happened to be assigned the
+/// same PID.  Reading `/proc/<pid>/comm` (max 15 chars, no symlink) is cheap
+/// and avoids sending SIGTERM to the wrong process.
 pub fn is_process_alive(pid: u32) -> bool {
-    std::fs::metadata(format!("/proc/{pid}")).is_ok()
+    // First, confirm the process entry still exists.
+    if std::fs::metadata(format!("/proc/{pid}")).is_err() {
+        return false;
+    }
+    // Then verify it is a `ccs` process (comm is truncated to 15 chars).
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .map(|comm| comm.trim().starts_with("ccs"))
+        .unwrap_or(false)
 }
 
 /// Send SIGTERM to a process (uses system `kill` command to avoid libc dep).

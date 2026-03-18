@@ -39,8 +39,8 @@ pub fn run_tui() -> Result<()> {
     let mut server: Option<ServerHandle> = None;
 
     // Watch the DB file for cross-process writes (background proxy mode).
-    // The channel carries a unit value; we only care that *something* changed.
-    let db_change_rx = start_db_watcher(&app);
+    // Hold `_watcher` for its Drop impl to stay alive for the TUI lifetime.
+    let (db_change_rx, _watcher) = start_db_watcher(&app).unzip();
 
     start_server_background(&mut app, &mut server);
     start_background_tests(&mut app);
@@ -122,7 +122,11 @@ fn check_bg_proxy_status(app: &mut App) {
 /// present).  Returns a receiver that yields `()` whenever the DB is modified
 /// by an external process.  Returns `None` if the DB path is unavailable or
 /// the watcher fails to initialise (non-fatal; falls back to no live updates).
-fn start_db_watcher(app: &App) -> Option<mpsc::Receiver<()>> {
+/// Start an inotify watcher on the SQLite DB directory.
+/// Returns `(Receiver, Watcher)` — the caller must hold the Watcher alive
+/// for its Drop impl to keep the kernel watch descriptor open.
+/// Returns `None` if the DB path is unavailable or watcher init fails (non-fatal).
+fn start_db_watcher(app: &App) -> Option<(mpsc::Receiver<()>, notify::RecommendedWatcher)> {
     use notify::{EventKind, RecursiveMode, Watcher, recommended_watcher};
     use notify::event::ModifyKind;
 
@@ -159,11 +163,7 @@ fn start_db_watcher(app: &App) -> Option<mpsc::Receiver<()>> {
 
     watcher.watch(&watch_dir, RecursiveMode::NonRecursive).ok()?;
 
-    // Leak the watcher so it lives for the duration of the TUI session.
-    // It will be dropped when the process exits.
-    std::mem::forget(watcher);
-
-    Some(event_rx)
+    Some((event_rx, watcher))
 }
 
 fn reload_metrics_from_db(app: &mut App) {
@@ -433,8 +433,11 @@ fn toggle_bg_proxy(app: &mut App, server: &mut Option<ServerHandle>) {
 
         // Brief blocking sleep to let the OS release the port before the new
         // process tries to bind it.  200 ms is imperceptible to the user and
-        // well within the 250 ms poll interval.
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        // well within the 250 ms poll interval.  block_in_place tells tokio to
+        // migrate pending tasks off this worker thread while we block.
+        tokio::task::block_in_place(|| {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        });
 
         match app.spawn_bg_proxy() {
             Ok(()) => app.set_message(
