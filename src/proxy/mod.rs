@@ -6,6 +6,7 @@ pub mod transform;
 use std::sync::Arc;
 
 use axum::Router;
+use rusqlite;
 use axum::routing::{get, post};
 use std::time::Duration;
 
@@ -14,12 +15,14 @@ use tokio::sync::RwLock;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::config::AppConfig;
+use crate::db::SharedDb;
 use metrics::SharedMetrics;
 
 pub struct AppState {
     pub config: Arc<RwLock<AppConfig>>,
     pub http_client: Client,
     pub metrics: SharedMetrics,
+    pub db: SharedDb,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -47,6 +50,10 @@ pub fn build_router(state: SharedState) -> Router {
 /// Start the proxy server (CLI mode, shuts down on Ctrl+C / SIGTERM).
 pub async fn start_server(config: AppConfig) -> crate::error::Result<()> {
     let listen = config.listen.clone();
+    let db_path = config.resolve_db_path();
+    let db = crate::db::open(&db_path).unwrap_or_else(|_| {
+        Arc::new(std::sync::Mutex::new(rusqlite::Connection::open_in_memory().unwrap()))
+    });
     let state = Arc::new(AppState {
         config: Arc::new(RwLock::new(config)),
         http_client: Client::builder()
@@ -55,6 +62,7 @@ pub async fn start_server(config: AppConfig) -> crate::error::Result<()> {
             .build()
             .expect("Failed to build HTTP client"),
         metrics: Arc::new(std::sync::Mutex::new(metrics::TokenMetrics::new())),
+        db,
     });
     let app = build_router(state);
 
@@ -74,6 +82,7 @@ pub async fn start_server_with_shutdown(
     shared_config: Arc<RwLock<AppConfig>>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     metrics: SharedMetrics,
+    db: SharedDb,
 ) -> crate::error::Result<()> {
     let listen = shared_config.read().await.listen.clone();
     let state = Arc::new(AppState {
@@ -84,6 +93,7 @@ pub async fn start_server_with_shutdown(
             .build()
             .expect("Failed to build HTTP client"),
         metrics,
+        db,
     });
     let app = build_router(state);
 

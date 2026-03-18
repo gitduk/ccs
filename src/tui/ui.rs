@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Padding, Paragraph, Row, Table};
 use ratatui::Frame;
 
-use super::app::{App, MessageKind, Mode};
+use super::app::{App, ConfirmAction, MessageKind, Mode};
 use crate::test_provider::TestStatus;
 use super::theme::{self as t};
 
@@ -32,21 +32,23 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 fn draw_title_bar(f: &mut Frame, app: &App, area: Rect) {
     let fallback_label = if app.config.fallback { "Fallback on  " } else { "Fallback off " };
-    let title_left = " CCS  Claude Code Switch";
+    let listen_label = format!("{}  ", app.config.listen);
     let version = format!("  v{}", env!("CARGO_PKG_VERSION"));
+    let title_left = " CCS  Claude Code Switch";
     let left_len = title_left.len() + version.len();
-    let right_len = fallback_label.len();
+    let right_len = listen_label.len() + fallback_label.len();
     let gap = (area.width as usize).saturating_sub(left_len + right_len);
 
     let spans: Vec<Span> = vec![
-        Span::styled(" CCS ", Style::default().fg(Color::Black).bg(t::PRIMARY)),
+        Span::styled(" CCS ", Style::default().fg(Color::Black).bg(t::SUCCESS)),
         Span::raw(" "),
         Span::styled(
-            "Claude Code Switch",
-            Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD),
+            "Claude Code Switcher",
+            Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD),
         ),
         Span::styled(version, Style::default().fg(t::MUTED)),
         Span::raw(" ".repeat(gap)),
+        Span::styled(listen_label, Style::default().fg(t::MUTED)),
         Span::styled(
             fallback_label,
             if app.config.fallback {
@@ -62,22 +64,26 @@ fn draw_title_bar(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
     let table_height = (app.provider_ids.len() as u16 + 2).max(3).min(area.height * 2 / 3);
-    // Detail panel: no top/bottom borders, 1 blank + 1 title + 1 info line = 3 lines fixed height
     let detail_height = 3u16;
-    // Stats panel: 1 bottom border + 1 blank + 1 title + N provider rows minimum
+    // stats: blank + title + N provider rows + bottom border
     let n_providers = app.provider_ids.len() as u16;
     let stats_min_height = 3 + n_providers;
+    // model: blank + title + N model rows + bottom border
+    let n_models = app.metrics.lock().map(|m| m.by_model.len() as u16).unwrap_or(0);
+    let model_min_height = (3 + n_models).max(3);
+
     let leftover = area.height.saturating_sub(table_height + detail_height);
-    let stats_height = if leftover >= stats_min_height { stats_min_height } else { 0 };
+    let show_stats = leftover >= stats_min_height;
 
     let mut constraints = vec![
         Constraint::Length(table_height),
         Constraint::Length(detail_height),
     ];
-    if stats_height > 0 {
-        constraints.push(Constraint::Length(stats_height));
+    if show_stats {
+        constraints.push(Constraint::Min(stats_min_height + model_min_height));
+    } else {
+        constraints.push(Constraint::Min(0));
     }
-    constraints.push(Constraint::Min(0));
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -86,7 +92,7 @@ fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
 
     draw_provider_table(f, app, chunks[0]);
     draw_detail_panel(f, app, chunks[1]);
-    if stats_height > 0 {
+    if show_stats {
         draw_stats_panel(f, app, chunks[2]);
     }
 }
@@ -130,28 +136,38 @@ fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
     ])
     .height(1);
 
+    let selected = app.table_state.selected();
+
     let rows: Vec<Row> = app
         .provider_ids
         .iter()
-        .map(|id| {
+        .enumerate()
+        .map(|(i, id)| {
             let provider = &app.config.providers[id];
             let is_current = id == &app.config.current;
+            let is_selected = selected == Some(i);
 
-            let id_cell = if is_current {
-                Cell::from(Line::from(vec![
-                    Span::styled(id.as_str(), Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD)),
-                    Span::styled(" ▲", Style::default().fg(t::SUCCESS)),
-                ]))
-            } else {
-                Cell::from(Span::styled(id.as_str(), Style::default().fg(t::TEXT)))
+            let (indicator, indicator_style) = match (is_selected, is_current) {
+                (true,  true)  => (" ▲", Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD)),
+                (true,  false) => (" △", Style::default().fg(t::TEXT)),
+                (false, true)  => (" ▲", Style::default().fg(t::SUCCESS)),
+                (false, false) => ("  ", Style::default()),
             };
+            let id_style = if is_current {
+                Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(t::TEXT)
+            };
+            let id_cell = Cell::from(Line::from(vec![
+                Span::styled(id.as_str(), id_style),
+                Span::styled(indicator, indicator_style),
+            ]));
 
-            let format_color = t::format_color(&provider.api_format);
             let api_key_cell = masked_api_key(&provider.api_key);
 
             Row::new(vec![
                 id_cell,
-                Cell::from(Span::styled(provider.api_format.to_string(), Style::default().fg(format_color))),
+                Cell::from(Span::styled(provider.api_format.to_string(), Style::default().fg(t::MUTED))),
                 Cell::from(Span::styled(provider.base_url.as_str(), Style::default().fg(t::MUTED))),
                 api_key_cell,
             ])
@@ -174,7 +190,7 @@ fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
             .border_style(Style::default().fg(t::MUTED))
             .padding(Padding::horizontal(1)),
     )
-    .row_highlight_style(Style::default().bg(t::HIGHLIGHT_BG));
+    .row_highlight_style(Style::default());
 
     f.render_stateful_widget(table, area, &mut app.table_state);
 }
@@ -233,9 +249,9 @@ fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
         ]));
     } else if let Some(r) = app.test_results.get(id.as_str()) {
         let (status_str, status_style) = match &r.status {
-            TestStatus::Ok => ("✓ OK", Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD)),
-            TestStatus::AuthFailed => ("✗ Auth failed", Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD)),
-            TestStatus::Error(e) => (e.as_str(), Style::default().fg(t::ERROR)),
+            TestStatus::Ok => ("✓ OK".to_string(), Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD)),
+            TestStatus::AuthFailed => ("✗ Auth failed".to_string(), Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD)),
+            TestStatus::Error(e) => (truncate_error(e), Style::default().fg(t::ERROR)),
         };
         let models_str = match r.model_count {
             Some(n) => Span::styled(format!("{n} models"), Style::default().fg(t::TEXT)),
@@ -260,32 +276,22 @@ fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-fn draw_keybindings(f: &mut Frame, app: &App, area: Rect) {
-    let fallback_key_color = if app.config.fallback { t::SUCCESS } else { t::PRIMARY };
-    let mut spans: Vec<Span> = vec![Span::raw(" ")];
-    // Show only the most common shortcuts; press h to see all
+fn draw_keybindings(f: &mut Frame, _app: &App, area: Rect) {
     let keys: &[(&str, &str, Color)] = &[
-        ("s", "Switch", t::PRIMARY),
-        ("a", "Add", t::PRIMARY),
-        ("e", "Edit", t::PRIMARY),
-        ("f", "Fallback", fallback_key_color),
-        ("q", "Quit", t::PRIMARY),
-        ("h", "Help", t::MUTED),
+        ("s", "Switch",   t::SUCCESS),
+        ("a", "Add",      t::SUCCESS),
+        ("e", "Edit",     t::SUCCESS),
+        ("f", "Fallback", t::SUCCESS),
+        ("c", "Clear",    t::SUCCESS),
+        ("q", "Quit",     t::SUCCESS),
+        ("h", "Help",     t::SUCCESS),
     ];
+    let mut spans: Vec<Span> = vec![Span::raw(" ")];
     for (i, (key, desc, color)) in keys.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::raw("  "));
-        }
-        spans.push(Span::styled(
-            format!("[{}]", key),
-            Style::default().fg(*color),
-        ));
-        spans.push(Span::styled(
-            format!(" {}", desc),
-            Style::default().fg(t::MUTED),
-        ));
+        if i > 0 { spans.push(Span::raw("  ")); }
+        spans.push(Span::styled(format!("[{}]", key), Style::default().fg(*color)));
+        spans.push(Span::styled(format!(" {}", desc), Style::default().fg(t::MUTED)));
     }
-
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -304,54 +310,121 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
 
     let Ok(m) = app.metrics.lock() else { return };
     let by_provider = m.by_provider.clone();
+    let mut model_entries: Vec<(String, u64, u64)> = m
+        .by_model
+        .iter()
+        .map(|(k, v)| (k.clone(), v.input, v.output))
+        .collect();
     drop(m);
+
+    model_entries.sort_by(|a, b| (b.1 + b.2).cmp(&(a.1 + a.2)));
 
     let muted = Style::default().fg(t::MUTED);
     let id_col_width = app.provider_ids.iter().map(|s| s.len()).max().unwrap_or(8).max(8);
 
+    let dash_line = Line::from(Span::styled("╌".repeat(inner.width as usize), Style::default().fg(t::MUTED)));
+
     let mut lines: Vec<Line> = vec![
         Line::from(""),
+        dash_line.clone(),
         Line::from(Span::styled("Token Usage", Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD))),
+        Line::from(""),
     ];
-    lines.extend(app
-        .provider_ids
-        .iter()
-        .enumerate()
-        .map(|(i, id)| {
-            let color = t::provider_color(i);
-            let s = by_provider.get(id).cloned().unwrap_or_default();
-            Line::from(vec![
-                Span::styled(
-                    format!("{:<width$}", id, width = id_col_width),
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("  In ",       muted),
-                Span::styled(format!("{:>7}", format_tokens(s.input)),  Style::default().fg(color)),
-                Span::styled("  Out ",      muted),
-                Span::styled(format!("{:>7}", format_tokens(s.output)), Style::default().fg(color)),
-                Span::styled("  Req ", muted),
-                Span::styled(format!("{:>4}", s.requests), Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD)),
-                Span::styled("  Fail ", muted),
-                Span::styled(
-                    format!("{:>4}", s.failures),
-                    if s.failures > 0 {
-                        Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(t::MUTED)
-                    },
-                ),
-                {
-                    let rate = if s.failures > 0 && s.requests > 0 {
-                        format!(" ({:.0}%)", s.failures as f64 / s.requests as f64 * 100.0)
-                    } else {
-                        String::new()
-                    };
-                    Span::styled(rate, Style::default().fg(t::ERROR))
-                },
-            ])
-        }));
+    lines.extend(app.provider_ids.iter().enumerate().map(|(i, id)| {
+        let color = t::provider_color(i);
+        let s = by_provider.get(id).cloned().unwrap_or_default();
+        Line::from(vec![
+            Span::styled(
+                format!("{:<width$}", id, width = id_col_width),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  In ",  muted),
+            Span::styled(format!("{:>7}", format_tokens(s.input)),  Style::default().fg(color)),
+            Span::styled("  Out ", muted),
+            Span::styled(format!("{:>7}", format_tokens(s.output)), Style::default().fg(color)),
+            Span::styled("  Req ", muted),
+            Span::styled(format!("{:>4}", s.requests), Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD)),
+            Span::styled("  Fail ", muted),
+            {
+                let rate = if s.requests > 0 { s.failures as f64 / s.requests as f64 } else { 0.0 };
+                let high = rate > 0.5;
+                let style = if high {
+                    Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD)
+                } else if s.failures > 0 {
+                    Style::default().fg(t::TEXT)
+                } else {
+                    Style::default().fg(t::MUTED)
+                };
+                let text = if high {
+                    format!("{:>4} ({:.0}%)", s.failures, rate * 100.0)
+                } else {
+                    format!("{:>4}", s.failures)
+                };
+                Span::styled(text, style)
+            },
+        ])
+    }));
+
+    // Model Usage section — horizontal stacked bar chart
+    lines.push(Line::from(""));
+    lines.push(dash_line);
+    lines.push(Line::from(Span::styled("By Model", Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD))));
+    lines.push(Line::from(""));
+    if model_entries.is_empty() {
+        lines.push(Line::from(Span::styled("  No data yet", muted)));
+    } else {
+        // Cap label width at 30 chars to leave room for bars
+        let model_col_width = model_entries.iter().map(|(k, _, _)| k.len()).max().unwrap_or(10).min(30);
+        let value_width = 8usize; // "  1234.5K"
+        let bar_area = (inner.width as usize).saturating_sub(model_col_width + 2 + value_width);
+        let max_total = model_entries.iter().map(|(_, i, o)| i + o).max().unwrap_or(1);
+
+        for (model, input, output) in &model_entries {
+            let total = input + output;
+            let total_bar = if bar_area > 0 { (total * bar_area as u64 / max_total) as usize } else { 0 };
+            let input_bar = if total > 0 { total_bar * (*input as usize) / (total as usize) } else { 0 };
+            let output_bar = total_bar.saturating_sub(input_bar);
+            let empty = bar_area.saturating_sub(total_bar);
+
+            let label = if model.len() > model_col_width {
+                format!("{}…", &model[..model_col_width.saturating_sub(1)])
+            } else {
+                format!("{:<width$}", model, width = model_col_width)
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(label, Style::default().fg(t::TEXT)),
+                Span::raw("  "),
+                Span::styled("░".repeat(input_bar),  Style::default().fg(t::MUTED)),
+                Span::styled("█".repeat(output_bar), Style::default().fg(t::MUTED)),
+                Span::raw(" ".repeat(empty)),
+                Span::styled(format!("  {:>6}", format_tokens(total)), Style::default().fg(t::TEXT)),
+            ]));
+        }
+    }
 
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn truncate_error(e: &str) -> String {
+    // Strip verbose reqwest prefix: "Connection failed: error sending request for url (...): <cause>"
+    let msg = if let Some(pos) = e.rfind(": ") {
+        let suffix = &e[pos + 2..];
+        // Only use suffix if it's meaningfully shorter and not a URL
+        if suffix.len() < e.len() / 2 && !suffix.starts_with("http") {
+            suffix
+        } else {
+            e.split(':').next().unwrap_or(e)
+        }
+    } else {
+        e
+    };
+    const MAX: usize = 30;
+    if msg.len() > MAX {
+        format!("{}…", &msg[..MAX])
+    } else {
+        msg.to_string()
+    }
 }
 
 fn fmt_latency(ms: u64) -> String {
@@ -508,13 +581,13 @@ fn draw_form(f: &mut Frame, app: &App) {
         let value_display = if field.is_toggle {
             let (left, right) = if field.value == "anthropic" {
                 (
-                    Span::styled(" anthropic ", Style::default().fg(t::format_color(&crate::config::ApiFormat::Anthropic)).add_modifier(Modifier::REVERSED)),
+                    Span::styled(" anthropic ", Style::default().fg(t::MUTED).add_modifier(Modifier::REVERSED)),
                     Span::styled(" openai ", Style::default().fg(t::MUTED)),
                 )
             } else {
                 (
                     Span::styled(" anthropic ", Style::default().fg(t::MUTED)),
-                    Span::styled(" openai ", Style::default().fg(t::format_color(&crate::config::ApiFormat::OpenAI)).add_modifier(Modifier::REVERSED)),
+                    Span::styled(" openai ", Style::default().fg(t::MUTED).add_modifier(Modifier::REVERSED)),
                 )
             };
             Line::from(vec![
@@ -594,21 +667,32 @@ fn draw_form(f: &mut Frame, app: &App) {
 
 fn draw_confirm(f: &mut Frame, app: &App) {
     let area = centered_rect(40, 20, f.area());
-    let area = Rect {
-        height: area.height.max(5),
-        ..area
-    };
+    let area = Rect { height: area.height.max(5), ..area };
 
     f.render_widget(Clear, area);
 
-    let id = app.confirm_action.as_deref().unwrap_or("?");
-    let text = vec![
-        Line::from(""),
-        Line::from(vec![
+    let prompt_line = match &app.confirm_action {
+        Some(ConfirmAction::Delete(id)) => Line::from(vec![
             Span::raw("  Delete "),
-            Span::styled(id, Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD)),
+            Span::styled(id.as_str(), Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD)),
             Span::raw(" ?"),
         ]),
+        Some(ConfirmAction::Clear) => Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Clear all usage data", Style::default().fg(t::ERROR)),
+            Span::raw(" ?"),
+        ]),
+        Some(ConfirmAction::Quit) => Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Quit", Style::default().fg(t::ERROR)),
+            Span::raw(" ?"),
+        ]),
+        None => Line::from(""),
+    };
+
+    let text = vec![
+        Line::from(""),
+        prompt_line,
         Line::from(""),
         Line::from(vec![
             Span::raw("  "),

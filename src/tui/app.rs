@@ -1,9 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, mpsc};
 
+use rusqlite;
+
 use ratatui::widgets::TableState;
 
 use crate::config::{self, ApiFormat, AppConfig, Provider};
+use crate::db::SharedDb;
 use crate::error::Result;
 use crate::proxy::metrics::{SharedMetrics, TokenMetrics};
 use crate::test_provider::TestResult;
@@ -34,6 +37,13 @@ pub enum ServerStatus {
     Error(String),
 }
 
+#[derive(Debug, Clone)]
+pub enum ConfirmAction {
+    Delete(String),
+    Clear,
+    Quit,
+}
+
 pub struct App {
     pub config: AppConfig,
     pub mode: Mode,
@@ -41,7 +51,7 @@ pub struct App {
     pub provider_ids: Vec<String>,
     pub form: Option<ProviderForm>,
     pub message: Option<(String, MessageKind, std::time::Instant)>,
-    pub confirm_action: Option<String>,
+    pub confirm_action: Option<ConfirmAction>,
     pub should_quit: bool,
     pub server_status: ServerStatus,
     pub metrics: SharedMetrics,
@@ -49,6 +59,7 @@ pub struct App {
     pub pending_tests: HashSet<String>,
     pub test_tx: mpsc::Sender<(String, TestResult)>,
     test_rx: mpsc::Receiver<(String, TestResult)>,
+    pub db: SharedDb,
 }
 
 pub struct ProviderForm {
@@ -166,13 +177,23 @@ impl App {
 
         let mut table_state = TableState::default();
         if !provider_ids.is_empty() {
-            // Select current provider if it exists
             let idx = provider_ids
                 .iter()
                 .position(|id| id == &config.current)
                 .unwrap_or(0);
             table_state.select(Some(idx));
         }
+
+        let db_path = config.resolve_db_path();
+        let db = crate::db::open(&db_path).unwrap_or_else(|e| {
+            tracing::warn!("Failed to open DB at {db_path}: {e}");
+            Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap()))
+        });
+
+        let metrics = {
+            let conn = db.lock().unwrap();
+            Arc::new(Mutex::new(crate::db::load_metrics(&conn)))
+        };
 
         let (test_tx, test_rx) = mpsc::channel();
         Ok(Self {
@@ -185,11 +206,12 @@ impl App {
             confirm_action: None,
             should_quit: false,
             server_status: ServerStatus::Stopped,
-            metrics: Arc::new(Mutex::new(TokenMetrics::new())),
+            metrics,
             test_results: HashMap::new(),
             pending_tests: HashSet::new(),
             test_tx,
             test_rx,
+            db,
         })
     }
 
@@ -338,47 +360,82 @@ impl App {
 
         config::save_config(&self.config)?;
         self.refresh_ids();
+        if is_new {
+            if let Some(idx) = self.provider_ids.iter().position(|s| s == &id) {
+                self.table_state.select(Some(idx));
+            }
+        }
         self.mode = Mode::Normal;
         self.form = None;
-
 
         Ok(())
     }
 
     pub fn confirm_delete(&mut self) {
         if let Some(id) = self.selected_id() {
-            self.confirm_action = Some(id.to_string());
+            self.confirm_action = Some(ConfirmAction::Delete(id.to_string()));
             self.mode = Mode::Confirm;
         }
     }
 
-    pub fn delete_confirmed(&mut self) -> Result<()> {
-        if let Some(id) = self.confirm_action.take() {
-            self.config.providers.shift_remove(&id);
-            if self.config.current == id {
-                self.config.current = self
-                    .config
-                    .providers
-                    .keys()
-                    .next()
-                    .cloned()
-                    .unwrap_or_default();
-            }
-            config::save_config(&self.config)?;
-            self.refresh_ids();
+    pub fn confirm_clear(&mut self) {
+        self.confirm_action = Some(ConfirmAction::Clear);
+        self.mode = Mode::Confirm;
+    }
 
-            // Fix selection
-            if let Some(selected) = self.table_state.selected() {
-                if selected >= self.provider_ids.len() && !self.provider_ids.is_empty() {
-                    self.table_state.select(Some(self.provider_ids.len() - 1));
-                } else if self.provider_ids.is_empty() {
-                    self.table_state.select(None);
-                }
-            }
+    pub fn confirm_quit(&mut self) {
+        self.confirm_action = Some(ConfirmAction::Quit);
+        self.mode = Mode::Confirm;
+    }
 
-            self.set_message(format!("Deleted '{id}'"), MessageKind::Success);
+    pub fn clear_metrics(&mut self) {
+        if let Ok(mut m) = self.metrics.lock() {
+            *m = TokenMetrics::new();
+        }
+        if let Ok(conn) = self.db.lock() {
+            let _ = crate::db::clear_all(&conn);
+        }
+        self.set_message("Usage data cleared", MessageKind::Success);
+    }
+
+    pub fn confirm_action_execute(&mut self) -> Result<()> {
+        match self.confirm_action.take() {
+            Some(ConfirmAction::Clear) => {
+                self.clear_metrics();
+            }
+            Some(ConfirmAction::Quit) => {
+                self.should_quit = true;
+            }
+            Some(ConfirmAction::Delete(id)) => {
+                self.do_delete(&id)?;
+            }
+            None => {}
         }
         self.mode = Mode::Normal;
+        Ok(())
+    }
+
+    fn do_delete(&mut self, id: &str) -> Result<()> {
+        if let Ok(conn) = self.db.lock() {
+            let _ = crate::db::delete_provider(&conn, id);
+        }
+        if let Ok(mut m) = self.metrics.lock() {
+            m.by_provider.remove(id);
+        }
+        self.config.providers.shift_remove(id);
+        if self.config.current == id {
+            self.config.current = self.config.providers.keys().next().cloned().unwrap_or_default();
+        }
+        config::save_config(&self.config)?;
+        self.refresh_ids();
+        if let Some(selected) = self.table_state.selected() {
+            if selected >= self.provider_ids.len() && !self.provider_ids.is_empty() {
+                self.table_state.select(Some(self.provider_ids.len() - 1));
+            } else if self.provider_ids.is_empty() {
+                self.table_state.select(None);
+            }
+        }
+        self.set_message(format!("Deleted '{id}'"), MessageKind::Success);
         Ok(())
     }
 
@@ -397,8 +454,7 @@ impl App {
 
     pub fn move_provider_up(&mut self) -> Result<()> {
         let Some(idx) = self.table_state.selected() else { return Ok(()); };
-        // Can't move past index 0, and index 1 can't move up past pinned "anthropic"
-        if idx <= 1 { return Ok(()); }
+        if idx == 0 { return Ok(()); }
         self.config.providers.move_index(idx, idx - 1);
         self.refresh_ids();
         self.table_state.select(Some(idx - 1));
@@ -409,10 +465,6 @@ impl App {
     pub fn move_provider_down(&mut self) -> Result<()> {
         let Some(idx) = self.table_state.selected() else { return Ok(()); };
         if idx + 1 >= self.provider_ids.len() { return Ok(()); }
-        // "anthropic" is pinned at position 0 and cannot move
-        if self.provider_ids.get(idx).map(|s| s == "anthropic").unwrap_or(false) {
-            return Ok(());
-        }
         self.config.providers.move_index(idx, idx + 1);
         self.refresh_ids();
         self.table_state.select(Some(idx + 1));

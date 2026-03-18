@@ -9,7 +9,8 @@ pub const WARNING: Color = Color::Yellow;
 pub const ERROR: Color = Color::Red;
 pub const MUTED: Color = Color::DarkGray;
 pub const TEXT: Color = Color::White;
-pub const HIGHLIGHT_BG: Color = Color::Indexed(236);
+pub const HIGHLIGHT_BG: Color = Color::Indexed(23);
+pub const HIGHLIGHT_FG: Color = Color::White;
 
 // Semantic: API format
 pub fn format_color(fmt: &ApiFormat) -> Color {
@@ -34,3 +35,4 @@ pub fn provider_color(index: usize) -> Color {
     ];
     PALETTE[index % PALETTE.len()]
 }
+

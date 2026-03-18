@@ -135,7 +135,7 @@ fn handle_normal_key(app: &mut App, code: KeyCode, server: &mut Option<ServerHan
 
     match code {
         KeyCode::Char('q') | KeyCode::Esc => {
-            app.should_quit = true;
+            app.confirm_quit();
         }
         KeyCode::Up | KeyCode::Char('k') => app.select_prev(),
         KeyCode::Down | KeyCode::Char('j') => app.select_next(),
@@ -166,6 +166,9 @@ fn handle_normal_key(app: &mut App, code: KeyCode, server: &mut Option<ServerHan
         KeyCode::Char('r') => {
             let _ = app.reload_config();
             sync_proxy_config(app, server);
+        }
+        KeyCode::Char('c') => {
+            app.confirm_clear();
         }
         KeyCode::Char('h') | KeyCode::Char('?') => {
             app.mode = Mode::Help;
@@ -203,9 +206,10 @@ fn start_server_background(app: &mut App, server: &mut Option<ServerHandle>) {
     app.server_status = ServerStatus::Starting;
 
     let metrics = app.metrics.clone();
+    let db = app.db.clone();
     let proxy_config_server = proxy_config.clone();
     let task = tokio::spawn(async move {
-        if let Err(e) = crate::proxy::start_server_with_shutdown(proxy_config_server, shutdown_rx, metrics).await {
+        if let Err(e) = crate::proxy::start_server_with_shutdown(proxy_config_server, shutdown_rx, metrics, db).await {
             tracing::error!("Proxy server error: {e}");
         }
     });
@@ -227,10 +231,17 @@ fn handle_editing_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers, ser
             app.mode = Mode::Normal;
         }
         KeyCode::Enter | KeyCode::Char('s') if code == KeyCode::Enter || modifiers.contains(KeyModifiers::CONTROL) => {
-            let edited_id = app.selected_id().map(|s| s.to_string());
+            // For new providers the ID comes from the form's first field;
+            // for edits it's the currently selected provider.
+            let provider_id = if form.is_new {
+                let id = form.fields[0].value.trim().to_string();
+                if id.is_empty() { None } else { Some(id) }
+            } else {
+                app.selected_id().map(|s| s.to_string())
+            };
             app.save_form()?;
             sync_proxy_config(app, server);
-            if let Some(id) = edited_id {
+            if let Some(id) = provider_id {
                 test_provider_by_id(app, &id);
             }
         }
@@ -331,7 +342,7 @@ fn handle_editing_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers, ser
 fn handle_confirm_key(app: &mut App, code: KeyCode, server: &Option<ServerHandle>) -> Result<()> {
     match code {
         KeyCode::Char('y') | KeyCode::Enter => {
-            app.delete_confirmed()?;
+            app.confirm_action_execute()?;
             sync_proxy_config(app, server);
         }
         _ => {

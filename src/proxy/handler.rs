@@ -116,12 +116,10 @@ pub async fn handle_messages(
         let config = state.config.read().await;
         if config.fallback {
             let current_idx = config.providers.get_index_of(&config.current).unwrap_or(0);
-            let is_current_anthropic = config.current == "anthropic";
             let len = config.providers.len();
             let list: Vec<(String, crate::config::Provider)> = (0..len)
                 .map(|i| (current_idx + i) % len)
                 .filter_map(|i| config.providers.get_index(i).map(|(k, v)| (k.clone(), v.clone())))
-                .filter(|(k, _)| k != "anthropic" || is_current_anthropic)
                 .collect();
             (list, true)
         } else {
@@ -237,9 +235,9 @@ pub async fn handle_messages(
         }
 
         return if is_stream {
-            handle_streaming_response(response, is_openai, state.metrics.clone(), provider_id.clone()).await
+            handle_streaming_response(response, is_openai, state.metrics.clone(), state.db.clone(), provider_id.clone()).await
         } else {
-            handle_buffered_response(response, is_openai, state.metrics.clone(), provider_id.clone()).await
+            handle_buffered_response(response, is_openai, state.metrics.clone(), state.db.clone(), provider_id.clone()).await
         };
     }
 
@@ -257,6 +255,7 @@ async fn handle_buffered_response(
     response: reqwest::Response,
     is_openai: bool,
     metrics: SharedMetrics,
+    db: crate::db::SharedDb,
     provider_id: String,
 ) -> Result<Response, AppError> {
     let body = response.bytes().await?;
@@ -269,14 +268,26 @@ async fn handle_buffered_response(
         body
     };
 
-    // Parse token usage from the anthropic-format response body.
+    // Parse token usage and model from the anthropic-format response body.
     if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&response_body) {
         let input = json["usage"]["input_tokens"].as_u64().unwrap_or(0);
         let output = json["usage"]["output_tokens"].as_u64().unwrap_or(0);
         if input > 0 || output > 0 {
-            if let Ok(mut m) = metrics.lock() {
-                m.record_tokens(input, output, &provider_id);
-            }
+            let model = json["model"].as_str().map(|s| s.to_string());
+            let (provider_stats, model_stats) = {
+                if let Ok(mut m) = metrics.lock() {
+                    m.record_tokens(input, output, &provider_id);
+                    if let Some(ref name) = model {
+                        m.record_model_tokens(input, output, name);
+                    }
+                    let ps = m.by_provider.get(&provider_id).cloned();
+                    let ms = model.as_deref().and_then(|n| m.by_model.get(n).cloned());
+                    (ps, ms)
+                } else {
+                    (None, None)
+                }
+            };
+            persist_stats(&db, &provider_id, provider_stats, model.as_deref(), model_stats);
         }
     }
 
@@ -288,11 +299,35 @@ async fn handle_buffered_response(
         .into_response())
 }
 
+/// Fire-and-forget: persist provider and model stats to DB outside hot path.
+fn persist_stats(
+    db: &crate::db::SharedDb,
+    provider_id: &str,
+    provider_stats: Option<crate::proxy::metrics::ProviderStats>,
+    model_name: Option<&str>,
+    model_stats: Option<crate::proxy::metrics::ModelStats>,
+) {
+    let db = db.clone();
+    let pid = provider_id.to_string();
+    let mid = model_name.map(|s| s.to_string());
+    tokio::task::spawn_blocking(move || {
+        if let Ok(conn) = db.lock() {
+            if let Some(s) = provider_stats {
+                let _ = crate::db::upsert_provider(&conn, &pid, &s);
+            }
+            if let (Some(name), Some(s)) = (mid, model_stats) {
+                let _ = crate::db::upsert_model(&conn, &name, &s);
+            }
+        }
+    });
+}
+
 /// Handle streaming response.
 async fn handle_streaming_response(
     response: reqwest::Response,
     is_openai: bool,
     metrics: SharedMetrics,
+    db: crate::db::SharedDb,
     provider_id: String,
 ) -> Result<Response, AppError> {
     let raw_stream: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>> =
@@ -307,7 +342,7 @@ async fn handle_streaming_response(
             Box::pin(transform::openai_stream_to_anthropic(response))
         };
 
-    let tracked = track_tokens_in_stream(raw_stream, metrics, provider_id);
+    let tracked = track_tokens_in_stream(raw_stream, metrics, db, provider_id);
     let body = Body::from_stream(tracked);
 
     Ok(Response::builder()
@@ -323,17 +358,19 @@ async fn handle_streaming_response(
 fn track_tokens_in_stream(
     mut inner: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>>,
     metrics: SharedMetrics,
+    db: crate::db::SharedDb,
     provider_id: String,
 ) -> impl futures::Stream<Item = std::io::Result<Bytes>> + Send {
     async_stream::stream! {
         let mut input_tokens = 0u64;
         let mut output_tokens = 0u64;
+        let mut model = String::new();
         let mut line_buf = String::new();
 
         while let Some(chunk) = inner.next().await {
             if let Ok(ref bytes) = chunk {
                 line_buf.push_str(&String::from_utf8_lossy(bytes));
-                // Process complete SSE lines to extract token counts.
+                // Process complete SSE lines to extract token counts and model.
                 while let Some(pos) = line_buf.find('\n') {
                     let line = line_buf[..pos].trim_end_matches('\r').to_owned();
                     line_buf.drain(..=pos);
@@ -344,6 +381,9 @@ fn track_tokens_in_stream(
                                     input_tokens = json["message"]["usage"]["input_tokens"]
                                         .as_u64()
                                         .unwrap_or(0);
+                                    if let Some(m) = json["message"]["model"].as_str() {
+                                        model = m.to_string();
+                                    }
                                 }
                                 Some("message_delta") => {
                                     output_tokens = json["usage"]["output_tokens"]
@@ -361,9 +401,21 @@ fn track_tokens_in_stream(
 
         // Stream ended: persist the token counts we collected.
         if input_tokens > 0 || output_tokens > 0 {
-            if let Ok(mut m) = metrics.lock() {
-                m.record_tokens(input_tokens, output_tokens, &provider_id);
-            }
+            let (provider_stats, model_stats) = {
+                if let Ok(mut m) = metrics.lock() {
+                    m.record_tokens(input_tokens, output_tokens, &provider_id);
+                    if !model.is_empty() {
+                        m.record_model_tokens(input_tokens, output_tokens, &model);
+                    }
+                    let ps = m.by_provider.get(&provider_id).cloned();
+                    let ms = if model.is_empty() { None } else { m.by_model.get(&model).cloned() };
+                    (ps, ms)
+                } else {
+                    (None, None)
+                }
+            };
+            let model_opt = if model.is_empty() { None } else { Some(model.as_str()) };
+            persist_stats(&db, &provider_id, provider_stats, model_opt, model_stats);
         }
     }
 }

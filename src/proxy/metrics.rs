@@ -9,9 +9,16 @@ pub struct ProviderStats {
     pub failures: u64,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
+pub struct ModelStats {
+    pub input: u64,
+    pub output: u64,
+}
+
+#[derive(Debug, Default, Clone)]
 pub struct TokenMetrics {
     pub by_provider: HashMap<String, ProviderStats>,
+    pub by_model: HashMap<String, ModelStats>,
 }
 
 impl TokenMetrics {
@@ -29,6 +36,12 @@ impl TokenMetrics {
 
     pub fn record_tokens(&mut self, input: u64, output: u64, provider: &str) {
         let s = self.by_provider.entry(provider.to_string()).or_default();
+        s.input += input;
+        s.output += output;
+    }
+
+    pub fn record_model_tokens(&mut self, input: u64, output: u64, model: &str) {
+        let s = self.by_model.entry(model.to_string()).or_default();
         s.input += input;
         s.output += output;
     }
