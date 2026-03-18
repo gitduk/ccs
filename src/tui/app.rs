@@ -105,14 +105,17 @@ impl FormField {
             return;
         }
         self.value.insert(self.cursor, c);
-        self.cursor += 1;
+        self.cursor += c.len_utf8();
     }
 
     pub fn backspace(&mut self) {
         if self.is_toggle || self.cursor == 0 {
             return;
         }
-        self.cursor -= 1;
+        let char_len = self.value[..self.cursor]
+            .chars().next_back()
+            .map(|c| c.len_utf8()).unwrap_or(1);
+        self.cursor -= char_len;
         self.value.remove(self.cursor);
     }
 
@@ -125,13 +128,19 @@ impl FormField {
 
     pub fn move_left(&mut self) {
         if self.cursor > 0 {
-            self.cursor -= 1;
+            let char_len = self.value[..self.cursor]
+                .chars().next_back()
+                .map(|c| c.len_utf8()).unwrap_or(1);
+            self.cursor -= char_len;
         }
     }
 
     pub fn move_right(&mut self) {
         if self.cursor < self.value.len() {
-            self.cursor += 1;
+            let char_len = self.value[self.cursor..]
+                .chars().next()
+                .map(|c| c.len_utf8()).unwrap_or(1);
+            self.cursor += char_len;
         }
     }
 
@@ -140,13 +149,17 @@ impl FormField {
             return;
         }
         let mut pos = self.cursor;
-        // Skip trailing spaces
-        while pos > 0 && self.value[..pos].ends_with(' ') {
-            pos -= 1;
+        // Skip trailing spaces (step back by char boundary)
+        while pos > 0 {
+            let c = self.value[..pos].chars().next_back().unwrap();
+            if c != ' ' { break; }
+            pos -= c.len_utf8();
         }
         // Delete until next space
-        while pos > 0 && !self.value[..pos].ends_with(' ') {
-            pos -= 1;
+        while pos > 0 {
+            let c = self.value[..pos].chars().next_back().unwrap();
+            if c == ' ' { break; }
+            pos -= c.len_utf8();
         }
         self.value.drain(pos..self.cursor);
         self.cursor = pos;
@@ -169,6 +182,32 @@ impl FormField {
         } else {
             "anthropic".to_string()
         };
+    }
+}
+
+impl ProviderForm {
+    /// Move focus to the next editable field (wraps around).
+    pub fn focus_next(&mut self) {
+        let len = self.fields.len();
+        for offset in 1..len {
+            let next = (self.focused + offset) % len;
+            if self.fields[next].editable {
+                self.focused = next;
+                break;
+            }
+        }
+    }
+
+    /// Move focus to the previous editable field (wraps around).
+    pub fn focus_prev(&mut self) {
+        let len = self.fields.len();
+        for offset in 1..len {
+            let prev = (self.focused + len - offset) % len;
+            if self.fields[prev].editable {
+                self.focused = prev;
+                break;
+            }
+        }
     }
 }
 
@@ -345,15 +384,8 @@ impl App {
             base_url,
             api_key,
             api_format,
-            model_map: if is_new {
-                std::collections::HashMap::new()
-            } else {
-                self.config
-                    .providers
-                    .get(&id)
-                    .map(|p| p.model_map.clone())
-                    .unwrap_or_default()
-            },
+            // For new providers get() returns None → unwrap_or_default() → empty map.
+            model_map: self.config.providers.get(&id).map(|p| p.model_map.clone()).unwrap_or_default(),
         };
 
         let is_first = self.config.providers.is_empty();
@@ -375,20 +407,8 @@ impl App {
         Ok(())
     }
 
-    pub fn confirm_delete(&mut self) {
-        if let Some(id) = self.selected_id() {
-            self.confirm_action = Some(ConfirmAction::Delete(id.to_string()));
-            self.mode = Mode::Confirm;
-        }
-    }
-
-    pub fn confirm_clear(&mut self) {
-        self.confirm_action = Some(ConfirmAction::Clear);
-        self.mode = Mode::Confirm;
-    }
-
-    pub fn confirm_quit(&mut self) {
-        self.confirm_action = Some(ConfirmAction::Quit);
+    pub fn confirm(&mut self, action: ConfirmAction) {
+        self.confirm_action = Some(action);
         self.mode = Mode::Confirm;
     }
 

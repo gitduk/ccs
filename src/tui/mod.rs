@@ -16,7 +16,7 @@ use ratatui::backend::CrosstermBackend;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use app::{App, Mode, MessageKind, ServerStatus};
+use app::{App, ConfirmAction, Mode, MessageKind, ServerStatus};
 use crate::error::Result;
 
 struct ServerHandle {
@@ -148,9 +148,7 @@ fn handle_normal_key(app: &mut App, code: KeyCode, server: &mut Option<ServerHan
     }
 
     match code {
-        KeyCode::Char('q') | KeyCode::Esc => {
-            app.confirm_quit();
-        }
+        KeyCode::Char('q') | KeyCode::Esc => app.confirm(ConfirmAction::Quit),
         KeyCode::Up | KeyCode::Char('k') => app.select_prev(),
         KeyCode::Down | KeyCode::Char('j') => app.select_next(),
         KeyCode::Char('s') => {
@@ -164,8 +162,8 @@ fn handle_normal_key(app: &mut App, code: KeyCode, server: &mut Option<ServerHan
             }
         }
         KeyCode::Char('d') => {
-            if app.selected_id().is_some() {
-                app.confirm_delete();
+            if let Some(id) = app.selected_id().map(|s| s.to_string()) {
+                app.confirm(ConfirmAction::Delete(id));
             }
         }
         KeyCode::Char('t') => {
@@ -184,9 +182,7 @@ fn handle_normal_key(app: &mut App, code: KeyCode, server: &mut Option<ServerHan
         KeyCode::Char('S') => {
             toggle_bg_proxy(app, server);
         }
-        KeyCode::Char('c') => {
-            app.confirm_clear();
-        }
+        KeyCode::Char('c') => app.confirm(ConfirmAction::Clear),
         KeyCode::Char('h') | KeyCode::Char('?') => {
             app.mode = Mode::Help;
         }
@@ -262,66 +258,10 @@ fn handle_editing_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers, ser
                 test_provider_by_id(app, &id);
             }
         }
-        KeyCode::Tab => {
-            let len = form.fields.len();
-            for offset in 1..len {
-                let next = (form.focused + offset) % len;
-                if form.fields[next].editable {
-                    form.focused = next;
-                    break;
-                }
-            }
-        }
-        KeyCode::BackTab => {
-            let len = form.fields.len();
-            for offset in 1..len {
-                let prev = (form.focused + len - offset) % len;
-                if form.fields[prev].editable {
-                    form.focused = prev;
-                    break;
-                }
-            }
-        }
-        KeyCode::Up | KeyCode::Char('k') if modifiers.contains(KeyModifiers::CONTROL) => {
-            let len = form.fields.len();
-            for offset in 1..len {
-                let prev = (form.focused + len - offset) % len;
-                if form.fields[prev].editable {
-                    form.focused = prev;
-                    break;
-                }
-            }
-        }
-        KeyCode::Up => {
-            let len = form.fields.len();
-            for offset in 1..len {
-                let prev = (form.focused + len - offset) % len;
-                if form.fields[prev].editable {
-                    form.focused = prev;
-                    break;
-                }
-            }
-        }
-        KeyCode::Down | KeyCode::Char('j') if modifiers.contains(KeyModifiers::CONTROL) => {
-            let len = form.fields.len();
-            for offset in 1..len {
-                let next = (form.focused + offset) % len;
-                if form.fields[next].editable {
-                    form.focused = next;
-                    break;
-                }
-            }
-        }
-        KeyCode::Down => {
-            let len = form.fields.len();
-            for offset in 1..len {
-                let next = (form.focused + offset) % len;
-                if form.fields[next].editable {
-                    form.focused = next;
-                    break;
-                }
-            }
-        }
+        KeyCode::Tab | KeyCode::Down => form.focus_next(),
+        KeyCode::BackTab | KeyCode::Up => form.focus_prev(),
+        KeyCode::Char('j') if modifiers.contains(KeyModifiers::CONTROL) => form.focus_next(),
+        KeyCode::Char('k') if modifiers.contains(KeyModifiers::CONTROL) => form.focus_prev(),
         _ => {
             let ctrl = modifiers.contains(KeyModifiers::CONTROL);
             let field = &mut form.fields[form.focused];

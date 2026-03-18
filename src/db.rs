@@ -112,5 +112,5 @@ pub fn delete_provider(conn: &Connection, provider_id: &str) -> Result<()> {
 }
 
 pub fn clear_all(conn: &Connection) -> Result<()> {
-    conn.execute_batch("DELETE FROM provider_stats; DELETE FROM model_stats;")
+    conn.execute_batch("BEGIN; DELETE FROM provider_stats; DELETE FROM model_stats; COMMIT;")
 }

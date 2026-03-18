@@ -34,7 +34,7 @@ fn draw_title_bar(f: &mut Frame, app: &App, area: Rect) {
     let fallback_label = if app.config.fallback { "Fallback on  " } else { "Fallback off " };
     let listen_label = format!("{}  ", app.config.listen);
     let version = format!("  v{}", env!("CARGO_PKG_VERSION"));
-    let title_left = " CCS  Claude Code Switch";
+    let title_left = " CCS  Claude Code Switcher";
     let left_len = title_left.len() + version.len();
     let right_len = listen_label.len() + fallback_label.len();
     let gap = (area.width as usize).saturating_sub(left_len + right_len);
@@ -218,7 +218,7 @@ fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
                 .padding(Padding::horizontal(1));
             let lines = vec![
                 Line::from(""),
-                Line::from(Span::styled("Info", Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD))),
+                Line::from(Span::styled("Error", Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD))),
                 Line::from(vec![
                     Span::styled("✗ ", Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD)),
                     Span::styled(msg.as_str(), Style::default().fg(t::TEXT)),
@@ -292,7 +292,6 @@ fn draw_keybindings(f: &mut Frame, app: &App, area: Rect) {
         ("f", "Fallback", t::SUCCESS),
         ("c", "Clear",    t::SUCCESS),
         ("q", "Quit",     t::SUCCESS),
-        ("h", "Help",     t::SUCCESS),
     ];
     let bg_key = ("S", bg_label, t::SUCCESS);
     let mut spans: Vec<Span> = vec![Span::raw(" ")];
@@ -304,6 +303,9 @@ fn draw_keybindings(f: &mut Frame, app: &App, area: Rect) {
     spans.push(Span::raw("  "));
     spans.push(Span::styled(format!("[{}]", bg_key.0), Style::default().fg(bg_key.2)));
     spans.push(Span::styled(format!(" {}", bg_key.1), Style::default().fg(t::MUTED)));
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled("[h]", Style::default().fg(t::MUTED)));
+    spans.push(Span::styled(" Help", Style::default().fg(t::MUTED)));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -386,7 +388,7 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(Span::styled("  No data yet", muted)));
     } else {
         // Cap label width at 30 chars to leave room for bars
-        let model_col_width = model_entries.iter().map(|(k, _, _)| k.len()).max().unwrap_or(10).min(30);
+        let model_col_width = model_entries.iter().map(|(k, _, _)| k.chars().count()).max().unwrap_or(10).min(30);
         let value_width = 8usize; // "  1234.5K"
         let bar_area = (inner.width as usize).saturating_sub(model_col_width + 2 + value_width);
         let max_total = model_entries.iter().map(|(_, i, o)| i + o).max().unwrap_or(1);
@@ -398,8 +400,10 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
             let output_bar = total_bar.saturating_sub(input_bar);
             let empty = bar_area.saturating_sub(total_bar);
 
-            let label = if model.len() > model_col_width {
-                format!("{}…", &model[..model_col_width.saturating_sub(1)])
+            let model_chars: Vec<char> = model.chars().collect();
+            let label = if model_chars.len() > model_col_width {
+                let truncated: String = model_chars[..model_col_width.saturating_sub(1)].iter().collect();
+                format!("{}…", truncated)
             } else {
                 format!("{:<width$}", model, width = model_col_width)
             };
@@ -432,8 +436,9 @@ fn truncate_error(e: &str) -> String {
         e
     };
     const MAX: usize = 30;
-    if msg.len() > MAX {
-        format!("{}…", &msg[..MAX])
+    if msg.chars().count() > MAX {
+        let truncated: String = msg.chars().take(MAX).collect();
+        format!("{}…", truncated)
     } else {
         msg.to_string()
     }
@@ -466,8 +471,8 @@ fn api_key_display_len(key: &str) -> usize {
     if key.is_empty() {
         "(not set)".len()
     } else if key.starts_with('$') {
-        key.len()
-    } else if key.len() > 8 {
+        key.chars().count()
+    } else if key.chars().count() > 8 {
         11 // "abcd···wxyz"
     } else {
         4  // "····"
@@ -480,9 +485,11 @@ fn masked_api_key(key: &str) -> Cell<'static> {
     } else if key.starts_with('$') {
         Cell::from(Span::styled(key.to_string(), Style::default().fg(t::WARNING)))
     } else {
-        let len = key.len();
-        let masked = if len > 8 {
-            format!("{}···{}", &key[..4], &key[len - 4..])
+        let chars: Vec<char> = key.chars().collect();
+        let masked = if chars.len() > 8 {
+            let prefix: String = chars[..4].iter().collect();
+            let suffix: String = chars[chars.len() - 4..].iter().collect();
+            format!("{}···{}", prefix, suffix)
         } else {
             "····".to_string()
         };
@@ -615,9 +622,11 @@ fn draw_form(f: &mut Frame, app: &App) {
                 && !field.value.starts_with('$')
                 && !is_focused
             {
-                let len = field.value.len();
-                if len > 8 {
-                    format!("{}...{}", &field.value[..4], &field.value[len - 4..])
+                let chars: Vec<char> = field.value.chars().collect();
+                if chars.len() > 8 {
+                    let prefix: String = chars[..4].iter().collect();
+                    let suffix: String = chars[chars.len() - 4..].iter().collect();
+                    format!("{}...{}", prefix, suffix)
                 } else {
                     "****".to_string()
                 }
