@@ -30,11 +30,11 @@ pub fn open_with_fallback(path: &str) -> SharedDb {
 fn init_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS provider_stats (
-            provider_id TEXT PRIMARY KEY,
-            input       INTEGER NOT NULL DEFAULT 0,
-            output      INTEGER NOT NULL DEFAULT 0,
-            requests    INTEGER NOT NULL DEFAULT 0,
-            failures    INTEGER NOT NULL DEFAULT 0
+            provider_name TEXT PRIMARY KEY,
+            input         INTEGER NOT NULL DEFAULT 0,
+            output        INTEGER NOT NULL DEFAULT 0,
+            requests      INTEGER NOT NULL DEFAULT 0,
+            failures      INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS model_stats (
             model_name TEXT PRIMARY KEY,
@@ -48,7 +48,7 @@ pub fn load_metrics(conn: &Connection) -> TokenMetrics {
     let mut metrics = TokenMetrics::new();
 
     if let Ok(mut stmt) = conn.prepare(
-        "SELECT provider_id, input, output, requests, failures FROM provider_stats",
+        "SELECT provider_name, input, output, requests, failures FROM provider_stats",
     ) {
         match stmt.query_map([], |row| {
             Ok((
@@ -96,14 +96,14 @@ pub fn load_metrics(conn: &Connection) -> TokenMetrics {
     metrics
 }
 
-pub fn upsert_provider(conn: &Connection, id: &str, s: &ProviderStats) -> Result<()> {
+pub fn upsert_provider(conn: &Connection, name: &str, s: &ProviderStats) -> Result<()> {
     conn.execute(
-        "INSERT INTO provider_stats (provider_id, input, output, requests, failures)
+        "INSERT INTO provider_stats (provider_name, input, output, requests, failures)
          VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(provider_id) DO UPDATE SET
+         ON CONFLICT(provider_name) DO UPDATE SET
              input = excluded.input, output = excluded.output,
              requests = excluded.requests, failures = excluded.failures",
-        params![id, s.input, s.output, s.requests, s.failures],
+        params![name, s.input, s.output, s.requests, s.failures],
     )?;
     Ok(())
 }
@@ -119,10 +119,10 @@ pub fn upsert_model(conn: &Connection, name: &str, s: &ModelStats) -> Result<()>
     Ok(())
 }
 
-pub fn delete_provider(conn: &Connection, provider_id: &str) -> Result<()> {
+pub fn delete_provider(conn: &Connection, provider_name: &str) -> Result<()> {
     conn.execute(
-        "DELETE FROM provider_stats WHERE provider_id = ?1",
-        [provider_id],
+        "DELETE FROM provider_stats WHERE provider_name = ?1",
+        [provider_name],
     )?;
     Ok(())
 }

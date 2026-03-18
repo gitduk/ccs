@@ -13,14 +13,14 @@ use crate::proxy::{forwarder, metrics::SharedMetrics, transform};
 /// Health check endpoint.
 pub async fn health_check(State(state): State<SharedState>) -> impl IntoResponse {
     let config = state.config.read().await;
-    let id = match config.current_provider() {
-        Ok((id, _p)) => id.to_string(),
+    let name = match config.current_provider() {
+        Ok((name, _p)) => name.to_string(),
         Err(_) => "none".to_string(),
     };
 
     axum::Json(serde_json::json!({
         "status": "ok",
-        "provider": id,
+        "provider": name,
         "version": env!("CARGO_PKG_VERSION"),
     }))
 }
@@ -123,8 +123,8 @@ pub async fn handle_messages(
                 .collect();
             (list, true)
         } else {
-            let (id, p) = config.current_provider()?;
-            (vec![(id.to_string(), p.clone())], false)
+            let (name, p) = config.current_provider()?;
+            (vec![(name.to_string(), p.clone())], false)
         }
     };
 
@@ -138,14 +138,14 @@ pub async fn handle_messages(
     let max_failures = round_size * 3;
     let mut consecutive_failures = 0usize;
     let mut last_status = None;
-    for (provider_id, provider) in pool.iter().cycle() {
+    for (provider_name, provider) in pool.iter().cycle() {
         let api_key = match provider.resolve_api_key() {
             Ok(k) => k,
             Err(e) => {
                 tracing::warn!("Skipping provider {}: {e}", provider.base_url);
                 if let Ok(mut m) = state.metrics.lock() {
-                    m.record_request(provider_id);
-                    m.record_failure(provider_id);
+                    m.record_request(provider_name);
+                    m.record_failure(provider_name);
                 }
                 consecutive_failures += 1;
                 if !do_cycle || consecutive_failures >= max_failures {
@@ -156,7 +156,7 @@ pub async fn handle_messages(
         };
 
         // Record request count before forwarding (immediate feedback in TUI)
-        if let Ok(mut m) = state.metrics.lock() { m.record_request(provider_id); }
+        if let Ok(mut m) = state.metrics.lock() { m.record_request(provider_name); }
 
         let is_openai = provider.api_format == ApiFormat::OpenAI;
         let upstream_body = if is_openai {
@@ -179,7 +179,7 @@ pub async fn handle_messages(
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("Provider {} network error: {e}, trying next", provider.base_url);
-                if let Ok(mut m) = state.metrics.lock() { m.record_failure(provider_id); }
+                if let Ok(mut m) = state.metrics.lock() { m.record_failure(provider_name); }
                 consecutive_failures += 1;
                 if !do_cycle || consecutive_failures >= max_failures {
                     break;
@@ -193,7 +193,7 @@ pub async fn handle_messages(
         // 5xx or 429: try next provider
         if status.as_u16() >= 500 || status.as_u16() == 429 {
             tracing::warn!("Provider {} returned {status}, trying next", provider.base_url);
-            if let Ok(mut m) = state.metrics.lock() { m.record_failure(provider_id); }
+            if let Ok(mut m) = state.metrics.lock() { m.record_failure(provider_name); }
             last_status = Some(status);
             consecutive_failures += 1;
             if !do_cycle || consecutive_failures >= max_failures {
@@ -205,7 +205,7 @@ pub async fn handle_messages(
         // 401/403: auth error — try next provider in fallback mode
         if status.as_u16() == 401 || status.as_u16() == 403 {
             tracing::warn!("Provider {} auth error {status}, trying next", provider.base_url);
-            if let Ok(mut m) = state.metrics.lock() { m.record_failure(provider_id); }
+            if let Ok(mut m) = state.metrics.lock() { m.record_failure(provider_name); }
             last_status = Some(status);
             consecutive_failures += 1;
             if !do_cycle || consecutive_failures >= max_failures {
@@ -225,7 +225,7 @@ pub async fn handle_messages(
             let error_body = response.bytes().await?;
             let preview = String::from_utf8_lossy(&error_body[..error_body.len().min(200)]);
             tracing::warn!("Upstream returned {status}: {preview}");
-            if let Ok(mut m) = state.metrics.lock() { m.record_failure(provider_id); }
+            if let Ok(mut m) = state.metrics.lock() { m.record_failure(provider_name); }
             return Ok((
                 StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
                 [("content-type", "application/json")],
@@ -235,9 +235,9 @@ pub async fn handle_messages(
         }
 
         return if is_stream {
-            handle_streaming_response(response, is_openai, state.metrics.clone(), state.db.clone(), provider_id.clone()).await
+            handle_streaming_response(response, is_openai, state.metrics.clone(), state.db.clone(), provider_name.clone()).await
         } else {
-            handle_buffered_response(response, is_openai, state.metrics.clone(), state.db.clone(), provider_id.clone()).await
+            handle_buffered_response(response, is_openai, state.metrics.clone(), state.db.clone(), provider_name.clone()).await
         };
     }
 
@@ -256,7 +256,7 @@ async fn handle_buffered_response(
     is_openai: bool,
     metrics: SharedMetrics,
     db: crate::db::SharedDb,
-    provider_id: String,
+    provider_name: String,
 ) -> Result<Response, AppError> {
     let body = response.bytes().await?;
 
@@ -276,18 +276,18 @@ async fn handle_buffered_response(
             let model = json["model"].as_str().map(|s| s.to_string());
             let (provider_stats, model_stats) = {
                 if let Ok(mut m) = metrics.lock() {
-                    m.record_tokens(input, output, &provider_id);
-                    if let Some(ref name) = model {
-                        m.record_model_tokens(input, output, name);
+                    m.record_tokens(input, output, &provider_name);
+                    if let Some(ref model_name) = model {
+                        m.record_model_tokens(input, output, model_name);
                     }
-                    let ps = m.by_provider.get(&provider_id).cloned();
+                    let ps = m.by_provider.get(&provider_name).cloned();
                     let ms = model.as_deref().and_then(|n| m.by_model.get(n).cloned());
                     (ps, ms)
                 } else {
                     (None, None)
                 }
             };
-            persist_stats(&db, &provider_id, provider_stats, model.as_deref(), model_stats);
+            persist_stats(&db, &provider_name, provider_stats, model.as_deref(), model_stats);
         }
     }
 
@@ -302,18 +302,18 @@ async fn handle_buffered_response(
 /// Fire-and-forget: persist provider and model stats to DB outside hot path.
 fn persist_stats(
     db: &crate::db::SharedDb,
-    provider_id: &str,
+    provider_name: &str,
     provider_stats: Option<crate::proxy::metrics::ProviderStats>,
     model_name: Option<&str>,
     model_stats: Option<crate::proxy::metrics::ModelStats>,
 ) {
     let db = db.clone();
-    let pid = provider_id.to_string();
+    let pname = provider_name.to_string();
     let mid = model_name.map(|s| s.to_string());
     tokio::task::spawn_blocking(move || {
         if let Ok(conn) = db.lock() {
             if let Some(s) = provider_stats {
-                let _ = crate::db::upsert_provider(&conn, &pid, &s);
+                let _ = crate::db::upsert_provider(&conn, &pname, &s);
             }
             if let (Some(name), Some(s)) = (mid, model_stats) {
                 let _ = crate::db::upsert_model(&conn, &name, &s);
@@ -328,7 +328,7 @@ async fn handle_streaming_response(
     is_openai: bool,
     metrics: SharedMetrics,
     db: crate::db::SharedDb,
-    provider_id: String,
+    provider_name: String,
 ) -> Result<Response, AppError> {
     let raw_stream: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>> =
         if !is_openai {
@@ -342,7 +342,7 @@ async fn handle_streaming_response(
             Box::pin(transform::openai_stream_to_anthropic(response))
         };
 
-    let tracked = track_tokens_in_stream(raw_stream, metrics, db, provider_id);
+    let tracked = track_tokens_in_stream(raw_stream, metrics, db, provider_name);
     let body = Body::from_stream(tracked);
 
     Ok(Response::builder()
@@ -359,7 +359,7 @@ fn track_tokens_in_stream(
     mut inner: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>>,
     metrics: SharedMetrics,
     db: crate::db::SharedDb,
-    provider_id: String,
+    provider_name: String,
 ) -> impl futures::Stream<Item = std::io::Result<Bytes>> + Send {
     async_stream::stream! {
         let mut input_tokens = 0u64;
@@ -403,11 +403,11 @@ fn track_tokens_in_stream(
         if input_tokens > 0 || output_tokens > 0 {
             let (provider_stats, model_stats) = {
                 if let Ok(mut m) = metrics.lock() {
-                    m.record_tokens(input_tokens, output_tokens, &provider_id);
+                    m.record_tokens(input_tokens, output_tokens, &provider_name);
                     if !model.is_empty() {
                         m.record_model_tokens(input_tokens, output_tokens, &model);
                     }
-                    let ps = m.by_provider.get(&provider_id).cloned();
+                    let ps = m.by_provider.get(&provider_name).cloned();
                     let ms = if model.is_empty() { None } else { m.by_model.get(&model).cloned() };
                     (ps, ms)
                 } else {
@@ -415,7 +415,7 @@ fn track_tokens_in_stream(
                 }
             };
             let model_opt = if model.is_empty() { None } else { Some(model.as_str()) };
-            persist_stats(&db, &provider_id, provider_stats, model_opt, model_stats);
+            persist_stats(&db, &provider_name, provider_stats, model_opt, model_stats);
         }
     }
 }

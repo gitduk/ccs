@@ -17,11 +17,11 @@ pub async fn run(listen: Option<String>) -> Result<()> {
             "Warning:".yellow(),
             "ccs provider add".cyan()
         );
-    } else if let Ok((id, provider)) = config.current_provider() {
+    } else if let Ok((name, provider)) = config.current_provider() {
         eprintln!(
             "{} {} [{}]",
             "Provider:".green(),
-            id.cyan(),
+            name.cyan(),
             provider.api_format.to_string().dimmed()
         );
     }
