@@ -20,19 +20,42 @@ pub fn format_color(fmt: &ApiFormat) -> Color {
     }
 }
 
-/// Color for the provider at the given position in the provider list.
-/// Using index (not name hash) guarantees no two providers share a color.
-pub fn provider_color(index: usize) -> Color {
+/// Stable color for a provider, derived from its ID.
+/// The same ID always maps to the same color regardless of list order.
+pub fn provider_color(id: &str) -> Color {
+    // 20 visually distinct colors covering the full hue wheel; green
+    // is omitted to avoid confusion with the SUCCESS indicator.
     const PALETTE: &[Color] = &[
         Color::Cyan,
-        Color::Green,
         Color::Magenta,
         Color::Yellow,
+        Color::Indexed(39),  // dodger blue
         Color::Indexed(208), // orange
         Color::Indexed(81),  // sky blue
-        Color::Indexed(118), // lime
         Color::Indexed(213), // pink
+        Color::Indexed(147), // lavender
+        Color::Indexed(203), // salmon
+        Color::Indexed(51),  // aqua
+        Color::Indexed(220), // gold
+        Color::Indexed(105), // medium purple
+        Color::Indexed(159), // pale cyan
+        Color::Indexed(223), // peach
+        Color::Indexed(78),  // seafoam
+        Color::Indexed(199), // deep pink
+        Color::Indexed(75),  // cornflower blue
+        Color::Indexed(171), // orchid
+        Color::Indexed(215), // sandy brown
+        Color::Indexed(123), // aquamarine
     ];
-    PALETTE[index % PALETTE.len()]
+    // FNV-1a, then Murmur3-style finalisation to avalanche short strings.
+    let mut h: u64 = 0xcbf29ce484222325;
+    for byte in id.bytes() {
+        h ^= byte as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xff51afd7ed558ccd);
+    h ^= h >> 33;
+    PALETTE[h as usize % PALETTE.len()]
 }
 

@@ -154,12 +154,13 @@ fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
             let is_current = id == &app.config.current;
             let is_selected = selected == Some(i);
 
-            let (indicator, indicator_style) = match (is_selected, is_current) {
-                (true,  true)  => (" ▲", Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD)),
-                (true,  false) => (" △", Style::default().fg(t::TEXT)),
-                (false, true)  => (" ▲", Style::default().fg(t::SUCCESS)),
-                (false, false) => ("  ", Style::default()),
+            // Cursor triangle shown only on the selected row.
+            let (indicator, indicator_style) = if is_selected {
+                (" ◀", Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD))
+            } else {
+                ("  ", Style::default())
             };
+            // Current provider ID is green+bold regardless of cursor position.
             let id_style = if is_current {
                 Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD)
             } else {
@@ -323,11 +324,12 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let Ok(m) = app.metrics.lock() else { return };
-    // Collect only what we'll render — avoids cloning the entire HashMap.
-    let provider_stats: Vec<crate::proxy::metrics::ProviderStats> = app
+    // Collect (id, stats) pairs, then sort by failure rate ascending so the
+    // most reliable providers appear at the top.
+    let mut provider_rows: Vec<(&str, crate::proxy::metrics::ProviderStats)> = app
         .provider_ids
         .iter()
-        .map(|id| m.by_provider.get(id).cloned().unwrap_or_default())
+        .map(|id| (id.as_str(), m.by_provider.get(id).cloned().unwrap_or_default()))
         .collect();
     let mut model_entries: Vec<(String, u64, u64)> = m
         .by_model
@@ -336,6 +338,14 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
         .collect();
     drop(m);
 
+    // Sort by failure rate ascending (providers with fewer failures first).
+    // Providers with no requests sort to the bottom (rate treated as 1.0).
+    provider_rows.sort_by(|(_, a), (_, b)| {
+        let rate = |s: &crate::proxy::metrics::ProviderStats| {
+            if s.requests == 0 { f64::MAX } else { s.failures as f64 / s.requests as f64 }
+        };
+        rate(a).partial_cmp(&rate(b)).unwrap_or(std::cmp::Ordering::Equal)
+    });
     model_entries.sort_by(|a, b| (b.1 + b.2).cmp(&(a.1 + a.2)));
 
     let muted = Style::default().fg(t::MUTED);
@@ -349,8 +359,8 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
         Line::from(Span::styled("Token Usage", Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD))),
         Line::from(""),
     ];
-    lines.extend(app.provider_ids.iter().zip(provider_stats.iter()).enumerate().map(|(i, (id, s))| {
-        let color = t::provider_color(i);
+    lines.extend(provider_rows.iter().map(|(id, s)| {
+        let color = t::provider_color(id);
         Line::from(vec![
             Span::styled(
                 format!("{:<width$}", id, width = id_col_width),
