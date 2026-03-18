@@ -4,6 +4,7 @@ mod ui;
 
 use std::io;
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -37,10 +38,14 @@ pub fn run_tui() -> Result<()> {
     let mut app = App::new()?;
     let mut server: Option<ServerHandle> = None;
 
+    // Watch the DB file for cross-process writes (background proxy mode).
+    // The channel carries a unit value; we only care that *something* changed.
+    let db_change_rx = start_db_watcher(&app);
+
     start_server_background(&mut app, &mut server);
     start_background_tests(&mut app);
 
-    let result = run_loop(&mut terminal, &mut app, &mut server);
+    let result = run_loop(&mut terminal, &mut app, &mut server, db_change_rx);
 
     // Stop server on exit
     if let Some(handle) = server.take() {
@@ -59,12 +64,25 @@ fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
     server: &mut Option<ServerHandle>,
+    db_change_rx: Option<mpsc::Receiver<()>>,
 ) -> Result<()> {
     loop {
         // Check if server task has ended unexpectedly
         check_server_status(app, server);
         // Check if background proxy process is still alive
         check_bg_proxy_status(app);
+        // When background proxy is active, reload metrics whenever the DB file
+        // changes (inotify-driven, not a timer).  Drain all pending events so
+        // we reload at most once per frame even if many writes batched up.
+        if app.bg_proxy_pid.is_some() {
+            if let Some(rx) = &db_change_rx {
+                if rx.try_recv().is_ok() {
+                    // Drain any additional pending events from the same batch.
+                    while rx.try_recv().is_ok() {}
+                    reload_metrics_from_db(app);
+                }
+            }
+        }
         // Collect completed background test results
         app.drain_test_results();
         // Auto-dismiss expired messages
@@ -97,6 +115,60 @@ fn check_bg_proxy_status(app: &mut App) {
             }
             app.set_message("Background proxy exited", MessageKind::Info);
         }
+    }
+}
+
+/// Start an inotify watcher on the SQLite DB file (and its WAL file if
+/// present).  Returns a receiver that yields `()` whenever the DB is modified
+/// by an external process.  Returns `None` if the DB path is unavailable or
+/// the watcher fails to initialise (non-fatal; falls back to no live updates).
+fn start_db_watcher(app: &App) -> Option<mpsc::Receiver<()>> {
+    use notify::{EventKind, RecursiveMode, Watcher, recommended_watcher};
+    use notify::event::ModifyKind;
+
+    let db_path = app.config.resolve_db_path();
+    let db_file = std::path::PathBuf::from(&db_path);
+    let watch_dir = db_file.parent()?.to_path_buf();
+
+    let (event_tx, event_rx) = mpsc::channel::<()>();
+
+    let db_name = db_file.file_name()?.to_os_string();
+    let mut watcher = recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if let Ok(event) = res {
+            // Only react to actual content modifications, not metadata changes.
+            let is_modify = matches!(
+                event.kind,
+                EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Any)
+                    | EventKind::Create(_)
+            );
+            if !is_modify {
+                return;
+            }
+            // Filter to the DB file and its WAL/SHM siblings.
+            let relevant = event.paths.iter().any(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().starts_with(&*db_name.to_string_lossy()))
+                    .unwrap_or(false)
+            });
+            if relevant {
+                let _ = event_tx.send(());
+            }
+        }
+    })
+    .ok()?;
+
+    watcher.watch(&watch_dir, RecursiveMode::NonRecursive).ok()?;
+
+    // Leak the watcher so it lives for the duration of the TUI session.
+    // It will be dropped when the process exits.
+    std::mem::forget(watcher);
+
+    Some(event_rx)
+}
+
+fn reload_metrics_from_db(app: &mut App) {
+    if let (Ok(conn), Ok(mut m)) = (app.db.lock(), app.metrics.lock()) {
+        *m = crate::db::load_metrics(&conn);
     }
 }
 
