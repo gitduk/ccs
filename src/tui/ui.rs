@@ -48,7 +48,14 @@ fn draw_title_bar(f: &mut Frame, app: &App, area: Rect) {
         ),
         Span::styled(version, Style::default().fg(t::MUTED)),
         Span::raw(" ".repeat(gap)),
-        Span::styled(listen_label, Style::default().fg(t::MUTED)),
+        Span::styled(
+            listen_label,
+            if app.bg_proxy_pid.is_some() {
+                Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(t::MUTED)
+            },
+        ),
         Span::styled(
             fallback_label,
             if app.config.fallback {
@@ -276,7 +283,8 @@ fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-fn draw_keybindings(f: &mut Frame, _app: &App, area: Rect) {
+fn draw_keybindings(f: &mut Frame, app: &App, area: Rect) {
+    let bg_label = if app.bg_proxy_pid.is_some() { "BgStop" } else { "BgProxy" };
     let keys: &[(&str, &str, Color)] = &[
         ("s", "Switch",   t::SUCCESS),
         ("a", "Add",      t::SUCCESS),
@@ -286,12 +294,16 @@ fn draw_keybindings(f: &mut Frame, _app: &App, area: Rect) {
         ("q", "Quit",     t::SUCCESS),
         ("h", "Help",     t::SUCCESS),
     ];
+    let bg_key = ("S", bg_label, t::SUCCESS);
     let mut spans: Vec<Span> = vec![Span::raw(" ")];
     for (i, (key, desc, color)) in keys.iter().enumerate() {
         if i > 0 { spans.push(Span::raw("  ")); }
         spans.push(Span::styled(format!("[{}]", key), Style::default().fg(*color)));
         spans.push(Span::styled(format!(" {}", desc), Style::default().fg(t::MUTED)));
     }
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(format!("[{}]", bg_key.0), Style::default().fg(bg_key.2)));
+    spans.push(Span::styled(format!(" {}", bg_key.1), Style::default().fg(t::MUTED)));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -490,6 +502,7 @@ fn draw_help(f: &mut Frame, _app: &App) {
         ("↑ / ↓", "Select next / previous"),
         ("f", "Toggle fallback mode"),
         ("r", "Reload config from disk"),
+        ("S", "Toggle background proxy (safe to quit TUI)"),
         ("q / Esc", "Quit"),
         ("h / ?", "Show this help"),
     ];
@@ -682,11 +695,21 @@ fn draw_confirm(f: &mut Frame, app: &App) {
             Span::styled("Clear all usage data", Style::default().fg(t::ERROR)),
             Span::raw(" ?"),
         ]),
-        Some(ConfirmAction::Quit) => Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Quit", Style::default().fg(t::ERROR)),
-            Span::raw(" ?"),
-        ]),
+        Some(ConfirmAction::Quit) => {
+            if app.bg_proxy_pid.is_some() {
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled("Quit TUI", Style::default().fg(t::WARNING)),
+                    Span::styled("  (background proxy keeps running)", Style::default().fg(t::SUCCESS)),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled("Quit", Style::default().fg(t::ERROR)),
+                    Span::raw(" ?"),
+                ])
+            }
+        }
         None => Line::from(""),
     };
 

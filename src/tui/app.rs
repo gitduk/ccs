@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 
 use rusqlite;
@@ -60,6 +61,7 @@ pub struct App {
     pub test_tx: mpsc::Sender<(String, TestResult)>,
     test_rx: mpsc::Receiver<(String, TestResult)>,
     pub db: SharedDb,
+    pub bg_proxy_pid: Option<u32>,
 }
 
 pub struct ProviderForm {
@@ -195,6 +197,7 @@ impl App {
             Arc::new(Mutex::new(crate::db::load_metrics(&conn)))
         };
 
+        let bg_proxy_pid = load_bg_proxy_pid();
         let (test_tx, test_rx) = mpsc::channel();
         Ok(Self {
             config,
@@ -212,6 +215,7 @@ impl App {
             test_tx,
             test_rx,
             db,
+            bg_proxy_pid,
         })
     }
 
@@ -486,6 +490,38 @@ impl App {
         }
     }
 
+    /// Spawn a detached background `ccs serve` process, writing its PID to ~/.ccs/proxy.pid.
+    pub fn spawn_bg_proxy(&mut self) -> Result<()> {
+        let exe = std::env::current_exe()?;
+        let child = std::process::Command::new(&exe)
+            .arg("serve")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        let pid = child.id();
+        // Drop handle — child is detached; it will be reparented to init when TUI exits.
+        drop(child);
+        if let Some(path) = pid_file_path() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&path, pid.to_string());
+        }
+        self.bg_proxy_pid = Some(pid);
+        Ok(())
+    }
+
+    /// Kill the background proxy process and remove the PID file.
+    pub fn stop_bg_proxy(&mut self) {
+        if let Some(pid) = self.bg_proxy_pid.take() {
+            kill_process(pid);
+        }
+        if let Some(path) = pid_file_path() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
     /// Reload configuration from disk.
     pub fn reload_config(&mut self) -> Result<()> {
         match config::load_config() {
@@ -511,4 +547,35 @@ impl App {
             }
         }
     }
+}
+
+// ── Background proxy helpers ──────────────────────────────────────────────────
+
+pub fn pid_file_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".ccs").join("proxy.pid"))
+}
+
+/// Read PID file and return the PID if the process is still alive.
+pub fn load_bg_proxy_pid() -> Option<u32> {
+    let path = pid_file_path()?;
+    let content = std::fs::read_to_string(&path).ok()?;
+    let pid: u32 = content.trim().parse().ok()?;
+    if is_process_alive(pid) {
+        Some(pid)
+    } else {
+        let _ = std::fs::remove_file(&path);
+        None
+    }
+}
+
+/// Check whether a process with the given PID is alive (Linux: /proc/<pid>).
+pub fn is_process_alive(pid: u32) -> bool {
+    std::fs::metadata(format!("/proc/{pid}")).is_ok()
+}
+
+/// Send SIGTERM to a process (uses system `kill` command to avoid libc dep).
+pub fn kill_process(pid: u32) {
+    let _ = std::process::Command::new("kill")
+        .arg(pid.to_string())
+        .status();
 }

@@ -63,6 +63,8 @@ fn run_loop(
     loop {
         // Check if server task has ended unexpectedly
         check_server_status(app, server);
+        // Check if background proxy process is still alive
+        check_bg_proxy_status(app);
         // Collect completed background test results
         app.drain_test_results();
         // Auto-dismiss expired messages
@@ -84,6 +86,18 @@ fn run_loop(
         }
     }
     Ok(())
+}
+
+fn check_bg_proxy_status(app: &mut App) {
+    if let Some(pid) = app.bg_proxy_pid {
+        if !app::is_process_alive(pid) {
+            app.bg_proxy_pid = None;
+            if let Some(path) = app::pid_file_path() {
+                let _ = std::fs::remove_file(&path);
+            }
+            app.set_message("Background proxy exited", MessageKind::Info);
+        }
+    }
 }
 
 fn check_server_status(app: &mut App, server: &mut Option<ServerHandle>) {
@@ -166,6 +180,9 @@ fn handle_normal_key(app: &mut App, code: KeyCode, server: &mut Option<ServerHan
         KeyCode::Char('r') => {
             let _ = app.reload_config();
             sync_proxy_config(app, server);
+        }
+        KeyCode::Char('S') => {
+            toggle_bg_proxy(app, server);
         }
         KeyCode::Char('c') => {
             app.confirm_clear();
@@ -381,5 +398,42 @@ fn start_background_tests(app: &mut App) {
     let ids: Vec<String> = app.config.providers.keys().cloned().collect();
     for id in ids {
         test_provider_by_id(app, &id);
+    }
+}
+
+/// Toggle the detached background proxy (Shift+S).
+///
+/// ON:  stop the in-TUI server, wait briefly for the port to be released,
+///      then spawn a detached `ccs serve` child process.
+/// OFF: kill the background child and restart the in-TUI server.
+fn toggle_bg_proxy(app: &mut App, server: &mut Option<ServerHandle>) {
+    if app.bg_proxy_pid.is_some() {
+        // Stop background proxy and bring server back into TUI.
+        app.stop_bg_proxy();
+        app.set_message("Background proxy stopped", MessageKind::Info);
+        start_server_background(app, server);
+    } else {
+        // Stop the in-TUI server so it releases the port.
+        if let Some(handle) = server.take() {
+            let _ = handle.shutdown_tx.send(true);
+        }
+        app.server_status = ServerStatus::Stopped;
+
+        // Brief blocking sleep to let the OS release the port before the new
+        // process tries to bind it.  200 ms is imperceptible to the user and
+        // well within the 250 ms poll interval.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        match app.spawn_bg_proxy() {
+            Ok(()) => app.set_message(
+                format!("Background proxy running on {}  — safe to quit TUI", app.config.listen),
+                MessageKind::Success,
+            ),
+            Err(e) => {
+                app.set_message(format!("Failed to start background proxy: {e}"), MessageKind::Error);
+                // Bring the in-TUI server back up on failure.
+                start_server_background(app, server);
+            }
+        }
     }
 }
