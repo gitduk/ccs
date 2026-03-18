@@ -54,6 +54,13 @@ pub async fn start_server(config: AppConfig) -> crate::error::Result<()> {
     let db = crate::db::open(&db_path).unwrap_or_else(|_| {
         Arc::new(std::sync::Mutex::new(rusqlite::Connection::open_in_memory().unwrap()))
     });
+    // Load persisted metrics so the in-memory counters continue from wherever
+    // the previous session left off.  Without this, the first upsert would
+    // overwrite the DB with counts starting from zero.
+    let initial_metrics = {
+        let conn = db.lock().unwrap();
+        crate::db::load_metrics(&conn)
+    };
     let state = Arc::new(AppState {
         config: Arc::new(RwLock::new(config)),
         http_client: Client::builder()
@@ -61,7 +68,7 @@ pub async fn start_server(config: AppConfig) -> crate::error::Result<()> {
             .timeout(Duration::from_secs(300))
             .build()
             .expect("Failed to build HTTP client"),
-        metrics: Arc::new(std::sync::Mutex::new(metrics::TokenMetrics::new())),
+        metrics: Arc::new(std::sync::Mutex::new(initial_metrics)),
         db,
     });
     let app = build_router(state);
