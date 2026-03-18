@@ -1,20 +1,25 @@
 pub mod forwarder;
 pub mod handler;
+pub mod metrics;
 pub mod transform;
 
 use std::sync::Arc;
 
 use axum::Router;
 use axum::routing::{get, post};
+use std::time::Duration;
+
 use reqwest::Client;
 use tokio::sync::RwLock;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::config::AppConfig;
+use metrics::SharedMetrics;
 
 pub struct AppState {
     pub config: Arc<RwLock<AppConfig>>,
     pub http_client: Client,
+    pub metrics: SharedMetrics,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -23,9 +28,19 @@ pub type SharedState = Arc<AppState>;
 pub fn build_router(state: SharedState) -> Router {
     Router::new()
         .route("/v1/messages", post(handler::handle_messages))
+        .route("/v1/models", get(handler::handle_models))
         .route("/health", get(handler::health_check))
         .route("/reload", post(handler::reload_config))
-        .layer(CorsLayer::permissive())
+        .layer(
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::list([
+                    "http://localhost".parse().unwrap(),
+                    "http://127.0.0.1".parse().unwrap(),
+                    "http://[::1]".parse().unwrap(),
+                ]))
+                .allow_methods(tower_http::cors::Any)
+                .allow_headers(tower_http::cors::Any),
+        )
         .with_state(state)
 }
 
@@ -34,7 +49,12 @@ pub async fn start_server(config: AppConfig) -> crate::error::Result<()> {
     let listen = config.listen.clone();
     let state = Arc::new(AppState {
         config: Arc::new(RwLock::new(config)),
-        http_client: Client::new(),
+        http_client: Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(300))
+            .build()
+            .expect("Failed to build HTTP client"),
+        metrics: Arc::new(std::sync::Mutex::new(metrics::TokenMetrics::new())),
     });
     let app = build_router(state);
 
@@ -49,14 +69,21 @@ pub async fn start_server(config: AppConfig) -> crate::error::Result<()> {
 }
 
 /// Start the proxy server with an external shutdown signal (TUI mode).
+/// Accepts a pre-built `Arc<RwLock<AppConfig>>` so the TUI can mutate it live.
 pub async fn start_server_with_shutdown(
-    config: AppConfig,
+    shared_config: Arc<RwLock<AppConfig>>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    metrics: SharedMetrics,
 ) -> crate::error::Result<()> {
-    let listen = config.listen.clone();
+    let listen = shared_config.read().await.listen.clone();
     let state = Arc::new(AppState {
-        config: Arc::new(RwLock::new(config)),
-        http_client: Client::new(),
+        config: shared_config,
+        http_client: Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(300))
+            .build()
+            .expect("Failed to build HTTP client"),
+        metrics,
     });
     let app = build_router(state);
 

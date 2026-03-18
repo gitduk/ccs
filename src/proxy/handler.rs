@@ -8,7 +8,7 @@ use futures::StreamExt;
 use super::SharedState;
 use crate::config::ApiFormat;
 use crate::error::AppError;
-use crate::proxy::{forwarder, transform};
+use crate::proxy::{forwarder, metrics::SharedMetrics, transform};
 
 /// Health check endpoint.
 pub async fn health_check(State(state): State<SharedState>) -> impl IntoResponse {
@@ -52,6 +52,59 @@ pub async fn reload_config(State(state): State<SharedState>) -> impl IntoRespons
     }
 }
 
+/// Handler for GET /v1/models — proxies to current provider and normalises to Anthropic format.
+pub async fn handle_models(State(state): State<SharedState>) -> Result<Response, AppError> {
+    let (provider, api_key) = {
+        let config = state.config.read().await;
+        let (_, p) = config.current_provider()?;
+        let key = p.resolve_api_key()?;
+        (p.clone(), key)
+    };
+
+    let base = provider.base_url.trim_end_matches('/');
+    let url = format!("{base}/v1/models");
+
+    let (auth_key, auth_val) = match provider.api_format {
+        ApiFormat::Anthropic => ("x-api-key".to_string(), api_key),
+        ApiFormat::OpenAI => ("authorization".to_string(), format!("Bearer {api_key}")),
+    };
+
+    let response = state
+        .http_client
+        .get(&url)
+        .header(&auth_key, &auth_val)
+        .header("anthropic-version", "2023-06-01")
+        .send()
+        .await?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.bytes().await.unwrap_or_default();
+        return Ok((
+            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+            [("content-type", "application/json")],
+            body,
+        )
+            .into_response());
+    }
+
+    let body = response.bytes().await?;
+    let response_body = if provider.api_format == ApiFormat::OpenAI {
+        let openai_json: serde_json::Value = serde_json::from_slice(&body)?;
+        let anthropic_json = transform::openai_to_anthropic_models(&openai_json);
+        Bytes::from(serde_json::to_vec(&anthropic_json)?)
+    } else {
+        body
+    };
+
+    Ok((
+        StatusCode::OK,
+        [("content-type", "application/json")],
+        response_body,
+    )
+        .into_response())
+}
+
 /// Main handler for POST /v1/messages.
 pub async fn handle_messages(
     State(state): State<SharedState>,
@@ -65,16 +118,15 @@ pub async fn handle_messages(
             let current_idx = config.providers.get_index_of(&config.current).unwrap_or(0);
             let is_current_anthropic = config.current == "anthropic";
             let len = config.providers.len();
-            let list: Vec<crate::config::Provider> = (0..len)
+            let list: Vec<(String, crate::config::Provider)> = (0..len)
                 .map(|i| (current_idx + i) % len)
                 .filter_map(|i| config.providers.get_index(i).map(|(k, v)| (k.clone(), v.clone())))
                 .filter(|(k, _)| k != "anthropic" || is_current_anthropic)
-                .map(|(_, v)| v)
                 .collect();
             (list, true)
         } else {
-            let (_, p) = config.current_provider()?;
-            (vec![p.clone()], false)
+            let (id, p) = config.current_provider()?;
+            (vec![(id.to_string(), p.clone())], false)
         }
     };
 
@@ -88,12 +140,15 @@ pub async fn handle_messages(
     let max_failures = round_size * 3;
     let mut consecutive_failures = 0usize;
     let mut last_status = None;
-
-    for provider in pool.iter().cycle() {
+    for (provider_id, provider) in pool.iter().cycle() {
         let api_key = match provider.resolve_api_key() {
             Ok(k) => k,
             Err(e) => {
                 tracing::warn!("Skipping provider {}: {e}", provider.base_url);
+                if let Ok(mut m) = state.metrics.lock() {
+                    m.record_request(provider_id);
+                    m.record_failure(provider_id);
+                }
                 consecutive_failures += 1;
                 if !do_cycle || consecutive_failures >= max_failures {
                     break;
@@ -101,6 +156,9 @@ pub async fn handle_messages(
                 continue;
             }
         };
+
+        // Record request count before forwarding (immediate feedback in TUI)
+        if let Ok(mut m) = state.metrics.lock() { m.record_request(provider_id); }
 
         let is_openai = provider.api_format == ApiFormat::OpenAI;
         let upstream_body = if is_openai {
@@ -123,6 +181,7 @@ pub async fn handle_messages(
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("Provider {} network error: {e}, trying next", provider.base_url);
+                if let Ok(mut m) = state.metrics.lock() { m.record_failure(provider_id); }
                 consecutive_failures += 1;
                 if !do_cycle || consecutive_failures >= max_failures {
                     break;
@@ -136,6 +195,7 @@ pub async fn handle_messages(
         // 5xx or 429: try next provider
         if status.as_u16() >= 500 || status.as_u16() == 429 {
             tracing::warn!("Provider {} returned {status}, trying next", provider.base_url);
+            if let Ok(mut m) = state.metrics.lock() { m.record_failure(provider_id); }
             last_status = Some(status);
             consecutive_failures += 1;
             if !do_cycle || consecutive_failures >= max_failures {
@@ -144,10 +204,30 @@ pub async fn handle_messages(
             continue;
         }
 
-        // 4xx: client error, forward as-is without retrying
+        // 401/403: auth error — try next provider in fallback mode
+        if status.as_u16() == 401 || status.as_u16() == 403 {
+            tracing::warn!("Provider {} auth error {status}, trying next", provider.base_url);
+            if let Ok(mut m) = state.metrics.lock() { m.record_failure(provider_id); }
+            last_status = Some(status);
+            consecutive_failures += 1;
+            if !do_cycle || consecutive_failures >= max_failures {
+                let error_body = response.bytes().await.unwrap_or_default();
+                return Ok((
+                    StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::UNAUTHORIZED),
+                    [("content-type", "application/json")],
+                    error_body,
+                )
+                    .into_response());
+            }
+            continue;
+        }
+
+        // Other 4xx: client error (bad request format etc.), return immediately
         if !status.is_success() {
             let error_body = response.bytes().await?;
-            tracing::warn!("Upstream returned {status}: {}", String::from_utf8_lossy(&error_body));
+            let preview = String::from_utf8_lossy(&error_body[..error_body.len().min(200)]);
+            tracing::warn!("Upstream returned {status}: {preview}");
+            if let Ok(mut m) = state.metrics.lock() { m.record_failure(provider_id); }
             return Ok((
                 StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
                 [("content-type", "application/json")],
@@ -156,11 +236,10 @@ pub async fn handle_messages(
                 .into_response());
         }
 
-        // Success
         return if is_stream {
-            handle_streaming_response(response, is_openai).await
+            handle_streaming_response(response, is_openai, state.metrics.clone(), provider_id.clone()).await
         } else {
-            handle_buffered_response(response, is_openai).await
+            handle_buffered_response(response, is_openai, state.metrics.clone(), provider_id.clone()).await
         };
     }
 
@@ -177,6 +256,8 @@ pub async fn handle_messages(
 async fn handle_buffered_response(
     response: reqwest::Response,
     is_openai: bool,
+    metrics: SharedMetrics,
+    provider_id: String,
 ) -> Result<Response, AppError> {
     let body = response.bytes().await?;
 
@@ -187,6 +268,17 @@ async fn handle_buffered_response(
     } else {
         body
     };
+
+    // Parse token usage from the anthropic-format response body.
+    if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&response_body) {
+        let input = json["usage"]["input_tokens"].as_u64().unwrap_or(0);
+        let output = json["usage"]["output_tokens"].as_u64().unwrap_or(0);
+        if input > 0 || output > 0 {
+            if let Ok(mut m) = metrics.lock() {
+                m.record_tokens(input, output, &provider_id);
+            }
+        }
+    }
 
     Ok((
         StatusCode::OK,
@@ -200,28 +292,23 @@ async fn handle_buffered_response(
 async fn handle_streaming_response(
     response: reqwest::Response,
     is_openai: bool,
+    metrics: SharedMetrics,
+    provider_id: String,
 ) -> Result<Response, AppError> {
-    if !is_openai {
-        // Anthropic format: pass through SSE directly
-        let stream = response.bytes_stream().map(|result| {
-            result.map_err(|e| {
-                tracing::error!("Stream error: {e}");
-                std::io::Error::other(e)
-            })
-        });
+    let raw_stream: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>> =
+        if !is_openai {
+            Box::pin(response.bytes_stream().map(|r| {
+                r.map_err(|e| {
+                    tracing::error!("Stream error: {e}");
+                    std::io::Error::other(e)
+                })
+            }))
+        } else {
+            Box::pin(transform::openai_stream_to_anthropic(response))
+        };
 
-        let body = Body::from_stream(stream);
-        return Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "text/event-stream")
-            .header("cache-control", "no-cache")
-            .body(body)
-            .unwrap());
-    }
-
-    // OpenAI format: convert SSE to Anthropic SSE
-    let stream = transform::openai_stream_to_anthropic(response);
-    let body = Body::from_stream(stream);
+    let tracked = track_tokens_in_stream(raw_stream, metrics, provider_id);
+    let body = Body::from_stream(tracked);
 
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -229,4 +316,54 @@ async fn handle_streaming_response(
         .header("cache-control", "no-cache")
         .body(body)
         .unwrap())
+}
+
+/// Wrap a byte stream to extract token usage from anthropic SSE events.
+/// Passes all bytes through unchanged; records metrics when the stream ends.
+fn track_tokens_in_stream(
+    mut inner: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>>,
+    metrics: SharedMetrics,
+    provider_id: String,
+) -> impl futures::Stream<Item = std::io::Result<Bytes>> + Send {
+    async_stream::stream! {
+        let mut input_tokens = 0u64;
+        let mut output_tokens = 0u64;
+        let mut line_buf = String::new();
+
+        while let Some(chunk) = inner.next().await {
+            if let Ok(ref bytes) = chunk {
+                line_buf.push_str(&String::from_utf8_lossy(bytes));
+                // Process complete SSE lines to extract token counts.
+                while let Some(pos) = line_buf.find('\n') {
+                    let line = line_buf[..pos].trim_end_matches('\r').to_owned();
+                    line_buf.drain(..=pos);
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                            match json["type"].as_str() {
+                                Some("message_start") => {
+                                    input_tokens = json["message"]["usage"]["input_tokens"]
+                                        .as_u64()
+                                        .unwrap_or(0);
+                                }
+                                Some("message_delta") => {
+                                    output_tokens = json["usage"]["output_tokens"]
+                                        .as_u64()
+                                        .unwrap_or(0);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+            yield chunk;
+        }
+
+        // Stream ended: persist the token counts we collected.
+        if input_tokens > 0 || output_tokens > 0 {
+            if let Ok(mut m) = metrics.lock() {
+                m.record_tokens(input_tokens, output_tokens, &provider_id);
+            }
+        }
+    }
 }

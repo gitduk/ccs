@@ -19,7 +19,18 @@ pub fn format_color(fmt: &ApiFormat) -> Color {
     }
 }
 
-// Semantic: server status
-pub fn status_color(running: bool) -> Color {
-    if running { SUCCESS } else { MUTED }
+/// Color for the provider at the given position in the provider list.
+/// Using index (not name hash) guarantees no two providers share a color.
+pub fn provider_color(index: usize) -> Color {
+    const PALETTE: &[Color] = &[
+        Color::Cyan,
+        Color::Green,
+        Color::Magenta,
+        Color::Yellow,
+        Color::Indexed(208), // orange
+        Color::Indexed(81),  // sky blue
+        Color::Indexed(118), // lime
+        Color::Indexed(213), // pink
+    ];
+    PALETTE[index % PALETTE.len()]
 }

@@ -1,7 +1,12 @@
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, mpsc};
+
 use ratatui::widgets::TableState;
 
 use crate::config::{self, ApiFormat, AppConfig, Provider};
 use crate::error::Result;
+use crate::proxy::metrics::{SharedMetrics, TokenMetrics};
+use crate::test_provider::TestResult;
 
 // UI constants
 const MESSAGE_TIMEOUT_SECS: u64 = 3;
@@ -11,7 +16,7 @@ pub enum Mode {
     Normal,
     Editing,
     Confirm,
-    Message,
+    Help,
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +44,11 @@ pub struct App {
     pub confirm_action: Option<String>,
     pub should_quit: bool,
     pub server_status: ServerStatus,
+    pub metrics: SharedMetrics,
+    pub test_results: HashMap<String, TestResult>,
+    pub pending_tests: HashSet<String>,
+    pub test_tx: mpsc::Sender<(String, TestResult)>,
+    test_rx: mpsc::Receiver<(String, TestResult)>,
 }
 
 pub struct ProviderForm {
@@ -164,6 +174,7 @@ impl App {
             table_state.select(Some(idx));
         }
 
+        let (test_tx, test_rx) = mpsc::channel();
         Ok(Self {
             config,
             mode: Mode::Normal,
@@ -174,6 +185,11 @@ impl App {
             confirm_action: None,
             should_quit: false,
             server_status: ServerStatus::Stopped,
+            metrics: Arc::new(Mutex::new(TokenMetrics::new())),
+            test_results: HashMap::new(),
+            pending_tests: HashSet::new(),
+            test_tx,
+            test_rx,
         })
     }
 
@@ -370,12 +386,7 @@ impl App {
         self.message = Some((msg.into(), kind, std::time::Instant::now()));
     }
 
-    pub fn show_message(&mut self, msg: String, kind: MessageKind) {
-        self.set_message(msg, kind);
-        self.mode = Mode::Message;
-    }
-
-    /// Clear message if it has expired (after 3 seconds).
+/// Clear message if it has expired (after 3 seconds).
     pub fn tick_message(&mut self) {
         if let Some((_, _, created)) = &self.message {
             if created.elapsed() > std::time::Duration::from_secs(MESSAGE_TIMEOUT_SECS) {
@@ -413,6 +424,14 @@ impl App {
         self.config.fallback = !self.config.fallback;
         config::save_config(&self.config)?;
         Ok(())
+    }
+
+    /// Drain completed background test results into test_results.
+    pub fn drain_test_results(&mut self) {
+        while let Ok((id, result)) = self.test_rx.try_recv() {
+            self.pending_tests.remove(&id);
+            self.test_results.insert(id, result);
+        }
     }
 
     /// Reload configuration from disk.

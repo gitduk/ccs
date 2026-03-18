@@ -3,6 +3,7 @@ pub mod theme;
 mod ui;
 
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -15,12 +16,13 @@ use ratatui::backend::CrosstermBackend;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use app::{App, MessageKind, Mode, ServerStatus};
+use app::{App, Mode, MessageKind, ServerStatus};
 use crate::error::Result;
 
 struct ServerHandle {
     task: JoinHandle<()>,
     shutdown_tx: watch::Sender<bool>,
+    proxy_config: Arc<tokio::sync::RwLock<crate::config::AppConfig>>,
 }
 
 pub fn run_tui() -> Result<()> {
@@ -36,6 +38,7 @@ pub fn run_tui() -> Result<()> {
     let mut server: Option<ServerHandle> = None;
 
     start_server_background(&mut app, &mut server);
+    start_background_tests(&mut app);
 
     let result = run_loop(&mut terminal, &mut app, &mut server);
 
@@ -60,6 +63,8 @@ fn run_loop(
     loop {
         // Check if server task has ended unexpectedly
         check_server_status(app, server);
+        // Collect completed background test results
+        app.drain_test_results();
         // Auto-dismiss expired messages
         app.tick_message();
 
@@ -108,22 +113,21 @@ fn handle_key(
     app: &mut App,
     code: KeyCode,
     modifiers: KeyModifiers,
-    _server: &mut Option<ServerHandle>,
+    server: &mut Option<ServerHandle>,
 ) -> Result<()> {
     match &app.mode {
-        Mode::Normal => handle_normal_key(app, code),
-        Mode::Editing => handle_editing_key(app, code, modifiers),
-        Mode::Confirm => handle_confirm_key(app, code),
-        Mode::Message => {
-            // Any key dismisses
+        Mode::Normal => handle_normal_key(app, code, server),
+        Mode::Editing => handle_editing_key(app, code, modifiers, server),
+        Mode::Confirm => handle_confirm_key(app, code, server),
+        Mode::Help => {
+            // Any key closes help panel
             app.mode = Mode::Normal;
-            app.message = None;
             Ok(())
         }
     }
 }
 
-fn handle_normal_key(app: &mut App, code: KeyCode) -> Result<()> {
+fn handle_normal_key(app: &mut App, code: KeyCode, server: &mut Option<ServerHandle>) -> Result<()> {
     // Clear any status bar message on next key press
     if app.message.is_some() {
         app.message = None;
@@ -137,6 +141,7 @@ fn handle_normal_key(app: &mut App, code: KeyCode) -> Result<()> {
         KeyCode::Down | KeyCode::Char('j') => app.select_next(),
         KeyCode::Char('s') => {
             app.switch_to_selected()?;
+            sync_proxy_config(app, server);
         }
         KeyCode::Char('a') => app.start_add(),
         KeyCode::Char('e') => {
@@ -154,13 +159,33 @@ fn handle_normal_key(app: &mut App, code: KeyCode) -> Result<()> {
         }
         KeyCode::Char('K') => { let _ = app.move_provider_up(); }
         KeyCode::Char('J') => { let _ = app.move_provider_down(); }
-        KeyCode::Char('f') => { let _ = app.toggle_fallback(); }
+        KeyCode::Char('f') => {
+            let _ = app.toggle_fallback();
+            sync_proxy_config(app, server);
+        }
         KeyCode::Char('r') => {
             let _ = app.reload_config();
+            sync_proxy_config(app, server);
+        }
+        KeyCode::Char('h') | KeyCode::Char('?') => {
+            app.mode = Mode::Help;
         }
         _ => {}
     }
     Ok(())
+}
+
+/// Write the current TUI config into the proxy's shared RwLock so changes take effect immediately.
+fn sync_proxy_config(app: &App, server: &Option<ServerHandle>) {
+    if let Some(handle) = server {
+        let config = app.config.clone();
+        let proxy_config = handle.proxy_config.clone();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async move {
+                *proxy_config.write().await = config;
+            });
+        });
+    }
 }
 
 fn start_server_background(app: &mut App, server: &mut Option<ServerHandle>) {
@@ -171,24 +196,26 @@ fn start_server_background(app: &mut App, server: &mut Option<ServerHandle>) {
     }
 
     // Start the server
-    let config = app.config.clone();
-    let listen = config.listen.clone();
+    let listen = app.config.listen.clone();
+    let proxy_config = Arc::new(tokio::sync::RwLock::new(app.config.clone()));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     app.server_status = ServerStatus::Starting;
 
+    let metrics = app.metrics.clone();
+    let proxy_config_server = proxy_config.clone();
     let task = tokio::spawn(async move {
-        if let Err(e) = crate::proxy::start_server_with_shutdown(config, shutdown_rx).await {
+        if let Err(e) = crate::proxy::start_server_with_shutdown(proxy_config_server, shutdown_rx, metrics).await {
             tracing::error!("Proxy server error: {e}");
         }
     });
 
-    *server = Some(ServerHandle { task, shutdown_tx });
+    *server = Some(ServerHandle { task, shutdown_tx, proxy_config });
     app.server_status = ServerStatus::Running;
     app.set_message(format!("Proxy started on {listen}"), MessageKind::Success);
 }
 
-fn handle_editing_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
+fn handle_editing_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers, server: &Option<ServerHandle>) -> Result<()> {
     let Some(form) = &mut app.form else {
         app.mode = Mode::Normal;
         return Ok(());
@@ -199,8 +226,13 @@ fn handle_editing_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> 
             app.form = None;
             app.mode = Mode::Normal;
         }
-        KeyCode::Enter => {
+        KeyCode::Enter | KeyCode::Char('s') if code == KeyCode::Enter || modifiers.contains(KeyModifiers::CONTROL) => {
+            let edited_id = app.selected_id().map(|s| s.to_string());
             app.save_form()?;
+            sync_proxy_config(app, server);
+            if let Some(id) = edited_id {
+                test_provider_by_id(app, &id);
+            }
         }
         KeyCode::Tab => {
             let len = form.fields.len();
@@ -279,12 +311,13 @@ fn handle_editing_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> 
                 match code {
                     KeyCode::Char(c) if !ctrl => field.insert(c),
                     KeyCode::Char('w') if ctrl => field.delete_word_back(),
+                    KeyCode::Char('h') if ctrl => field.backspace(),
+                    KeyCode::Char('a') if ctrl => field.home(),
+                    KeyCode::Char('e') if ctrl => field.end(),
                     KeyCode::Backspace => field.backspace(),
                     KeyCode::Delete => field.delete(),
                     KeyCode::Left => field.move_left(),
                     KeyCode::Right => field.move_right(),
-                    KeyCode::Char('h') if ctrl => field.move_left(),
-                    KeyCode::Char('l') if ctrl => field.move_right(),
                     KeyCode::Home => field.home(),
                     KeyCode::End => field.end(),
                     _ => {}
@@ -295,10 +328,11 @@ fn handle_editing_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> 
     Ok(())
 }
 
-fn handle_confirm_key(app: &mut App, code: KeyCode) -> Result<()> {
+fn handle_confirm_key(app: &mut App, code: KeyCode, server: &Option<ServerHandle>) -> Result<()> {
     match code {
         KeyCode::Char('y') | KeyCode::Enter => {
             app.delete_confirmed()?;
+            sync_proxy_config(app, server);
         }
         _ => {
             app.confirm_action = None;
@@ -312,17 +346,29 @@ fn test_selected(app: &mut App) {
     let Some(id) = app.selected_id().map(|s| s.to_string()) else {
         return;
     };
-    let Some(provider) = app.config.providers.get(&id) else {
+    test_provider_by_id(app, &id);
+}
+
+fn test_provider_by_id(app: &mut App, id: &str) {
+    let Some(provider) = app.config.providers.get(id) else {
         return;
     };
     let provider = provider.clone();
+    let tx = app.test_tx.clone();
+    let id_owned = id.to_string();
 
-    // Run test synchronously (blocks TUI briefly)
-    let result = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(async {
-            crate::test_provider::test_connectivity(&provider).await
-        })
+    app.pending_tests.insert(id_owned.clone());
+    app.set_message(format!("Testing {id}…"), MessageKind::Info);
+
+    tokio::spawn(async move {
+        let result = crate::test_provider::test_connectivity(&provider).await;
+        let _ = tx.send((id_owned, result));
     });
+}
 
-    app.show_message(result, MessageKind::Info);
+fn start_background_tests(app: &mut App) {
+    let ids: Vec<String> = app.config.providers.keys().cloned().collect();
+    for id in ids {
+        test_provider_by_id(app, &id);
+    }
 }
