@@ -443,24 +443,30 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
     lines.push(Line::from(""));
 
     // Collect all known model names from test_results (fetched via /v1/models per provider).
-    // inactive_models: (model_name, in_current_provider)
-    let current_provider = app.config.current.as_str();
+    // inactive_models: (model_name, in_selected_provider)
+    // Use the cursor-selected provider (not the active one) to determine support.
+    let selected_provider: &str = app
+        .table_state
+        .selected()
+        .and_then(|i| app.provider_names.get(i))
+        .map(|s| s.as_str())
+        .unwrap_or(app.config.current.as_str());
     let used_models: std::collections::HashSet<&str> =
         model_entries.iter().map(|(k, _, _)| k.as_str()).collect();
 
     // Build known model set from persisted provider_models
     let current_provider_models: std::collections::HashSet<&str> = app
         .provider_models
-        .get(current_provider)
+        .get(selected_provider)
         .map(|names| names.iter().map(|s| s.as_str()).collect())
         .unwrap_or_default();
 
     let mut all_known: std::collections::HashMap<&str, bool> = std::collections::HashMap::new();
     for (provider_name, names) in &app.provider_models {
-        let is_current = provider_name.as_str() == current_provider;
+        let is_selected = provider_name.as_str() == selected_provider;
         for name in names {
             let entry = all_known.entry(name.as_str()).or_insert(false);
-            if is_current { *entry = true; }
+            if is_selected { *entry = true; }
         }
     }
     let mut inactive_models: Vec<(&str, bool)> = all_known
@@ -493,9 +499,9 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
                 format!("{:<width$}", model, width = model_col_width)
             };
 
-            // Highlight bar if model is available in current provider
+            // White if model is supported by cursor-selected provider, muted otherwise
             let in_current = current_provider_models.contains(model.as_str());
-            let bar_color = if in_current { t::provider_color(current_provider) } else { t::MUTED };
+            let bar_color = if in_current { t::TEXT } else { t::MUTED };
 
             let label_color = if in_current { t::TEXT } else { t::MUTED };
             lines.push(Line::from(vec![
@@ -536,7 +542,7 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
                     .iter()
                     .enumerate()
                     .map(|(i, (model, in_current))| {
-                        let color = if *in_current { t::provider_color(current_provider) } else { t::MUTED };
+                        let color = if *in_current { t::TEXT } else { t::MUTED };
                         let w = col_widths[i];
                         Span::styled(
                             format!("{:<width$}", model, width = w),
