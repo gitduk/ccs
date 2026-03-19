@@ -58,6 +58,8 @@ fn build_http_client() -> Client {
 pub async fn start_server(config: AppConfig) -> crate::error::Result<()> {
     let listen = config.listen.clone();
     let db = crate::db::open_with_fallback(&config.resolve_db_path());
+    let name_to_id = config.providers.iter().map(|(n, p)| (n.clone(), p.id.clone())).collect();
+    crate::db::migrate_schema(&db, &name_to_id);
     // Load persisted metrics so the in-memory counters continue from wherever
     // the previous session left off.  Without this, the first upsert would
     // overwrite the DB with counts starting from zero.

@@ -235,9 +235,9 @@ pub async fn handle_messages(
         }
 
         return if is_stream {
-            handle_streaming_response(response, is_openai, state.metrics.clone(), state.db.clone(), provider_name.clone()).await
+            handle_streaming_response(response, is_openai, state.metrics.clone(), state.db.clone(), provider.id.clone(), provider_name.clone()).await
         } else {
-            handle_buffered_response(response, is_openai, state.metrics.clone(), state.db.clone(), provider_name.clone()).await
+            handle_buffered_response(response, is_openai, state.metrics.clone(), state.db.clone(), provider.id.clone(), provider_name.clone()).await
         };
     }
 
@@ -255,6 +255,7 @@ async fn handle_buffered_response(
     is_openai: bool,
     metrics: SharedMetrics,
     db: crate::db::SharedDb,
+    provider_id: String,
     provider_name: String,
 ) -> Result<Response, AppError> {
     let body = response.bytes().await?;
@@ -285,7 +286,7 @@ async fn handle_buffered_response(
                     (0, 0)
                 }
             };
-            persist_stats(&db, &provider_name, requests, failures, model.as_deref(), input, output);
+            persist_stats(&db, &provider_id, &provider_name, requests, failures, model.as_deref(), input, output);
         }
     }
 
@@ -300,6 +301,7 @@ async fn handle_buffered_response(
 /// Fire-and-forget: persist provider and model stats to DB outside hot path.
 fn persist_stats(
     db: &crate::db::SharedDb,
+    provider_id: &str,
     provider_name: &str,
     requests: u64,
     failures: u64,
@@ -308,13 +310,14 @@ fn persist_stats(
     output_delta: u64,
 ) {
     let db = db.clone();
+    let pid = provider_id.to_string();
     let pname = provider_name.to_string();
     let mid = model_name.map(|s| s.to_string());
     tokio::task::spawn_blocking(move || {
         if let Ok(conn) = db.lock() {
-            let _ = crate::db::upsert_provider(&conn, &pname, input_delta, output_delta, requests, failures);
-            if let Some(name) = mid {
-                let _ = crate::db::upsert_model(&conn, &pname, &name, input_delta, output_delta);
+            let _ = crate::db::upsert_provider(&conn, &pid, &pname, input_delta, output_delta, requests, failures);
+            if let Some(model) = mid {
+                let _ = crate::db::upsert_model(&conn, &pid, &pname, &model, input_delta, output_delta);
             }
         }
     });
@@ -326,6 +329,7 @@ async fn handle_streaming_response(
     is_openai: bool,
     metrics: SharedMetrics,
     db: crate::db::SharedDb,
+    provider_id: String,
     provider_name: String,
 ) -> Result<Response, AppError> {
     let raw_stream: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>> =
@@ -340,7 +344,7 @@ async fn handle_streaming_response(
             Box::pin(transform::openai_stream_to_anthropic(response))
         };
 
-    let tracked = track_tokens_in_stream(raw_stream, metrics, db, provider_name);
+    let tracked = track_tokens_in_stream(raw_stream, metrics, db, provider_id, provider_name);
     let body = Body::from_stream(tracked);
 
     Response::builder()
@@ -357,6 +361,7 @@ fn track_tokens_in_stream(
     mut inner: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>>,
     metrics: SharedMetrics,
     db: crate::db::SharedDb,
+    provider_id: String,
     provider_name: String,
 ) -> impl futures::Stream<Item = std::io::Result<Bytes>> + Send {
     async_stream::stream! {
@@ -418,7 +423,7 @@ fn track_tokens_in_stream(
                 }
             };
             let model_opt = if model.is_empty() { None } else { Some(model.as_str()) };
-            persist_stats(&db, &provider_name, requests, failures, model_opt, input_tokens, output_tokens);
+            persist_stats(&db, &provider_id, &provider_name, requests, failures, model_opt, input_tokens, output_tokens);
         }
     }
 }

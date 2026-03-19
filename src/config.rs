@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::error::{AppError, Result};
 
@@ -24,6 +25,9 @@ fn default_listen() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provider {
+    /// Stable UUID — assigned on first save, never changes even if name is renamed.
+    #[serde(default)]
+    pub id: String,
     pub base_url: String,
     pub api_key: String,
     pub api_format: ApiFormat,
@@ -94,13 +98,24 @@ pub fn config_path() -> Result<PathBuf> {
 }
 
 /// Load config from file. Returns default config if file doesn't exist.
+/// Assigns stable UUIDs to any provider that doesn't have one yet and saves back.
 pub fn load_config() -> Result<AppConfig> {
     let path = config_path()?;
     if !path.exists() {
         return Ok(default_config());
     }
     let content = std::fs::read_to_string(&path)?;
-    let config: AppConfig = serde_json::from_str(&content)?;
+    let mut config: AppConfig = serde_json::from_str(&content)?;
+    let mut needs_save = false;
+    for provider in config.providers.values_mut() {
+        if provider.id.is_empty() {
+            provider.id = Uuid::new_v4().to_string();
+            needs_save = true;
+        }
+    }
+    if needs_save {
+        save_config(&config)?;
+    }
     Ok(config)
 }
 

@@ -497,13 +497,14 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
             let in_current = current_provider_models.contains(model.as_str());
             let bar_color = if in_current { t::provider_color(current_provider) } else { t::MUTED };
 
+            let label_color = if in_current { t::TEXT } else { t::MUTED };
             lines.push(Line::from(vec![
-                Span::styled(label, Style::default().fg(t::TEXT)),
+                Span::styled(label, Style::default().fg(label_color)),
                 Span::raw("  "),
                 Span::styled("░".repeat(input_bar),  Style::default().fg(bar_color)),
                 Span::styled("█".repeat(output_bar), Style::default().fg(bar_color)),
                 Span::raw(" ".repeat(empty)),
-                Span::styled(format!("  {:>6}", format_tokens(total)), Style::default().fg(t::TEXT)),
+                Span::styled(format!("  {:>6}", format_tokens(total)), Style::default().fg(label_color)),
             ]));
         }
 

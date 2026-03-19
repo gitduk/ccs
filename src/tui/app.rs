@@ -69,6 +69,8 @@ pub struct App {
 
 pub struct ProviderForm {
     pub is_new: bool,
+    /// Original name before editing — used to detect renames.
+    pub original_name: Option<String>,
     pub fields: Vec<FormField>,
     pub focused: usize,
     pub error: Option<String>,
@@ -234,6 +236,8 @@ impl App {
         }
 
         let db = crate::db::open_with_fallback(&config.resolve_db_path());
+        let name_to_id = config.providers.iter().map(|(n, p)| (n.clone(), p.id.clone())).collect();
+        crate::db::migrate_schema(&db, &name_to_id);
 
         let (metrics, provider_models) = {
             let conn = db.lock().unwrap();
@@ -319,6 +323,7 @@ impl App {
     pub fn start_add(&mut self) {
         self.form = Some(ProviderForm {
             is_new: true,
+            original_name: None,
             fields: vec![
                 FormField::text("Name", ""),
                 FormField::text("Base URL", ""),
@@ -339,18 +344,16 @@ impl App {
             return;
         };
 
-        let mut name_field = FormField::text("Name", name);
-        name_field.editable = false;
-
         self.form = Some(ProviderForm {
             is_new: false,
+            original_name: Some(name.to_string()),
             fields: vec![
-                name_field,
+                FormField::text("Name", name),
                 FormField::text("Base URL", &provider.base_url),
                 FormField::text("API Key", &provider.api_key),
                 FormField::toggle("Format", &provider.api_format.to_string()),
             ],
-            focused: 1,
+            focused: 0,
             error: None,
         });
         self.mode = Mode::Editing;
@@ -361,20 +364,25 @@ impl App {
             return Ok(());
         };
 
-        let name = form.fields[0].value.trim().to_string();
+        let new_name = form.fields[0].value.trim().to_string();
         let base_url = form.fields[1].value.trim().trim_end_matches('/').to_string();
         let api_key = form.fields[2].value.trim().to_string();
         let format_str = form.fields[3].value.trim().to_string();
         let is_new = form.is_new;
+        let original_name = form.original_name.clone();
 
-        let validation_error = if name.is_empty() {
+        let is_rename = !is_new && original_name.as_deref() != Some(new_name.as_str());
+
+        let validation_error = if new_name.is_empty() {
             Some("Name cannot be empty".to_string())
         } else if base_url.is_empty() {
             Some("Base URL cannot be empty".to_string())
         } else if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
             Some("Base URL must start with http:// or https://".to_string())
-        } else if is_new && self.config.providers.contains_key(&name) {
-            Some(format!("Provider '{name}' already exists"))
+        } else if is_new && self.config.providers.contains_key(&new_name) {
+            Some(format!("Provider '{new_name}' already exists"))
+        } else if is_rename && self.config.providers.contains_key(&new_name) {
+            Some(format!("Provider '{new_name}' already exists"))
         } else {
             None
         };
@@ -389,24 +397,69 @@ impl App {
             ApiFormat::Anthropic
         };
 
+        let lookup_name = original_name.as_deref().unwrap_or(&new_name);
+        let existing = self.config.providers.get(lookup_name);
+        let provider_id = existing
+            .map(|p| p.id.clone())
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let model_map = existing.map(|p| p.model_map.clone()).unwrap_or_default();
+
         let provider = Provider {
+            id: provider_id.clone(),
             base_url,
             api_key,
             api_format,
-            // For new providers get() returns None → unwrap_or_default() → empty map.
-            model_map: self.config.providers.get(&name).map(|p| p.model_map.clone()).unwrap_or_default(),
+            model_map,
         };
 
-        let is_first = self.config.providers.is_empty();
-        self.config.providers.insert(name.clone(), provider);
-        if is_first {
-            self.config.current = name.clone();
+        if is_rename {
+            let old_name = original_name.as_deref().unwrap();
+            // Rebuild IndexMap preserving insertion order, swapping the key.
+            let entries: Vec<(String, Provider)> = std::mem::take(&mut self.config.providers)
+                .into_iter()
+                .map(|(k, v)| if k == old_name { (new_name.clone(), provider.clone()) } else { (k, v) })
+                .collect();
+            self.config.providers = entries.into_iter().collect();
+
+            if self.config.current == old_name {
+                self.config.current = new_name.clone();
+            }
+
+            // Update DB: rename provider_name in all rows.
+            if let Ok(conn) = self.db.lock() {
+                let _ = crate::db::rename_provider(&conn, &provider_id, &new_name);
+            }
+
+            // Update in-memory metrics key.
+            if let Ok(mut m) = self.metrics.lock() {
+                if let Some(stats) = m.by_provider.remove(old_name) {
+                    m.by_provider.insert(new_name.clone(), stats);
+                }
+            }
+
+            // Update provider_models, test_results, pending_tests keys.
+            if let Some(models) = self.provider_models.remove(old_name) {
+                self.provider_models.insert(new_name.clone(), models);
+            }
+            if let Some(result) = self.test_results.remove(old_name) {
+                self.test_results.insert(new_name.clone(), result);
+            }
+            if self.pending_tests.remove(old_name) {
+                self.pending_tests.insert(new_name.clone());
+            }
+        } else {
+            let is_first = self.config.providers.is_empty();
+            self.config.providers.insert(new_name.clone(), provider);
+            if is_first {
+                self.config.current = new_name.clone();
+            }
         }
 
         config::save_config(&self.config)?;
         self.refresh_ids();
         if is_new {
-            if let Some(idx) = self.provider_names.iter().position(|s| s == &name) {
+            if let Some(idx) = self.provider_names.iter().position(|s| s == &new_name) {
                 self.table_state.select(Some(idx));
             }
         }
@@ -455,7 +508,8 @@ impl App {
 
     fn do_delete(&mut self, name: &str) -> Result<()> {
         if let Ok(conn) = self.db.lock() {
-            let _ = crate::db::delete_provider(&conn, name);
+            let id = self.config.providers.get(name).map(|p| p.id.as_str()).unwrap_or(name);
+            let _ = crate::db::delete_provider(&conn, id);
         }
         if let Ok(mut m) = self.metrics.lock() {
             m.by_provider.remove(name);
@@ -523,7 +577,8 @@ impl App {
             self.pending_tests.remove(&name);
             if let Some(models) = &result.model_names {
                 if let Ok(conn) = self.db.lock() {
-                    let _ = crate::db::upsert_provider_models(&conn, &name, models);
+                    let id = self.config.providers.get(&name).map(|p| p.id.as_str()).unwrap_or(&name);
+                    let _ = crate::db::upsert_provider_models(&conn, id, &name, models);
                 }
                 self.provider_models.insert(name.clone(), models.clone());
             }
