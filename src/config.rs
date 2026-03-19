@@ -33,6 +33,8 @@ pub struct Provider {
     pub api_format: ApiFormat,
     #[serde(default)]
     pub model_map: HashMap<String, String>,
+    #[serde(default)]
+    pub notes: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

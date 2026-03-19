@@ -82,6 +82,7 @@ pub struct FormField {
     pub cursor: usize,
     pub editable: bool,
     pub is_toggle: bool,
+    pub is_multiline: bool,
 }
 
 impl FormField {
@@ -92,6 +93,7 @@ impl FormField {
             cursor: value.len(),
             editable: true,
             is_toggle: false,
+            is_multiline: false,
         }
     }
 
@@ -102,7 +104,59 @@ impl FormField {
             cursor: 0,
             editable: true,
             is_toggle: true,
+            is_multiline: false,
         }
+    }
+
+    fn multiline(label: &'static str, value: &str) -> Self {
+        Self {
+            label,
+            value: value.to_string(),
+            cursor: value.len(),
+            editable: true,
+            is_toggle: false,
+            is_multiline: true,
+        }
+    }
+
+    pub fn insert_newline(&mut self) {
+        self.value.insert(self.cursor, '\n');
+        self.cursor += 1;
+    }
+
+    /// Move cursor up one line within a multiline field.
+    /// Returns false if already on first line (caller should focus prev field).
+    pub fn move_up(&mut self) -> bool {
+        let before = &self.value[..self.cursor];
+        let line_start = before.rfind('\n').map(|p| p + 1).unwrap_or(0);
+        if line_start == 0 {
+            return false; // already on first line
+        }
+        let col = self.cursor - line_start;
+        let prev_line_end = line_start - 1; // position of the '\n'
+        let prev_line_start = self.value[..prev_line_end].rfind('\n').map(|p| p + 1).unwrap_or(0);
+        let prev_line_len = prev_line_end - prev_line_start;
+        self.cursor = prev_line_start + col.min(prev_line_len);
+        true
+    }
+
+    /// Move cursor down one line within a multiline field.
+    /// Returns false if already on last line (caller should focus next field).
+    pub fn move_down(&mut self) -> bool {
+        let next_nl = self.value[self.cursor..].find('\n');
+        let Some(rel) = next_nl else {
+            return false; // already on last line
+        };
+        let next_line_start = self.cursor + rel + 1;
+        let before = &self.value[..self.cursor];
+        let line_start = before.rfind('\n').map(|p| p + 1).unwrap_or(0);
+        let col = self.cursor - line_start;
+        let next_line_end = self.value[next_line_start..].find('\n')
+            .map(|p| next_line_start + p)
+            .unwrap_or(self.value.len());
+        let next_line_len = next_line_end - next_line_start;
+        self.cursor = next_line_start + col.min(next_line_len);
+        true
     }
 
     pub fn insert(&mut self, c: char) {
@@ -328,6 +382,7 @@ impl App {
                 FormField::text("Base URL", ""),
                 FormField::text("API Key", ""),
                 FormField::toggle("Format", "anthropic"),
+                FormField::multiline("Notes", ""),
             ],
             focused: 0,
             error: None,
@@ -351,6 +406,7 @@ impl App {
                 FormField::text("Base URL", &provider.base_url),
                 FormField::text("API Key", &provider.api_key),
                 FormField::toggle("Format", &provider.api_format.to_string()),
+                FormField::multiline("Notes", &provider.notes),
             ],
             focused: 0,
             error: None,
@@ -367,6 +423,7 @@ impl App {
         let base_url = form.fields[1].value.trim().trim_end_matches('/').to_string();
         let api_key = form.fields[2].value.trim().to_string();
         let format_str = form.fields[3].value.trim().to_string();
+        let notes = form.fields[4].value.clone();
         let is_new = form.is_new;
         let original_name = form.original_name.clone();
 
@@ -408,6 +465,7 @@ impl App {
             api_key,
             api_format,
             model_map,
+            notes,
         };
 
         if is_rename {

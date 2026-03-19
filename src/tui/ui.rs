@@ -703,8 +703,17 @@ fn draw_form(f: &mut Frame, app: &App) {
         " Edit Provider "
     };
 
-    // Fixed height: fields*2 + hint(3) + borders(2) + padding(2)
-    let dialog_height = (form.fields.len() as u16) * 2 + 3 + 2 + 2;
+    // Height per field: multiline focused = max(3, line_count+1), others = 2
+    let field_heights: Vec<u16> = form.fields.iter().enumerate().map(|(i, field)| {
+        if field.is_multiline && i == form.focused {
+            let line_count = field.value.chars().filter(|&c| c == '\n').count() + 1;
+            (line_count as u16 + 1).max(3)
+        } else {
+            2
+        }
+    }).collect();
+    let fields_total: u16 = field_heights.iter().sum();
+    let dialog_height = fields_total + 3 + 2 + 2; // hint(3) + borders(2) + padding(2)
     let area = centered_fixed(60, dialog_height, f.area());
 
     f.render_widget(Clear, area);
@@ -718,10 +727,9 @@ fn draw_form(f: &mut Frame, app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let field_constraints: Vec<Constraint> = form
-        .fields
+    let field_constraints: Vec<Constraint> = field_heights
         .iter()
-        .map(|_| Constraint::Length(2))
+        .map(|&h| Constraint::Length(h))
         .chain(std::iter::once(Constraint::Length(3)))
         .collect();
 
@@ -760,6 +768,53 @@ fn draw_form(f: &mut Frame, app: &App) {
                 Span::raw(" "),
                 right,
             ])
+        } else if field.is_multiline {
+            // Multiline field: render as Paragraph with real terminal cursor when focused
+            if is_focused && field.editable {
+                let cursor_pos = field.cursor.min(field.value.len());
+                let before_cursor = &field.value[..cursor_pos];
+                let cursor_row = before_cursor.chars().filter(|&c| c == '\n').count() as u16;
+                let last_nl = before_cursor.rfind('\n').map(|p| p + 1).unwrap_or(0);
+                let cursor_col = before_cursor[last_nl..].width() as u16;
+                // Render all lines
+                let lines: Vec<Line> = field.value.split('\n').enumerate().map(|(row, line)| {
+                    if row == cursor_row as usize {
+                        let col = cursor_col as usize;
+                        let byte_col = line.char_indices().nth(col).map(|(b, _)| b).unwrap_or(line.len());
+                        let before = &line[..byte_col];
+                        let cursor_char = line[byte_col..].chars().next().unwrap_or(' ');
+                        let after_start = byte_col + cursor_char.len_utf8().min(line.len() - byte_col);
+                        let after = &line[after_start..];
+                        Line::from(vec![
+                            Span::raw(before.to_string()),
+                            Span::styled(cursor_char.to_string(), Style::default().add_modifier(Modifier::REVERSED)),
+                            Span::raw(after.to_string()),
+                        ])
+                    } else {
+                        Line::from(line.to_string())
+                    }
+                }).collect();
+                let label_line = Line::from(Span::styled(format!("{:<10}", field.label), label_style));
+                let mut all_lines = vec![label_line];
+                all_lines.extend(lines);
+                f.render_widget(Paragraph::new(all_lines), chunks[i]);
+                continue;
+            } else {
+                // Not focused: show label on first line, first line of content on second (truncated)
+                let first_line = field.value.lines().next().unwrap_or("");
+                let label_line = Line::from(Span::styled(format!("{:<10}", field.label), label_style));
+                let content_chars: Vec<char> = first_line.chars().collect();
+                let max_w = chunks[i].width.saturating_sub(2) as usize;
+                let display_str = if content_chars.len() > max_w && max_w > 1 {
+                    let truncated: String = content_chars[..max_w - 1].iter().collect();
+                    format!("{}\u{2026}", truncated)
+                } else {
+                    first_line.to_string()
+                };
+                let content_line = Line::from(Span::styled(display_str, Style::default().fg(t::MUTED)));
+                f.render_widget(Paragraph::new(vec![label_line, content_line]), chunks[i]);
+                continue;
+            }
         } else {
             let display_val = if field.label == "API Key" && !is_focused {
                 mask_api_key_str(&field.value).unwrap_or_else(|| field.value.clone())
@@ -810,16 +865,27 @@ fn draw_form(f: &mut Frame, app: &App) {
 
     let hint_idx = form.fields.len();
     if hint_idx < chunks.len() {
-        let mut hint_lines = vec![
-            Line::from(vec![
+        let focused_field = &form.fields[form.focused];
+        let mut hint_lines = if focused_field.is_multiline {
+            vec![Line::from(vec![
+                Span::raw("   "),
+                Span::styled("Enter", Style::default().fg(t::SUCCESS)),
+                Span::styled(" Save  ", Style::default().fg(t::MUTED)),
+                Span::styled("S+Enter", Style::default().fg(t::PRIMARY)),
+                Span::styled(" Newline  ", Style::default().fg(t::MUTED)),
+                Span::styled("Esc", Style::default().fg(t::WARNING)),
+                Span::styled(" Cancel", Style::default().fg(t::MUTED)),
+            ])]
+        } else {
+            vec![Line::from(vec![
                 Span::raw("          "),
                 Span::styled("Enter", Style::default().fg(t::SUCCESS)),
                 Span::styled(" Save  ", Style::default().fg(t::MUTED)),
                 Span::styled("Esc", Style::default().fg(t::WARNING)),
                 Span::styled(" Cancel", Style::default().fg(t::MUTED)),
-            ]),
-            Line::from(""),
-        ];
+            ])]
+        };
+        hint_lines.push(Line::from(""));
         if let Some(err) = &form.error {
             hint_lines.push(
                 Line::from(Span::styled(format!("✗ {}", err), Style::default().fg(t::ERROR))),

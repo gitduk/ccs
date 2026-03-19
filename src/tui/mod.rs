@@ -355,12 +355,25 @@ fn handle_editing_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers, ser
                 test_provider_by_name(app, &name);
             }
         }
-        KeyCode::Tab | KeyCode::Down => form.focus_next(),
-        KeyCode::BackTab | KeyCode::Up => form.focus_prev(),
+        KeyCode::Tab => form.focus_next(),
+        KeyCode::BackTab => form.focus_prev(),
+        KeyCode::Down if !form.fields[form.focused].is_multiline => form.focus_next(),
+        KeyCode::Up if !form.fields[form.focused].is_multiline => form.focus_prev(),
+        KeyCode::Down => {
+            if !form.fields[form.focused].move_down() {
+                form.focus_next();
+            }
+        }
+        KeyCode::Up => {
+            if !form.fields[form.focused].move_up() {
+                form.focus_prev();
+            }
+        }
         KeyCode::Char('j') if modifiers.contains(KeyModifiers::CONTROL) => form.focus_next(),
         KeyCode::Char('k') if modifiers.contains(KeyModifiers::CONTROL) => form.focus_prev(),
         _ => {
             let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+            let shift = modifiers.contains(KeyModifiers::SHIFT);
             let field = &mut form.fields[form.focused];
             if field.is_toggle {
                 match code {
@@ -370,6 +383,22 @@ fn handle_editing_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers, ser
                     KeyCode::Char('h') | KeyCode::Char('l') if ctrl => {
                         field.toggle_value();
                     }
+                    _ => {}
+                }
+            } else if field.is_multiline {
+                match code {
+                    KeyCode::Enter if shift => field.insert_newline(),
+                    KeyCode::Char(c) if !ctrl => field.insert(c),
+                    KeyCode::Char('w') if ctrl => field.delete_word_back(),
+                    KeyCode::Char('h') if ctrl => field.backspace(),
+                    KeyCode::Char('a') if ctrl => field.home(),
+                    KeyCode::Char('e') if ctrl => field.end(),
+                    KeyCode::Backspace => field.backspace(),
+                    KeyCode::Delete => field.delete(),
+                    KeyCode::Left => field.move_left(),
+                    KeyCode::Right => field.move_right(),
+                    KeyCode::Home => field.home(),
+                    KeyCode::End => field.end(),
                     _ => {}
                 }
             } else {
