@@ -58,9 +58,8 @@ impl Provider {
     /// Resolve api_key: if it starts with '$', read from environment variable.
     pub fn resolve_api_key(&self) -> Result<String> {
         if let Some(env_var) = self.api_key.strip_prefix('$') {
-            std::env::var(env_var).map_err(|_| {
-                AppError::Config(format!("Environment variable '{env_var}' not set"))
-            })
+            std::env::var(env_var)
+                .map_err(|_| AppError::Config(format!("Environment variable '{env_var}' not set")))
         } else {
             Ok(self.api_key.clone())
         }
@@ -86,7 +85,10 @@ impl AppConfig {
 
     /// Build a name → id map for all providers (used for DB migration).
     pub fn name_to_id_map(&self) -> std::collections::HashMap<String, String> {
-        self.providers.iter().map(|(n, p)| (n.clone(), p.id.clone())).collect()
+        self.providers
+            .iter()
+            .map(|(n, p)| (n.clone(), p.id.clone()))
+            .collect()
     }
 
     pub fn resolve_db_path(&self) -> String {
@@ -100,7 +102,8 @@ impl AppConfig {
 
 /// Get the config file path: ~/.ccs/config.json
 pub fn config_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| AppError::Config("Cannot find home directory".into()))?;
+    let home =
+        dirs::home_dir().ok_or_else(|| AppError::Config("Cannot find home directory".into()))?;
     Ok(home.join(".ccs").join("config.json"))
 }
 

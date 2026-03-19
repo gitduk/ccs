@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, mpsc};
-
+use std::sync::{mpsc, Arc, Mutex};
 
 use ratatui::widgets::TableState;
 
@@ -134,7 +133,10 @@ impl FormField {
         }
         let col = self.cursor - line_start;
         let prev_line_end = line_start - 1; // position of the '\n'
-        let prev_line_start = self.value[..prev_line_end].rfind('\n').map(|p| p + 1).unwrap_or(0);
+        let prev_line_start = self.value[..prev_line_end]
+            .rfind('\n')
+            .map(|p| p + 1)
+            .unwrap_or(0);
         let prev_line_len = prev_line_end - prev_line_start;
         self.cursor = prev_line_start + col.min(prev_line_len);
         true
@@ -151,7 +153,8 @@ impl FormField {
         let before = &self.value[..self.cursor];
         let line_start = before.rfind('\n').map(|p| p + 1).unwrap_or(0);
         let col = self.cursor - line_start;
-        let next_line_end = self.value[next_line_start..].find('\n')
+        let next_line_end = self.value[next_line_start..]
+            .find('\n')
             .map(|p| next_line_start + p)
             .unwrap_or(self.value.len());
         let next_line_len = next_line_end - next_line_start;
@@ -172,8 +175,10 @@ impl FormField {
             return;
         }
         let char_len = self.value[..self.cursor]
-            .chars().next_back()
-            .map(|c| c.len_utf8()).unwrap_or(1);
+            .chars()
+            .next_back()
+            .map(|c| c.len_utf8())
+            .unwrap_or(1);
         self.cursor -= char_len;
         self.value.remove(self.cursor);
     }
@@ -188,8 +193,10 @@ impl FormField {
     pub fn move_left(&mut self) {
         if self.cursor > 0 {
             let char_len = self.value[..self.cursor]
-                .chars().next_back()
-                .map(|c| c.len_utf8()).unwrap_or(1);
+                .chars()
+                .next_back()
+                .map(|c| c.len_utf8())
+                .unwrap_or(1);
             self.cursor -= char_len;
         }
     }
@@ -197,8 +204,10 @@ impl FormField {
     pub fn move_right(&mut self) {
         if self.cursor < self.value.len() {
             let char_len = self.value[self.cursor..]
-                .chars().next()
-                .map(|c| c.len_utf8()).unwrap_or(1);
+                .chars()
+                .next()
+                .map(|c| c.len_utf8())
+                .unwrap_or(1);
             self.cursor += char_len;
         }
     }
@@ -213,16 +222,24 @@ impl FormField {
             // SAFETY: pos is always maintained as a valid UTF-8 char boundary
             // by insert/backspace/move_left; next_back() on a non-empty slice
             // is always Some, but we use expect for a clear panic message.
-            let c = self.value[..pos].chars().next_back()
+            let c = self.value[..pos]
+                .chars()
+                .next_back()
                 .expect("pos is a valid UTF-8 char boundary");
-            if c != ' ' { break; }
+            if c != ' ' {
+                break;
+            }
             pos -= c.len_utf8();
         }
         // Delete until next space
         while pos > 0 {
-            let c = self.value[..pos].chars().next_back()
+            let c = self.value[..pos]
+                .chars()
+                .next_back()
                 .expect("pos is a valid UTF-8 char boundary");
-            if c == ' ' { break; }
+            if c == ' ' {
+                break;
+            }
             pos -= c.len_utf8();
         }
         self.value.drain(pos..self.cursor);
@@ -420,7 +437,11 @@ impl App {
         };
 
         let new_name = form.fields[0].value.trim().to_string();
-        let base_url = form.fields[1].value.trim().trim_end_matches('/').to_string();
+        let base_url = form.fields[1]
+            .value
+            .trim()
+            .trim_end_matches('/')
+            .to_string();
         let api_key = form.fields[2].value.trim().to_string();
         let format_str = form.fields[3].value.trim().to_string();
         let notes = form.fields[4].value.clone();
@@ -473,7 +494,13 @@ impl App {
             // Rebuild IndexMap preserving insertion order, swapping the key in one pass.
             self.config.providers = std::mem::take(&mut self.config.providers)
                 .into_iter()
-                .map(|(k, v)| if k == old_name { (new_name.clone(), provider.clone()) } else { (k, v) })
+                .map(|(k, v)| {
+                    if k == old_name {
+                        (new_name.clone(), provider.clone())
+                    } else {
+                        (k, v)
+                    }
+                })
                 .collect();
 
             if self.config.current == old_name {
@@ -534,7 +561,9 @@ impl App {
         // thread holds both locks simultaneously, so lock ordering (db first,
         // then metrics) is deadlock-free.
         let Ok(conn) = self.db.lock() else { return };
-        let Ok(mut m) = self.metrics.lock() else { return };
+        let Ok(mut m) = self.metrics.lock() else {
+            return;
+        };
         let _ = crate::db::clear_all(&conn);
         *m = TokenMetrics::new();
         drop(conn);
@@ -571,7 +600,13 @@ impl App {
         }
         self.provider_models.remove(name);
         if self.config.current == name {
-            self.config.current = self.config.providers.keys().next().cloned().unwrap_or_default();
+            self.config.current = self
+                .config
+                .providers
+                .keys()
+                .next()
+                .cloned()
+                .unwrap_or_default();
         }
         config::save_config(&self.config)?;
         self.refresh_ids();
@@ -590,7 +625,7 @@ impl App {
         self.message = Some((msg.into(), kind, std::time::Instant::now()));
     }
 
-/// Clear message if it has expired (after 3 seconds).
+    /// Clear message if it has expired (after 3 seconds).
     pub fn tick_message(&mut self) {
         if let Some((_, _, created)) = &self.message {
             if created.elapsed() > std::time::Duration::from_secs(MESSAGE_TIMEOUT_SECS) {
@@ -600,8 +635,12 @@ impl App {
     }
 
     pub fn move_provider_up(&mut self) -> Result<()> {
-        let Some(idx) = self.table_state.selected() else { return Ok(()); };
-        if idx == 0 { return Ok(()); }
+        let Some(idx) = self.table_state.selected() else {
+            return Ok(());
+        };
+        if idx == 0 {
+            return Ok(());
+        }
         self.config.providers.move_index(idx, idx - 1);
         self.refresh_ids();
         self.table_state.select(Some(idx - 1));
@@ -610,8 +649,12 @@ impl App {
     }
 
     pub fn move_provider_down(&mut self) -> Result<()> {
-        let Some(idx) = self.table_state.selected() else { return Ok(()); };
-        if idx + 1 >= self.provider_names.len() { return Ok(()); }
+        let Some(idx) = self.table_state.selected() else {
+            return Ok(());
+        };
+        if idx + 1 >= self.provider_names.len() {
+            return Ok(());
+        }
         self.config.providers.move_index(idx, idx + 1);
         self.refresh_ids();
         self.table_state.select(Some(idx + 1));
@@ -631,7 +674,12 @@ impl App {
             self.pending_tests.remove(&name);
             if let Some(models) = &result.model_names {
                 if let Ok(conn) = self.db.lock() {
-                    let id = self.config.providers.get(&name).map(|p| p.id.as_str()).unwrap_or(&name);
+                    let id = self
+                        .config
+                        .providers
+                        .get(&name)
+                        .map(|p| p.id.as_str())
+                        .unwrap_or(&name);
                     let _ = crate::db::upsert_provider_models(&conn, id, &name, models);
                 }
                 self.provider_models.insert(name.clone(), models.clone());
@@ -691,7 +739,11 @@ impl App {
                 self.refresh_ids();
 
                 // Reselect current provider if it exists
-                if let Some(idx) = self.provider_names.iter().position(|name| name == &self.config.current) {
+                if let Some(idx) = self
+                    .provider_names
+                    .iter()
+                    .position(|name| name == &self.config.current)
+                {
                     self.table_state.select(Some(idx));
                 } else if !self.provider_names.is_empty() {
                     self.table_state.select(Some(0));

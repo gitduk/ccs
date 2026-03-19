@@ -3,22 +3,22 @@ pub mod theme;
 mod ui;
 
 use std::io;
-use std::sync::Arc;
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use app::{App, ConfirmAction, Mode, MessageKind, ServerStatus};
 use crate::error::Result;
+use app::{App, ConfirmAction, MessageKind, Mode, ServerStatus};
 
 struct ServerHandle {
     task: JoinHandle<()>,
@@ -125,8 +125,8 @@ fn check_bg_proxy_status(app: &mut App) {
 /// for its Drop impl to keep the kernel watch descriptor open.
 /// Returns `None` if the DB path is unavailable or watcher init fails (non-fatal).
 fn start_db_watcher(app: &App) -> Option<(mpsc::Receiver<()>, notify::RecommendedWatcher)> {
-    use notify::{EventKind, RecursiveMode, Watcher, recommended_watcher};
     use notify::event::ModifyKind;
+    use notify::{recommended_watcher, EventKind, RecursiveMode, Watcher};
 
     let db_path = app.config.resolve_db_path();
     let db_file = std::path::PathBuf::from(&db_path);
@@ -140,8 +140,7 @@ fn start_db_watcher(app: &App) -> Option<(mpsc::Receiver<()>, notify::Recommende
             // Only react to actual content modifications, not metadata changes.
             let is_modify = matches!(
                 event.kind,
-                EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Any)
-                    | EventKind::Create(_)
+                EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Any) | EventKind::Create(_)
             );
             if !is_modify {
                 return;
@@ -159,7 +158,9 @@ fn start_db_watcher(app: &App) -> Option<(mpsc::Receiver<()>, notify::Recommende
     })
     .ok()?;
 
-    watcher.watch(&watch_dir, RecursiveMode::NonRecursive).ok()?;
+    watcher
+        .watch(&watch_dir, RecursiveMode::NonRecursive)
+        .ok()?;
 
     Some((event_rx, watcher))
 }
@@ -211,7 +212,11 @@ fn handle_key(
     }
 }
 
-fn handle_normal_key(app: &mut App, code: KeyCode, server: &mut Option<ServerHandle>) -> Result<()> {
+fn handle_normal_key(
+    app: &mut App,
+    code: KeyCode,
+    server: &mut Option<ServerHandle>,
+) -> Result<()> {
     // Clear any status bar message on next key press
     if app.message.is_some() {
         app.message = None;
@@ -245,8 +250,12 @@ fn handle_normal_key(app: &mut App, code: KeyCode, server: &mut Option<ServerHan
         KeyCode::Char('t') => {
             test_selected(app);
         }
-        KeyCode::Char('K') => { let _ = app.move_provider_up(); }
-        KeyCode::Char('J') => { let _ = app.move_provider_down(); }
+        KeyCode::Char('K') => {
+            let _ = app.move_provider_up();
+        }
+        KeyCode::Char('J') => {
+            let _ = app.move_provider_down();
+        }
         KeyCode::Char('f') => {
             let _ = app.toggle_fallback();
             sync_proxy_config(app, server);
@@ -284,14 +293,14 @@ fn sync_proxy_config(app: &App, server: &Option<ServerHandle>) {
         let url = format!("http://127.0.0.1:{port}/reload");
         let client = app.test_client.clone();
         tokio::spawn(async move {
-            let result = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                client.post(&url).send(),
-            )
-            .await;
+            let result =
+                tokio::time::timeout(std::time::Duration::from_secs(5), client.post(&url).send())
+                    .await;
             match result {
                 Err(_) => tracing::warn!("Reload request to background proxy timed out"),
-                Ok(Err(e)) => tracing::warn!("Failed to notify background proxy of config change: {e}"),
+                Ok(Err(e)) => {
+                    tracing::warn!("Failed to notify background proxy of config change: {e}")
+                }
                 Ok(Ok(resp)) if !resp.status().is_success() => {
                     tracing::warn!("Background proxy reload returned {}", resp.status());
                 }
@@ -319,17 +328,29 @@ fn start_server_background(app: &mut App, server: &mut Option<ServerHandle>) {
     let db = app.db.clone();
     let proxy_config_server = proxy_config.clone();
     let task = tokio::spawn(async move {
-        if let Err(e) = crate::proxy::start_server_with_shutdown(proxy_config_server, shutdown_rx, metrics, db).await {
+        if let Err(e) =
+            crate::proxy::start_server_with_shutdown(proxy_config_server, shutdown_rx, metrics, db)
+                .await
+        {
             tracing::error!("Proxy server error: {e}");
         }
     });
 
-    *server = Some(ServerHandle { task, shutdown_tx, proxy_config });
+    *server = Some(ServerHandle {
+        task,
+        shutdown_tx,
+        proxy_config,
+    });
     app.server_status = ServerStatus::Running;
     app.set_message(format!("Proxy started on {listen}"), MessageKind::Success);
 }
 
-fn handle_editing_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers, server: &Option<ServerHandle>) -> Result<()> {
+fn handle_editing_key(
+    app: &mut App,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    server: &Option<ServerHandle>,
+) -> Result<()> {
     let Some(form) = &mut app.form else {
         app.mode = Mode::Normal;
         return Ok(());
@@ -340,12 +361,16 @@ fn handle_editing_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers, ser
             app.form = None;
             app.mode = Mode::Normal;
         }
-        KeyCode::Enter | KeyCode::Char('s') if code == KeyCode::Enter || modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char('s') if modifiers.contains(KeyModifiers::CONTROL) => {
             // For new providers the name comes from the form's first field;
             // for edits it's the currently selected provider.
             let provider_name = if form.is_new {
                 let name = form.fields[0].value.trim().to_string();
-                if name.is_empty() { None } else { Some(name) }
+                if name.is_empty() {
+                    None
+                } else {
+                    Some(name)
+                }
             } else {
                 app.selected_name().map(|s| s.to_string())
             };
@@ -353,6 +378,14 @@ fn handle_editing_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers, ser
             sync_proxy_config(app, server);
             if let Some(name) = provider_name {
                 test_provider_by_name(app, &name);
+            }
+        }
+        KeyCode::Enter => {
+            let field = &form.fields[form.focused];
+            if field.is_multiline {
+                form.fields[form.focused].insert_newline();
+            } else {
+                form.focus_next();
             }
         }
         KeyCode::Tab => form.focus_next(),
@@ -369,11 +402,26 @@ fn handle_editing_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers, ser
                 form.focus_prev();
             }
         }
-        KeyCode::Char('j') if modifiers.contains(KeyModifiers::CONTROL) => form.focus_next(),
-        KeyCode::Char('k') if modifiers.contains(KeyModifiers::CONTROL) => form.focus_prev(),
+        KeyCode::Char('j') if modifiers.contains(KeyModifiers::CONTROL) => {
+            if form.fields[form.focused].is_multiline {
+                if !form.fields[form.focused].move_down() {
+                    form.focus_next();
+                }
+            } else {
+                form.focus_next();
+            }
+        }
+        KeyCode::Char('k') if modifiers.contains(KeyModifiers::CONTROL) => {
+            if form.fields[form.focused].is_multiline {
+                if !form.fields[form.focused].move_up() {
+                    form.focus_prev();
+                }
+            } else {
+                form.focus_prev();
+            }
+        }
         _ => {
             let ctrl = modifiers.contains(KeyModifiers::CONTROL);
-            let shift = modifiers.contains(KeyModifiers::SHIFT);
             let field = &mut form.fields[form.focused];
             if field.is_toggle {
                 match code {
@@ -383,22 +431,6 @@ fn handle_editing_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers, ser
                     KeyCode::Char('h') | KeyCode::Char('l') if ctrl => {
                         field.toggle_value();
                     }
-                    _ => {}
-                }
-            } else if field.is_multiline {
-                match code {
-                    KeyCode::Enter if shift => field.insert_newline(),
-                    KeyCode::Char(c) if !ctrl => field.insert(c),
-                    KeyCode::Char('w') if ctrl => field.delete_word_back(),
-                    KeyCode::Char('h') if ctrl => field.backspace(),
-                    KeyCode::Char('a') if ctrl => field.home(),
-                    KeyCode::Char('e') if ctrl => field.end(),
-                    KeyCode::Backspace => field.backspace(),
-                    KeyCode::Delete => field.delete(),
-                    KeyCode::Left => field.move_left(),
-                    KeyCode::Right => field.move_right(),
-                    KeyCode::Home => field.home(),
-                    KeyCode::End => field.end(),
                     _ => {}
                 }
             } else {
@@ -496,11 +528,17 @@ fn toggle_bg_proxy(app: &mut App, server: &mut Option<ServerHandle>) {
 
         match app.spawn_bg_proxy() {
             Ok(()) => app.set_message(
-                format!("Background proxy running on {}  — safe to quit TUI", app.config.listen),
+                format!(
+                    "Background proxy running on {}  — safe to quit TUI",
+                    app.config.listen
+                ),
                 MessageKind::Success,
             ),
             Err(e) => {
-                app.set_message(format!("Failed to start background proxy: {e}"), MessageKind::Error);
+                app.set_message(
+                    format!("Failed to start background proxy: {e}"),
+                    MessageKind::Error,
+                );
                 // Bring the in-TUI server back up on failure.
                 start_server_background(app, server);
             }

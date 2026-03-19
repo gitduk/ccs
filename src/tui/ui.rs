@@ -1,13 +1,13 @@
-use unicode_width::UnicodeWidthStr;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Padding, Paragraph, Row, Table, Wrap};
 use ratatui::Frame;
+use unicode_width::UnicodeWidthStr;
 
 use super::app::{App, ConfirmAction, MessageKind, Mode};
-use crate::test_provider::TestStatus;
 use super::theme::{self as t};
+use crate::test_provider::TestStatus;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
@@ -32,7 +32,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_title_bar(f: &mut Frame, app: &App, area: Rect) {
-    let fallback_label = if app.config.fallback { "Fallback on  " } else { "Fallback off " };
+    let fallback_label = if app.config.fallback {
+        "Fallback on  "
+    } else {
+        "Fallback off "
+    };
     let listen_label = format!("{}  ", app.config.listen);
     let version = format!("  v{}", env!("CARGO_PKG_VERSION"));
     let title_left = " Claude Code Switcher";
@@ -69,27 +73,42 @@ fn draw_title_bar(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
-    let table_height = (app.provider_names.len() as u16 + 2).max(3).min(area.height * 2 / 3);
+    let table_height = (app.provider_names.len() as u16 + 2)
+        .max(3)
+        .min(area.height * 2 / 3);
     let detail_height = 3u16;
     // stats: blank + title + N provider rows + bottom border
     let n_providers = app.provider_names.len() as u16;
     let stats_min_height = 3 + n_providers;
     // model: blank + title + N active rows + inactive grid rows + bottom border
-    let n_active = app.metrics.lock()
-        .map(|m| m.by_model.values().filter(|s| s.input + s.output > 0).count() as u16)
+    let n_active = app
+        .metrics
+        .lock()
+        .map(|m| {
+            m.by_model
+                .values()
+                .filter(|s| s.input + s.output > 0)
+                .count() as u16
+        })
         .unwrap_or(0);
     let n_inactive: u16 = {
-        let used: std::collections::HashSet<String> = app.metrics.lock()
+        let used: std::collections::HashSet<String> = app
+            .metrics
+            .lock()
             .map(|m| m.by_model.keys().cloned().collect())
             .unwrap_or_default();
-        let total_inactive = app.provider_models.values()
+        let total_inactive = app
+            .provider_models
+            .values()
             .flat_map(|v| v.iter())
             .filter(|m| !used.contains(*m))
             .collect::<std::collections::HashSet<_>>()
             .len();
         // Estimate grid rows: inactive models laid out with max_name+2 cell width.
         // Use area.width as an approximation (stats panel has 2-char padding).
-        let max_name = app.provider_models.values()
+        let max_name = app
+            .provider_models
+            .values()
             .flat_map(|v| v.iter())
             .map(|s| s.width())
             .max()
@@ -136,12 +155,15 @@ fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
             Line::from(""),
             Line::from(vec![
                 Span::styled("  Press ", Style::default().fg(t::MUTED)),
-                Span::styled("a", Style::default().fg(t::WARNING).add_modifier(Modifier::BOLD)),
-                Span::styled(" to add a provider, or edit ", Style::default().fg(t::MUTED)),
                 Span::styled(
-                    config_path_display(),
-                    Style::default().fg(t::PRIMARY),
+                    "a",
+                    Style::default().fg(t::WARNING).add_modifier(Modifier::BOLD),
                 ),
+                Span::styled(
+                    " to add a provider, or edit ",
+                    Style::default().fg(t::MUTED),
+                ),
+                Span::styled(config_path_display(), Style::default().fg(t::PRIMARY)),
             ]),
         ])
         .block(
@@ -153,10 +175,33 @@ fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let url_col = col_width("Base URL", app.config.providers.values().map(|p| p.base_url.len()));
-    let key_col = col_width("API Key",  app.config.providers.values().map(|p| api_key_display_len(&p.api_key)));
+    let url_col = col_width(
+        "Base URL",
+        app.config.providers.values().map(|p| p.base_url.len()),
+    );
+    let key_col = col_width(
+        "API Key",
+        app.config
+            .providers
+            .values()
+            .map(|p| api_key_display_len(&p.api_key)),
+    );
+    let notes_col = col_width(
+        "Notes",
+        app.config
+            .providers
+            .values()
+            .map(|p| p.notes.lines().next().unwrap_or("").width()),
+    )
+    .min(30);
     // Name col = longest name + 2 for the " ◀" indicator + 4 gap
-    let max_name_len = app.provider_names.iter().map(|name| name.len()).max().unwrap_or(0).max("Name".len());
+    let max_name_len = app
+        .provider_names
+        .iter()
+        .map(|name| name.len())
+        .max()
+        .unwrap_or(0)
+        .max("Name".len());
     let name_col = (max_name_len + 2 + 4) as u16;
 
     let header = Row::new(vec![
@@ -164,6 +209,7 @@ fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
         Cell::from("Format").style(Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD)),
         Cell::from("Base URL").style(Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD)),
         Cell::from("API Key").style(Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD)),
+        Cell::from("Notes").style(Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD)),
     ])
     .height(1);
 
@@ -180,13 +226,20 @@ fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
 
             // Cursor triangle shown only on the selected row, colored by that provider.
             let (indicator, indicator_style) = if is_selected {
-                (" ◀", Style::default().fg(t::provider_color(name)).add_modifier(Modifier::BOLD))
+                (
+                    " ◀",
+                    Style::default()
+                        .fg(t::provider_color(name))
+                        .add_modifier(Modifier::BOLD),
+                )
             } else {
                 ("  ", Style::default())
             };
             // Current active provider: provider color. Others: TEXT name, MUTED details.
             let name_style = if is_current {
-                Style::default().fg(t::provider_color(name)).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(t::provider_color(name))
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(t::TEXT)
             };
@@ -202,11 +255,25 @@ fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
                 Span::styled(indicator, indicator_style),
             ]));
 
+            let notes_first_line = provider.notes.lines().next().unwrap_or("");
+            let notes_text = if notes_first_line.width() > notes_col as usize {
+                format!(
+                    "{}…",
+                    &notes_first_line[..notes_first_line
+                        .char_indices()
+                        .map(|(i, _)| i)
+                        .nth(notes_col.saturating_sub(1) as usize)
+                        .unwrap_or(notes_first_line.len())]
+                )
+            } else {
+                notes_first_line.to_string()
+            };
             Row::new(vec![
                 name_cell,
                 Cell::from(Span::styled(provider.api_format.to_string(), detail_style)),
                 Cell::from(Span::styled(provider.base_url.as_str(), detail_style)),
                 masked_api_key(&provider.api_key),
+                Cell::from(Span::styled(notes_text, detail_style)),
             ])
         })
         .collect();
@@ -218,6 +285,7 @@ fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Length(12),
             Constraint::Length(url_col),
             Constraint::Length(key_col),
+            Constraint::Length(notes_col),
         ],
     )
     .header(header)
@@ -248,9 +316,15 @@ fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
                 .padding(Padding::horizontal(1));
             let lines = vec![
                 Line::from(""),
-                Line::from(Span::styled("Error", Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD))),
+                Line::from(Span::styled(
+                    "Error",
+                    Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD),
+                )),
                 Line::from(vec![
-                    Span::styled("✗ ", Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "✗ ",
+                        Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(msg.as_str(), Style::default().fg(t::TEXT)),
                 ]),
             ];
@@ -260,25 +334,39 @@ fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let label = Style::default().fg(t::MUTED);
-    let title_line = Line::from(Span::styled("Info", Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD)));
+    let title_line = Line::from(Span::styled(
+        "Info",
+        Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD),
+    ));
 
     let Some(name) = app
         .table_state
         .selected()
         .and_then(|i| app.provider_names.get(i))
     else {
-        f.render_widget(Paragraph::new(vec![Line::from(""), title_line]).block(block), area);
+        f.render_widget(
+            Paragraph::new(vec![Line::from(""), title_line]).block(block),
+            area,
+        );
         return;
     };
 
     let mut lines = vec![Line::from(""), title_line];
     if app.pending_tests.contains(name.as_str()) {
         let prev = app.test_results.get(name.as_str());
-        let latency_str = prev.map(|r| fmt_latency(r.latency_ms)).unwrap_or_else(|| "—".to_string());
-        let models_str = prev.and_then(|r| r.model_count).map(|n| format!("{n} models")).unwrap_or_else(|| "—".to_string());
+        let latency_str = prev
+            .map(|r| fmt_latency(r.latency_ms))
+            .unwrap_or_else(|| "—".to_string());
+        let models_str = prev
+            .and_then(|r| r.model_count)
+            .map(|n| format!("{n} models"))
+            .unwrap_or_else(|| "—".to_string());
         lines.push(Line::from(vec![
             Span::styled("Status ", label),
-            Span::styled("Testing", Style::default().fg(t::MUTED).add_modifier(Modifier::ITALIC)),
+            Span::styled(
+                "Testing",
+                Style::default().fg(t::MUTED).add_modifier(Modifier::ITALIC),
+            ),
             Span::styled("   Latency ", label),
             Span::styled(latency_str, Style::default().fg(t::MUTED)),
             Span::styled("   Models ", label),
@@ -286,13 +374,19 @@ fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
         ]));
     } else if let Some(r) = app.test_results.get(name.as_str()) {
         let (status_str, status_style) = match &r.status {
-            TestStatus::Ok => ("✓ OK".to_string(), Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD)),
-            TestStatus::AuthFailed => ("✗ Auth failed".to_string(), Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD)),
+            TestStatus::Ok => (
+                "✓ OK".to_string(),
+                Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD),
+            ),
+            TestStatus::AuthFailed => (
+                "✗ Auth failed".to_string(),
+                Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD),
+            ),
             TestStatus::Error(e) => (truncate_error(e), Style::default().fg(t::ERROR)),
         };
         let models_str = match r.model_count {
             Some(n) => Span::styled(format!("{n} models"), Style::default().fg(t::TEXT)),
-            None    => Span::styled("—", Style::default().fg(t::MUTED)),
+            None => Span::styled("—", Style::default().fg(t::MUTED)),
         };
         lines.push(Line::from(vec![
             Span::styled("Status ", label),
@@ -305,7 +399,10 @@ fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
     } else {
         lines.push(Line::from(vec![
             Span::styled("Press ", Style::default().fg(t::MUTED)),
-            Span::styled("[t]", Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[t]",
+                Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" to test connectivity", Style::default().fg(t::MUTED)),
         ]));
     }
@@ -314,18 +411,22 @@ fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_keybindings(f: &mut Frame, app: &App, area: Rect) {
-    let bg_label = if app.bg_proxy_pid.is_some() { "Stop" } else { "Server" };
+    let bg_label = if app.bg_proxy_pid.is_some() {
+        "Stop"
+    } else {
+        "Server"
+    };
     // (key, desc, key_color, desc_color)
     // PRIMARY = normal actions, WARNING = destructive/exit, MUTED = secondary
     let all_keys: &[(&str, &str, Color, Color)] = &[
-        ("s", "Switch",   t::PRIMARY, t::MUTED),
-        ("a", "Add",      t::PRIMARY, t::MUTED),
-        ("e", "Edit",     t::PRIMARY, t::MUTED),
+        ("s", "Switch", t::PRIMARY, t::MUTED),
+        ("a", "Add", t::PRIMARY, t::MUTED),
+        ("e", "Edit", t::PRIMARY, t::MUTED),
         ("f", "Fallback", t::PRIMARY, t::MUTED),
-        ("S", bg_label,   t::PRIMARY, t::MUTED),
-        ("c", "Clear",    t::WARNING, t::MUTED),
-        ("q", "Quit",     t::WARNING, t::MUTED),
-        ("h", "Help",     t::MUTED,   t::MUTED),
+        ("S", bg_label, t::PRIMARY, t::MUTED),
+        ("c", "Clear", t::WARNING, t::MUTED),
+        ("q", "Quit", t::WARNING, t::MUTED),
+        ("h", "Help", t::MUTED, t::MUTED),
     ];
 
     let max_width = area.width as usize;
@@ -343,8 +444,14 @@ fn draw_keybindings(f: &mut Frame, app: &App, area: Rect) {
         if !first {
             spans.push(Span::raw("  "));
         }
-        spans.push(Span::styled(format!("[{}]", key), Style::default().fg(*key_color)));
-        spans.push(Span::styled(format!(" {}", desc), Style::default().fg(*desc_color)));
+        spans.push(Span::styled(
+            format!("[{}]", key),
+            Style::default().fg(*key_color),
+        ));
+        spans.push(Span::styled(
+            format!(" {}", desc),
+            Style::default().fg(*desc_color),
+        ));
         used += item_len;
         first = false;
     }
@@ -371,7 +478,12 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
     let mut provider_rows: Vec<(&str, crate::proxy::metrics::ProviderStats)> = app
         .provider_names
         .iter()
-        .map(|name| (name.as_str(), m.by_provider.get(name).cloned().unwrap_or_default()))
+        .map(|name| {
+            (
+                name.as_str(),
+                m.by_provider.get(name).cloned().unwrap_or_default(),
+            )
+        })
         .collect();
     let mut model_entries: Vec<(String, u64, u64)> = m
         .by_model
@@ -385,21 +497,39 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
     // Providers with no requests sort to the bottom (rate treated as 1.0).
     provider_rows.sort_by(|(_, a), (_, b)| {
         let rate = |s: &crate::proxy::metrics::ProviderStats| {
-            if s.requests == 0 { f64::MAX } else { s.failures as f64 / s.requests as f64 }
+            if s.requests == 0 {
+                f64::MAX
+            } else {
+                s.failures as f64 / s.requests as f64
+            }
         };
-        rate(a).partial_cmp(&rate(b)).unwrap_or(std::cmp::Ordering::Equal)
+        rate(a)
+            .partial_cmp(&rate(b))
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
     model_entries.sort_by(|a, b| (b.1 + b.2).cmp(&(a.1 + a.2)));
 
     let muted = Style::default().fg(t::MUTED);
-    let id_col_width = app.provider_names.iter().map(|s| s.len()).max().unwrap_or(8).max(8);
+    let id_col_width = app
+        .provider_names
+        .iter()
+        .map(|s| s.len())
+        .max()
+        .unwrap_or(8)
+        .max(8);
 
-    let dash_line = Line::from(Span::styled("╌".repeat(inner.width as usize), Style::default().fg(t::MUTED)));
+    let dash_line = Line::from(Span::styled(
+        "╌".repeat(inner.width as usize),
+        Style::default().fg(t::MUTED),
+    ));
 
     let mut lines: Vec<Line> = vec![
         Line::from(""),
         dash_line.clone(),
-        Line::from(Span::styled("By Provider", Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            "By Provider",
+            Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD),
+        )),
         Line::from(""),
     ];
     lines.extend(provider_rows.iter().map(|(name, s)| {
@@ -409,15 +539,28 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
                 format!("{:<width$}", name, width = id_col_width),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  In ",  muted),
-            Span::styled(format!("{:>7}", format_tokens(s.input)),  Style::default().fg(color)),
+            Span::styled("  In ", muted),
+            Span::styled(
+                format!("{:>7}", format_tokens(s.input)),
+                Style::default().fg(color),
+            ),
             Span::styled("  Out ", muted),
-            Span::styled(format!("{:>7}", format_tokens(s.output)), Style::default().fg(color)),
+            Span::styled(
+                format!("{:>7}", format_tokens(s.output)),
+                Style::default().fg(color),
+            ),
             Span::styled("  Req ", muted),
-            Span::styled(format!("{:>4}", s.requests), Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("{:>4}", s.requests),
+                Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("  Fail ", muted),
             {
-                let rate = if s.requests > 0 { s.failures as f64 / s.requests as f64 } else { 0.0 };
+                let rate = if s.requests > 0 {
+                    s.failures as f64 / s.requests as f64
+                } else {
+                    0.0
+                };
                 let high = rate > 0.5;
                 let style = if high {
                     Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD)
@@ -439,7 +582,10 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
     // Model Usage section — horizontal stacked bar chart
     lines.push(Line::from(""));
     lines.push(dash_line);
-    lines.push(Line::from(Span::styled("By Model", Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD))));
+    lines.push(Line::from(Span::styled(
+        "By Model",
+        Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD),
+    )));
     lines.push(Line::from(""));
 
     // Collect all known model names from test_results (fetched via /v1/models per provider).
@@ -466,7 +612,9 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
         let is_selected = provider_name.as_str() == selected_provider;
         for name in names {
             let entry = all_known.entry(name.as_str()).or_insert(false);
-            if is_selected { *entry = true; }
+            if is_selected {
+                *entry = true;
+            }
         }
     }
     let mut inactive_models: Vec<(&str, bool)> = all_known
@@ -479,21 +627,40 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(Span::styled("  No data yet", muted)));
     } else {
         // Cap label width at 30 chars to leave room for bars
-        let model_col_width = model_entries.iter().map(|(k, _, _)| k.chars().count()).max().unwrap_or(10).min(30);
+        let model_col_width = model_entries
+            .iter()
+            .map(|(k, _, _)| k.chars().count())
+            .max()
+            .unwrap_or(10)
+            .min(30);
         let value_width = 8usize; // "  1234.5K"
         let bar_area = (inner.width as usize).saturating_sub(model_col_width + 2 + value_width);
-        let max_total = model_entries.iter().map(|(_, i, o)| i + o).max().unwrap_or(1);
+        let max_total = model_entries
+            .iter()
+            .map(|(_, i, o)| i + o)
+            .max()
+            .unwrap_or(1);
 
         for (model, input, output) in &model_entries {
             let total = input + output;
-            let total_bar = if bar_area > 0 { (total * bar_area as u64 / max_total) as usize } else { 0 };
-            let input_bar = if total > 0 { total_bar * (*input as usize) / (total as usize) } else { 0 };
+            let total_bar = if bar_area > 0 {
+                (total * bar_area as u64 / max_total) as usize
+            } else {
+                0
+            };
+            let input_bar = if total > 0 {
+                total_bar * (*input as usize) / (total as usize)
+            } else {
+                0
+            };
             let output_bar = total_bar.saturating_sub(input_bar);
             let empty = bar_area.saturating_sub(total_bar);
 
             let model_chars: Vec<char> = model.chars().collect();
             let label = if model_chars.len() > model_col_width {
-                let truncated: String = model_chars[..model_col_width.saturating_sub(1)].iter().collect();
+                let truncated: String = model_chars[..model_col_width.saturating_sub(1)]
+                    .iter()
+                    .collect();
                 format!("{}…", truncated)
             } else {
                 format!("{:<width$}", model, width = model_col_width)
@@ -507,10 +674,13 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
             lines.push(Line::from(vec![
                 Span::styled(label, Style::default().fg(label_color)),
                 Span::raw("  "),
-                Span::styled("░".repeat(input_bar),  Style::default().fg(bar_color)),
+                Span::styled("░".repeat(input_bar), Style::default().fg(bar_color)),
                 Span::styled("█".repeat(output_bar), Style::default().fg(bar_color)),
                 Span::raw(" ".repeat(empty)),
-                Span::styled(format!("  {:>6}", format_tokens(total)), Style::default().fg(label_color)),
+                Span::styled(
+                    format!("  {:>6}", format_tokens(total)),
+                    Style::default().fg(label_color),
+                ),
             ]));
         }
 
@@ -521,7 +691,11 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
             }
             // Grid layout: determine cols from max display width, then compute per-column widths.
             // Use Unicode display width (handles CJK wide chars) rather than byte length.
-            let max_name = inactive_models.iter().map(|(m, _)| m.width()).max().unwrap_or(1);
+            let max_name = inactive_models
+                .iter()
+                .map(|(m, _)| m.width())
+                .max()
+                .unwrap_or(1);
             let available_width = inner.width as usize;
             let cols = (available_width / (max_name + 2)).max(1);
             // Per-column width = max display width in that column + 2-space gap
@@ -611,7 +785,7 @@ fn api_key_display_len(key: &str) -> usize {
     } else if key.chars().count() > 8 {
         11 // "abcd···wxyz"
     } else {
-        4  // "····"
+        4 // "····"
     }
 }
 
@@ -634,8 +808,13 @@ fn mask_api_key_str(key: &str) -> Option<String> {
 fn masked_api_key(key: &str) -> Cell<'static> {
     match mask_api_key_str(key) {
         Some(masked) => Cell::from(Span::styled(masked, Style::default().fg(t::MUTED))),
-        None if key.is_empty() => Cell::from(Span::styled("(not set)", Style::default().fg(t::MUTED))),
-        None => Cell::from(Span::styled(key.to_string(), Style::default().fg(t::WARNING))),
+        None if key.is_empty() => {
+            Cell::from(Span::styled("(not set)", Style::default().fg(t::MUTED)))
+        }
+        None => Cell::from(Span::styled(
+            key.to_string(),
+            Style::default().fg(t::WARNING),
+        )),
     }
 }
 
@@ -679,7 +858,10 @@ fn draw_help(f: &mut Frame, _app: &App) {
         .iter()
         .map(|(key, desc)| {
             Line::from(vec![
-                Span::styled(format!("{:<10}", key), Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("{:<10}", key),
+                    Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(*desc, Style::default().fg(t::TEXT)),
             ])
         })
@@ -687,9 +869,10 @@ fn draw_help(f: &mut Frame, _app: &App) {
 
     // Footer hint
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("Press any key to close", Style::default().fg(t::MUTED)),
-    ]));
+    lines.push(Line::from(vec![Span::styled(
+        "Press any key to close",
+        Style::default().fg(t::MUTED),
+    )]));
 
     f.render_widget(Paragraph::new(lines), inner);
 }
@@ -704,14 +887,19 @@ fn draw_form(f: &mut Frame, app: &App) {
     };
 
     // Height per field: multiline focused = max(3, line_count+1), others = 2
-    let field_heights: Vec<u16> = form.fields.iter().enumerate().map(|(i, field)| {
-        if field.is_multiline && i == form.focused {
-            let line_count = field.value.chars().filter(|&c| c == '\n').count() + 1;
-            (line_count as u16 + 1).max(3)
-        } else {
-            2
-        }
-    }).collect();
+    let field_heights: Vec<u16> = form
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(i, field)| {
+            if field.is_multiline && i == form.focused {
+                let line_count = field.value.chars().filter(|&c| c == '\n').count() + 1;
+                (line_count as u16 + 2).max(3)
+            } else {
+                3
+            }
+        })
+        .collect();
     let fields_total: u16 = field_heights.iter().sum();
     let dialog_height = fields_total + 3 + 2 + 2; // hint(3) + borders(2) + padding(2)
     let area = centered_fixed(60, dialog_height, f.area());
@@ -749,7 +937,9 @@ fn draw_form(f: &mut Frame, app: &App) {
         };
 
         let value_display = if field.is_toggle {
-            let selected = Style::default().fg(t::TEXT).add_modifier(Modifier::REVERSED | Modifier::BOLD);
+            let selected = Style::default()
+                .fg(t::TEXT)
+                .add_modifier(Modifier::REVERSED | Modifier::BOLD);
             let unselected = Style::default().fg(t::MUTED);
             let (left, right) = if field.value == "anthropic" {
                 (
@@ -777,24 +967,38 @@ fn draw_form(f: &mut Frame, app: &App) {
                 let last_nl = before_cursor.rfind('\n').map(|p| p + 1).unwrap_or(0);
                 let cursor_col = before_cursor[last_nl..].width() as u16;
                 // Render all lines
-                let lines: Vec<Line> = field.value.split('\n').enumerate().map(|(row, line)| {
-                    if row == cursor_row as usize {
-                        let col = cursor_col as usize;
-                        let byte_col = line.char_indices().nth(col).map(|(b, _)| b).unwrap_or(line.len());
-                        let before = &line[..byte_col];
-                        let cursor_char = line[byte_col..].chars().next().unwrap_or(' ');
-                        let after_start = byte_col + cursor_char.len_utf8().min(line.len() - byte_col);
-                        let after = &line[after_start..];
-                        Line::from(vec![
-                            Span::raw(before.to_string()),
-                            Span::styled(cursor_char.to_string(), Style::default().add_modifier(Modifier::REVERSED)),
-                            Span::raw(after.to_string()),
-                        ])
-                    } else {
-                        Line::from(line.to_string())
-                    }
-                }).collect();
-                let label_line = Line::from(Span::styled(format!("{:<10}", field.label), label_style));
+                let lines: Vec<Line> = field
+                    .value
+                    .split('\n')
+                    .enumerate()
+                    .map(|(row, line)| {
+                        if row == cursor_row as usize {
+                            let col = cursor_col as usize;
+                            let byte_col = line
+                                .char_indices()
+                                .nth(col)
+                                .map(|(b, _)| b)
+                                .unwrap_or(line.len());
+                            let before = &line[..byte_col];
+                            let cursor_char = line[byte_col..].chars().next().unwrap_or(' ');
+                            let after_start =
+                                byte_col + cursor_char.len_utf8().min(line.len() - byte_col);
+                            let after = &line[after_start..];
+                            Line::from(vec![
+                                Span::raw(before.to_string()),
+                                Span::styled(
+                                    cursor_char.to_string(),
+                                    Style::default().add_modifier(Modifier::REVERSED),
+                                ),
+                                Span::raw(after.to_string()),
+                            ])
+                        } else {
+                            Line::from(line.to_string())
+                        }
+                    })
+                    .collect();
+                let label_line =
+                    Line::from(Span::styled(format!("{:<10}", field.label), label_style));
                 let mut all_lines = vec![label_line];
                 all_lines.extend(lines);
                 f.render_widget(Paragraph::new(all_lines), chunks[i]);
@@ -802,7 +1006,8 @@ fn draw_form(f: &mut Frame, app: &App) {
             } else {
                 // Not focused: show label on first line, first line of content on second (truncated)
                 let first_line = field.value.lines().next().unwrap_or("");
-                let label_line = Line::from(Span::styled(format!("{:<10}", field.label), label_style));
+                let label_line =
+                    Line::from(Span::styled(format!("{:<10}", field.label), label_style));
                 let content_chars: Vec<char> = first_line.chars().collect();
                 let max_w = chunks[i].width.saturating_sub(2) as usize;
                 let display_str = if content_chars.len() > max_w && max_w > 1 {
@@ -811,7 +1016,8 @@ fn draw_form(f: &mut Frame, app: &App) {
                 } else {
                     first_line.to_string()
                 };
-                let content_line = Line::from(Span::styled(display_str, Style::default().fg(t::MUTED)));
+                let content_line =
+                    Line::from(Span::styled(display_str, Style::default().fg(t::MUTED)));
                 f.render_widget(Paragraph::new(vec![label_line, content_line]), chunks[i]);
                 continue;
             }
@@ -830,9 +1036,13 @@ fn draw_form(f: &mut Frame, app: &App) {
                     cursor_pos + cursor_char.len_utf8().min(display_val.len() - cursor_pos);
                 let after = display_val[after_start..].to_string();
                 // Name field: tint text with its future provider color as user types
-                let (before_span, after_span) = if field.label == "Name" && !display_val.is_empty() {
+                let (before_span, after_span) = if field.label == "Name" && !display_val.is_empty()
+                {
                     let color = t::provider_color(&display_val);
-                    (Span::styled(before, Style::default().fg(color)), Span::styled(after, Style::default().fg(color)))
+                    (
+                        Span::styled(before, Style::default().fg(color)),
+                        Span::styled(after, Style::default().fg(color)),
+                    )
                 } else {
                     (Span::raw(before), Span::raw(after))
                 };
@@ -869,27 +1079,30 @@ fn draw_form(f: &mut Frame, app: &App) {
         let mut hint_lines = if focused_field.is_multiline {
             vec![Line::from(vec![
                 Span::raw("   "),
-                Span::styled("Enter", Style::default().fg(t::SUCCESS)),
+                Span::styled("Ctrl+S", Style::default().fg(t::SUCCESS)),
                 Span::styled(" Save  ", Style::default().fg(t::MUTED)),
-                Span::styled("S+Enter", Style::default().fg(t::PRIMARY)),
+                Span::styled("Enter", Style::default().fg(t::PRIMARY)),
                 Span::styled(" Newline  ", Style::default().fg(t::MUTED)),
                 Span::styled("Esc", Style::default().fg(t::WARNING)),
                 Span::styled(" Cancel", Style::default().fg(t::MUTED)),
             ])]
         } else {
             vec![Line::from(vec![
-                Span::raw("          "),
-                Span::styled("Enter", Style::default().fg(t::SUCCESS)),
+                Span::raw("   "),
+                Span::styled("Ctrl+S", Style::default().fg(t::SUCCESS)),
                 Span::styled(" Save  ", Style::default().fg(t::MUTED)),
+                Span::styled("Enter", Style::default().fg(t::PRIMARY)),
+                Span::styled(" Next  ", Style::default().fg(t::MUTED)),
                 Span::styled("Esc", Style::default().fg(t::WARNING)),
                 Span::styled(" Cancel", Style::default().fg(t::MUTED)),
             ])]
         };
         hint_lines.push(Line::from(""));
         if let Some(err) = &form.error {
-            hint_lines.push(
-                Line::from(Span::styled(format!("✗ {}", err), Style::default().fg(t::ERROR))),
-            );
+            hint_lines.push(Line::from(Span::styled(
+                format!("✗ {}", err),
+                Style::default().fg(t::ERROR),
+            )));
         }
         f.render_widget(Paragraph::new(hint_lines), chunks[hint_idx]);
     }
@@ -897,14 +1110,20 @@ fn draw_form(f: &mut Frame, app: &App) {
 
 fn draw_confirm(f: &mut Frame, app: &App) {
     let area = centered_rect(40, 20, f.area());
-    let area = Rect { height: area.height.max(5), ..area };
+    let area = Rect {
+        height: area.height.max(5),
+        ..area
+    };
 
     f.render_widget(Clear, area);
 
     let prompt_line = match &app.confirm_action {
         Some(ConfirmAction::Delete(id)) => Line::from(vec![
             Span::raw("  Delete "),
-            Span::styled(id.as_str(), Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                id.as_str(),
+                Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" ?"),
         ]),
         Some(ConfirmAction::Clear) => Line::from(vec![
@@ -940,7 +1159,10 @@ fn draw_confirm(f: &mut Frame, app: &App) {
         .title_style(Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD))
         .padding(Padding::horizontal(1));
 
-    f.render_widget(Paragraph::new(text).block(block).wrap(Wrap { trim: false }), area);
+    f.render_widget(
+        Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -984,7 +1206,6 @@ fn centered_fixed(percent_x: u16, height: u16, r: Rect) -> Rect {
         ])
         .split(vert[1])[1]
 }
-
 
 fn config_path_display() -> String {
     crate::config::config_path()
