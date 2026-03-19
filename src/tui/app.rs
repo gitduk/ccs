@@ -236,8 +236,7 @@ impl App {
         }
 
         let db = crate::db::open_with_fallback(&config.resolve_db_path());
-        let name_to_id = config.providers.iter().map(|(n, p)| (n.clone(), p.id.clone())).collect();
-        crate::db::migrate_schema(&db, &name_to_id);
+        crate::db::migrate_schema(&db, &config.name_to_id_map());
 
         let (metrics, provider_models) = {
             let conn = db.lock().unwrap();
@@ -379,9 +378,7 @@ impl App {
             Some("Base URL cannot be empty".to_string())
         } else if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
             Some("Base URL must start with http:// or https://".to_string())
-        } else if is_new && self.config.providers.contains_key(&new_name) {
-            Some(format!("Provider '{new_name}' already exists"))
-        } else if is_rename && self.config.providers.contains_key(&new_name) {
+        } else if (is_new || is_rename) && self.config.providers.contains_key(&new_name) {
             Some(format!("Provider '{new_name}' already exists"))
         } else {
             None
@@ -415,12 +412,11 @@ impl App {
 
         if is_rename {
             let old_name = original_name.as_deref().unwrap();
-            // Rebuild IndexMap preserving insertion order, swapping the key.
-            let entries: Vec<(String, Provider)> = std::mem::take(&mut self.config.providers)
+            // Rebuild IndexMap preserving insertion order, swapping the key in one pass.
+            self.config.providers = std::mem::take(&mut self.config.providers)
                 .into_iter()
                 .map(|(k, v)| if k == old_name { (new_name.clone(), provider.clone()) } else { (k, v) })
                 .collect();
-            self.config.providers = entries.into_iter().collect();
 
             if self.config.current == old_name {
                 self.config.current = new_name.clone();
@@ -507,15 +503,15 @@ impl App {
     }
 
     fn do_delete(&mut self, name: &str) -> Result<()> {
+        let removed = self.config.providers.shift_remove(name);
         if let Ok(conn) = self.db.lock() {
-            let id = self.config.providers.get(name).map(|p| p.id.as_str()).unwrap_or(name);
+            let id = removed.as_ref().map(|p| p.id.as_str()).unwrap_or(name);
             let _ = crate::db::delete_provider(&conn, id);
         }
         if let Ok(mut m) = self.metrics.lock() {
             m.by_provider.remove(name);
         }
         self.provider_models.remove(name);
-        self.config.providers.shift_remove(name);
         if self.config.current == name {
             self.config.current = self.config.providers.keys().next().cloned().unwrap_or_default();
         }

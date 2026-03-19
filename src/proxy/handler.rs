@@ -8,6 +8,13 @@ use futures::StreamExt;
 use super::SharedState;
 use crate::config::ApiFormat;
 use crate::error::AppError;
+
+/// Bundles a provider's stable UUID and display name for passing through the request pipeline.
+#[derive(Clone)]
+struct ProviderKey {
+    id: String,
+    name: String,
+}
 use crate::proxy::{forwarder, metrics::SharedMetrics, transform};
 
 /// Health check endpoint.
@@ -234,10 +241,11 @@ pub async fn handle_messages(
                 .into_response());
         }
 
+        let pkey = ProviderKey { id: provider.id.clone(), name: provider_name.clone() };
         return if is_stream {
-            handle_streaming_response(response, is_openai, state.metrics.clone(), state.db.clone(), provider.id.clone(), provider_name.clone()).await
+            handle_streaming_response(response, is_openai, state.metrics.clone(), state.db.clone(), pkey).await
         } else {
-            handle_buffered_response(response, is_openai, state.metrics.clone(), state.db.clone(), provider.id.clone(), provider_name.clone()).await
+            handle_buffered_response(response, is_openai, state.metrics.clone(), state.db.clone(), pkey).await
         };
     }
 
@@ -255,9 +263,9 @@ async fn handle_buffered_response(
     is_openai: bool,
     metrics: SharedMetrics,
     db: crate::db::SharedDb,
-    provider_id: String,
-    provider_name: String,
+    pkey: ProviderKey,
 ) -> Result<Response, AppError> {
+    let ProviderKey { id: provider_id, name: provider_name } = pkey;
     let body = response.bytes().await?;
 
     let response_body = if is_openai {
@@ -286,7 +294,7 @@ async fn handle_buffered_response(
                     (0, 0)
                 }
             };
-            persist_stats(&db, &provider_id, &provider_name, requests, failures, model.as_deref(), input, output);
+            persist_stats(&db, &ProviderKey { id: provider_id, name: provider_name }, requests, failures, model.as_deref(), input, output);
         }
     }
 
@@ -301,8 +309,7 @@ async fn handle_buffered_response(
 /// Fire-and-forget: persist provider and model stats to DB outside hot path.
 fn persist_stats(
     db: &crate::db::SharedDb,
-    provider_id: &str,
-    provider_name: &str,
+    pkey: &ProviderKey,
     requests: u64,
     failures: u64,
     model_name: Option<&str>,
@@ -310,14 +317,13 @@ fn persist_stats(
     output_delta: u64,
 ) {
     let db = db.clone();
-    let pid = provider_id.to_string();
-    let pname = provider_name.to_string();
+    let pkey = pkey.clone();
     let mid = model_name.map(|s| s.to_string());
     tokio::task::spawn_blocking(move || {
         if let Ok(conn) = db.lock() {
-            let _ = crate::db::upsert_provider(&conn, &pid, &pname, input_delta, output_delta, requests, failures);
+            let _ = crate::db::upsert_provider(&conn, &pkey.id, &pkey.name, input_delta, output_delta, requests, failures);
             if let Some(model) = mid {
-                let _ = crate::db::upsert_model(&conn, &pid, &pname, &model, input_delta, output_delta);
+                let _ = crate::db::upsert_model(&conn, &pkey.id, &pkey.name, &model, input_delta, output_delta);
             }
         }
     });
@@ -329,8 +335,7 @@ async fn handle_streaming_response(
     is_openai: bool,
     metrics: SharedMetrics,
     db: crate::db::SharedDb,
-    provider_id: String,
-    provider_name: String,
+    pkey: ProviderKey,
 ) -> Result<Response, AppError> {
     let raw_stream: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>> =
         if !is_openai {
@@ -344,7 +349,7 @@ async fn handle_streaming_response(
             Box::pin(transform::openai_stream_to_anthropic(response))
         };
 
-    let tracked = track_tokens_in_stream(raw_stream, metrics, db, provider_id, provider_name);
+    let tracked = track_tokens_in_stream(raw_stream, metrics, db, pkey);
     let body = Body::from_stream(tracked);
 
     Response::builder()
@@ -361,9 +366,10 @@ fn track_tokens_in_stream(
     mut inner: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>>,
     metrics: SharedMetrics,
     db: crate::db::SharedDb,
-    provider_id: String,
-    provider_name: String,
+    pkey: ProviderKey,
 ) -> impl futures::Stream<Item = std::io::Result<Bytes>> + Send {
+    let provider_id = pkey.id;
+    let provider_name = pkey.name;
     async_stream::stream! {
         const LINE_BUF_MAX: usize = 1024 * 1024; // 1 MB safety cap
         let mut input_tokens = 0u64;
@@ -423,7 +429,7 @@ fn track_tokens_in_stream(
                 }
             };
             let model_opt = if model.is_empty() { None } else { Some(model.as_str()) };
-            persist_stats(&db, &provider_id, &provider_name, requests, failures, model_opt, input_tokens, output_tokens);
+            persist_stats(&db, &ProviderKey { id: provider_id, name: provider_name }, requests, failures, model_opt, input_tokens, output_tokens);
         }
     }
 }

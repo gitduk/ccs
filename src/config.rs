@@ -82,6 +82,11 @@ impl AppConfig {
             .ok_or_else(|| AppError::ProviderNotFound(self.current.clone()))
     }
 
+    /// Build a name → id map for all providers (used for DB migration).
+    pub fn name_to_id_map(&self) -> std::collections::HashMap<String, String> {
+        self.providers.iter().map(|(n, p)| (n.clone(), p.id.clone())).collect()
+    }
+
     pub fn resolve_db_path(&self) -> String {
         self.db_path.clone().unwrap_or_else(|| {
             dirs::home_dir()
