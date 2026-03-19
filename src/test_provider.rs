@@ -19,6 +19,7 @@ pub struct TestResult {
     pub status: TestStatus,
     pub latency_ms: u64,
     pub model_count: Option<usize>,
+    pub model_names: Option<Vec<String>>,
     pub tested_at: Instant,
 }
 
@@ -44,6 +45,7 @@ pub async fn test_connectivity(provider: &Provider) -> TestResult {
                 status: TestStatus::Error(format!("Key error: {e}")),
                 latency_ms: 0,
                 model_count: None,
+                model_names: None,
                 tested_at: Instant::now(),
             };
         }
@@ -94,6 +96,7 @@ pub async fn test_connectivity(provider: &Provider) -> TestResult {
                 status: TestStatus::Error(format!("Connection failed: {e}")),
                 latency_ms,
                 model_count: None,
+                model_names: None,
                 tested_at: Instant::now(),
             };
         }
@@ -108,8 +111,8 @@ pub async fn test_connectivity(provider: &Provider) -> TestResult {
         TestStatus::Error(format!("HTTP {}", status.as_u16()))
     };
 
-    // Fetch model count from /v1/models.
-    let model_count = async {
+    // Fetch model list from /v1/models.
+    let (model_count, model_names) = async {
         let r = client
             .get(format!("{base}/v1/models"))
             .header(&auth_header.0, &auth_header.1)
@@ -120,13 +123,18 @@ pub async fn test_connectivity(provider: &Provider) -> TestResult {
             .ok()?;
         if !r.status().is_success() { return None; }
         let json: serde_json::Value = r.json().await.ok()?;
-        json["data"].as_array().map(|a| a.len())
-    }.await;
+        let arr = json["data"].as_array()?;
+        let names: Vec<String> = arr.iter()
+            .filter_map(|v| v["id"].as_str().map(|s| s.to_string()))
+            .collect();
+        Some((names.len(), names))
+    }.await.map(|(c, n)| (Some(c), Some(n))).unwrap_or((None, None));
 
     TestResult {
         status: msg_status,
         latency_ms,
         model_count,
+        model_names,
         tested_at: Instant::now(),
     }
 }

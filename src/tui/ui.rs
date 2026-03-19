@@ -415,7 +415,38 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
     lines.push(dash_line);
     lines.push(Line::from(Span::styled("By Model", Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD))));
     lines.push(Line::from(""));
-    if model_entries.is_empty() {
+
+    // Collect all known model names from test_results (fetched via /v1/models per provider).
+    // inactive_models: (model_name, in_current_provider)
+    let current_provider = app.config.current.as_str();
+    let used_models: std::collections::HashSet<&str> =
+        model_entries.iter().map(|(k, _, _)| k.as_str()).collect();
+
+    // Build set of model names per provider from test results
+    let current_provider_models: std::collections::HashSet<&str> = app
+        .test_results
+        .get(current_provider)
+        .and_then(|r| r.model_names.as_ref())
+        .map(|names| names.iter().map(|s| s.as_str()).collect())
+        .unwrap_or_default();
+
+    let mut all_known: std::collections::HashMap<&str, bool> = std::collections::HashMap::new();
+    for (provider_name, result) in &app.test_results {
+        if let Some(names) = &result.model_names {
+            let is_current = provider_name == current_provider;
+            for name in names {
+                let entry = all_known.entry(name.as_str()).or_insert(false);
+                if is_current { *entry = true; }
+            }
+        }
+    }
+    let mut inactive_models: Vec<(&str, bool)> = all_known
+        .into_iter()
+        .filter(|(m, _)| !used_models.contains(m))
+        .collect();
+    inactive_models.sort_unstable_by_key(|(name, _)| *name);
+
+    if model_entries.is_empty() && inactive_models.is_empty() {
         lines.push(Line::from(Span::styled("  No data yet", muted)));
     } else {
         // Cap label width at 30 chars to leave room for bars
@@ -439,14 +470,48 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
                 format!("{:<width$}", model, width = model_col_width)
             };
 
+            // Highlight bar if model is available in current provider
+            let in_current = current_provider_models.contains(model.as_str());
+            let bar_color = if in_current { t::SUCCESS } else { t::MUTED };
+
             lines.push(Line::from(vec![
                 Span::styled(label, Style::default().fg(t::TEXT)),
                 Span::raw("  "),
-                Span::styled("░".repeat(input_bar),  Style::default().fg(t::MUTED)),
-                Span::styled("█".repeat(output_bar), Style::default().fg(t::MUTED)),
+                Span::styled("░".repeat(input_bar),  Style::default().fg(bar_color)),
+                Span::styled("█".repeat(output_bar), Style::default().fg(bar_color)),
                 Span::raw(" ".repeat(empty)),
                 Span::styled(format!("  {:>6}", format_tokens(total)), Style::default().fg(t::TEXT)),
             ]));
+        }
+
+        // Inactive models: wrap into rows, green if in current provider, muted otherwise
+        if !inactive_models.is_empty() {
+            if !model_entries.is_empty() {
+                lines.push(Line::from(""));
+            }
+            let available_width = inner.width as usize;
+            let mut row_spans: Vec<Span> = vec![];
+            let mut row_len = 0usize;
+            for (i, (model, in_current)) in inactive_models.iter().enumerate() {
+                let color = if *in_current { t::SUCCESS } else { t::MUTED };
+                let needed = if i == 0 { model.len() } else { 2 + model.len() };
+                if row_len + needed > available_width && i > 0 {
+                    lines.push(Line::from(std::mem::take(&mut row_spans)));
+                    row_len = 0;
+                    row_spans.push(Span::styled(model.to_string(), Style::default().fg(color)));
+                    row_len += model.len();
+                } else {
+                    if i > 0 {
+                        row_spans.push(Span::raw("  "));
+                        row_len += 2;
+                    }
+                    row_spans.push(Span::styled(model.to_string(), Style::default().fg(color)));
+                    row_len += model.len();
+                }
+            }
+            if !row_spans.is_empty() {
+                lines.push(Line::from(row_spans));
+            }
         }
     }
 
