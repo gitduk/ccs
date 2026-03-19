@@ -81,7 +81,7 @@ pub async fn handle_models(State(state): State<SharedState>) -> Result<Response,
     if !status.is_success() {
         let body = response.bytes().await.unwrap_or_default();
         return Ok((
-            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+            status,
             [("content-type", "application/json")],
             body,
         )
@@ -211,7 +211,7 @@ pub async fn handle_messages(
             if !do_cycle || consecutive_failures >= max_failures {
                 let error_body = response.bytes().await.unwrap_or_default();
                 return Ok((
-                    StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::UNAUTHORIZED),
+                    status,
                     [("content-type", "application/json")],
                     error_body,
                 )
@@ -227,7 +227,7 @@ pub async fn handle_messages(
             tracing::warn!("Upstream returned {status}: {preview}");
             if let Ok(mut m) = state.metrics.lock() { m.record_failure(provider_name); }
             return Ok((
-                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                status,
                 [("content-type", "application/json")],
                 error_body,
             )
@@ -241,9 +241,8 @@ pub async fn handle_messages(
         };
     }
 
-    let code = last_status.unwrap_or(StatusCode::BAD_GATEWAY);
     Ok((
-        StatusCode::from_u16(code.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+        last_status.unwrap_or(StatusCode::BAD_GATEWAY),
         [("content-type", "application/json")],
         Bytes::from(r#"{"error":"all providers failed"}"#),
     )
@@ -274,20 +273,19 @@ async fn handle_buffered_response(
         let output = json["usage"]["output_tokens"].as_u64().unwrap_or(0);
         if input > 0 || output > 0 {
             let model = json["model"].as_str().map(|s| s.to_string());
-            let (provider_stats, model_stats) = {
+            let (requests, failures) = {
                 if let Ok(mut m) = metrics.lock() {
                     m.record_tokens(input, output, &provider_name);
                     if let Some(ref model_name) = model {
                         m.record_model_tokens(input, output, model_name);
                     }
-                    let ps = m.by_provider.get(&provider_name).cloned();
-                    let ms = model.as_deref().and_then(|n| m.by_model.get(n).cloned());
-                    (ps, ms)
+                    let s = m.by_provider.get(&provider_name);
+                    (s.map_or(0, |s| s.requests), s.map_or(0, |s| s.failures))
                 } else {
-                    (None, None)
+                    (0, 0)
                 }
             };
-            persist_stats(&db, &provider_name, provider_stats, model.as_deref(), model_stats);
+            persist_stats(&db, &provider_name, requests, failures, model.as_deref(), input, output);
         }
     }
 
@@ -303,20 +301,20 @@ async fn handle_buffered_response(
 fn persist_stats(
     db: &crate::db::SharedDb,
     provider_name: &str,
-    provider_stats: Option<crate::proxy::metrics::ProviderStats>,
+    requests: u64,
+    failures: u64,
     model_name: Option<&str>,
-    model_stats: Option<crate::proxy::metrics::ModelStats>,
+    input_delta: u64,
+    output_delta: u64,
 ) {
     let db = db.clone();
     let pname = provider_name.to_string();
     let mid = model_name.map(|s| s.to_string());
     tokio::task::spawn_blocking(move || {
         if let Ok(conn) = db.lock() {
-            if let Some(s) = provider_stats {
-                let _ = crate::db::upsert_provider(&conn, &pname, &s);
-            }
-            if let (Some(name), Some(s)) = (mid, model_stats) {
-                let _ = crate::db::upsert_model(&conn, &name, &s);
+            let _ = crate::db::upsert_provider(&conn, &pname, input_delta, output_delta, requests, failures);
+            if let Some(name) = mid {
+                let _ = crate::db::upsert_model(&conn, &pname, &name, input_delta, output_delta);
             }
         }
     });
@@ -345,12 +343,12 @@ async fn handle_streaming_response(
     let tracked = track_tokens_in_stream(raw_stream, metrics, db, provider_name);
     let body = Body::from_stream(tracked);
 
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "text/event-stream")
         .header("cache-control", "no-cache")
         .body(body)
-        .unwrap())
+        .map_err(|e| AppError::Transform(e.to_string()))
 }
 
 /// Wrap a byte stream to extract token usage from anthropic SSE events.
@@ -362,6 +360,7 @@ fn track_tokens_in_stream(
     provider_name: String,
 ) -> impl futures::Stream<Item = std::io::Result<Bytes>> + Send {
     async_stream::stream! {
+        const LINE_BUF_MAX: usize = 1024 * 1024; // 1 MB safety cap
         let mut input_tokens = 0u64;
         let mut output_tokens = 0u64;
         let mut model = String::new();
@@ -369,7 +368,12 @@ fn track_tokens_in_stream(
 
         while let Some(chunk) = inner.next().await {
             if let Ok(ref bytes) = chunk {
-                line_buf.push_str(&String::from_utf8_lossy(bytes));
+                if line_buf.len() + bytes.len() <= LINE_BUF_MAX {
+                    line_buf.push_str(&String::from_utf8_lossy(bytes));
+                } else {
+                    // Abnormally large line — skip parsing, drain buffer to free memory.
+                    line_buf.clear();
+                }
                 // Process complete SSE lines to extract token counts and model.
                 while let Some(pos) = line_buf.find('\n') {
                     let line = line_buf[..pos].trim_end_matches('\r').to_owned();
@@ -401,21 +405,20 @@ fn track_tokens_in_stream(
 
         // Stream ended: persist the token counts we collected.
         if input_tokens > 0 || output_tokens > 0 {
-            let (provider_stats, model_stats) = {
+            let (requests, failures) = {
                 if let Ok(mut m) = metrics.lock() {
                     m.record_tokens(input_tokens, output_tokens, &provider_name);
                     if !model.is_empty() {
                         m.record_model_tokens(input_tokens, output_tokens, &model);
                     }
-                    let ps = m.by_provider.get(&provider_name).cloned();
-                    let ms = if model.is_empty() { None } else { m.by_model.get(&model).cloned() };
-                    (ps, ms)
+                    let s = m.by_provider.get(&provider_name);
+                    (s.map_or(0, |s| s.requests), s.map_or(0, |s| s.failures))
                 } else {
-                    (None, None)
+                    (0, 0)
                 }
             };
             let model_opt = if model.is_empty() { None } else { Some(model.as_str()) };
-            persist_stats(&db, &provider_name, provider_stats, model_opt, model_stats);
+            persist_stats(&db, &provider_name, requests, failures, model_opt, input_tokens, output_tokens);
         }
     }
 }

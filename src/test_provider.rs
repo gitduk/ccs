@@ -23,21 +23,7 @@ pub struct TestResult {
     pub tested_at: Instant,
 }
 
-impl TestResult {
-    pub fn status_str(&self) -> &str {
-        match &self.status {
-            TestStatus::Ok => "OK",
-            TestStatus::AuthFailed => "Auth failed",
-            TestStatus::Error(e) => e.as_str(),
-        }
-    }
-
-    pub fn is_ok(&self) -> bool {
-        matches!(self.status, TestStatus::Ok)
-    }
-}
-
-pub async fn test_connectivity(provider: &Provider) -> TestResult {
+pub async fn test_connectivity(client: &reqwest::Client, provider: &Provider) -> TestResult {
     let api_key = match provider.resolve_api_key() {
         Ok(k) => k,
         Err(e) => {
@@ -50,8 +36,6 @@ pub async fn test_connectivity(provider: &Provider) -> TestResult {
             };
         }
     };
-
-    let client = reqwest::Client::new();
     let base = provider.base_url.trim_end_matches('/');
 
     let (msg_url, auth_header) = match provider.api_format {
@@ -65,18 +49,11 @@ pub async fn test_connectivity(provider: &Provider) -> TestResult {
         ),
     };
 
-    let body = match provider.api_format {
-        ApiFormat::Anthropic => json!({
-            "model": TEST_MODEL,
-            "max_tokens": 1,
-            "messages": [{"role": "user", "content": "hi"}]
-        }),
-        ApiFormat::OpenAI => json!({
-            "model": TEST_MODEL,
-            "max_tokens": 1,
-            "messages": [{"role": "user", "content": "hi"}]
-        }),
-    };
+    let body = json!({
+        "model": TEST_MODEL,
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "hi"}]
+    });
 
     let t0 = Instant::now();
     let response = client

@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, Result, params};
 
-use crate::proxy::metrics::{ModelStats, ProviderStats, TokenMetrics};
+use crate::proxy::metrics::TokenMetrics;
 
 pub type SharedDb = Arc<Mutex<Connection>>;
 
@@ -20,10 +21,10 @@ pub fn open(path: &str) -> Result<SharedDb> {
 pub fn open_with_fallback(path: &str) -> SharedDb {
     open(path).unwrap_or_else(|e| {
         tracing::warn!("Failed to open DB at {path}: {e}; using in-memory fallback");
-        Arc::new(Mutex::new(
-            Connection::open_in_memory()
-                .expect("in-memory SQLite unavailable — system may be out of file descriptors"),
-        ))
+        let conn = Connection::open_in_memory()
+            .expect("in-memory SQLite unavailable — system may be out of file descriptors");
+        init_schema(&conn).expect("failed to init in-memory schema");
+        Arc::new(Mutex::new(conn))
     })
 }
 
@@ -37,9 +38,11 @@ fn init_schema(conn: &Connection) -> Result<()> {
             failures      INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS model_stats (
-            model_name TEXT PRIMARY KEY,
-            input      INTEGER NOT NULL DEFAULT 0,
-            output     INTEGER NOT NULL DEFAULT 0
+            provider_name TEXT NOT NULL,
+            model_name    TEXT NOT NULL,
+            input         INTEGER NOT NULL DEFAULT 0,
+            output        INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (provider_name, model_name)
         );",
     )
 }
@@ -72,9 +75,10 @@ pub fn load_metrics(conn: &Connection) -> TokenMetrics {
         }
     }
 
-    if let Ok(mut stmt) =
-        conn.prepare("SELECT model_name, input, output FROM model_stats")
-    {
+    // Aggregate usage across all providers per model for the bar chart.
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT model_name, SUM(input), SUM(output) FROM model_stats GROUP BY model_name",
+    ) {
         match stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -96,34 +100,74 @@ pub fn load_metrics(conn: &Connection) -> TokenMetrics {
     metrics
 }
 
-pub fn upsert_provider(conn: &Connection, name: &str, s: &ProviderStats) -> Result<()> {
+/// Accumulate token delta and update request/failure totals for a provider.
+/// input/output use += delta to be multi-process safe; requests/failures are
+/// written as absolute totals (single writer: the proxy process).
+pub fn upsert_provider(
+    conn: &Connection,
+    name: &str,
+    input_delta: u64,
+    output_delta: u64,
+    requests: u64,
+    failures: u64,
+) -> Result<()> {
     conn.execute(
         "INSERT INTO provider_stats (provider_name, input, output, requests, failures)
          VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(provider_name) DO UPDATE SET
-             input = excluded.input, output = excluded.output,
-             requests = excluded.requests, failures = excluded.failures",
-        params![name, s.input, s.output, s.requests, s.failures],
+             input    = provider_stats.input    + excluded.input,
+             output   = provider_stats.output   + excluded.output,
+             requests = excluded.requests,
+             failures = excluded.failures",
+        params![name, input_delta, output_delta, requests, failures],
     )?;
     Ok(())
 }
 
-pub fn upsert_model(conn: &Connection, name: &str, s: &ModelStats) -> Result<()> {
+/// Accumulate token delta for a specific (provider, model) pair.
+pub fn upsert_model(conn: &Connection, provider: &str, model: &str, input_delta: u64, output_delta: u64) -> Result<()> {
     conn.execute(
-        "INSERT INTO model_stats (model_name, input, output)
-         VALUES (?1, ?2, ?3)
-         ON CONFLICT(model_name) DO UPDATE SET
-             input = excluded.input, output = excluded.output",
-        params![name, s.input, s.output],
+        "INSERT INTO model_stats (provider_name, model_name, input, output)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(provider_name, model_name) DO UPDATE SET
+             input  = model_stats.input  + excluded.input,
+             output = model_stats.output + excluded.output",
+        params![provider, model, input_delta, output_delta],
     )?;
     Ok(())
 }
 
 pub fn delete_provider(conn: &Connection, provider_name: &str) -> Result<()> {
-    conn.execute(
-        "DELETE FROM provider_stats WHERE provider_name = ?1",
-        [provider_name],
+    conn.execute("DELETE FROM provider_stats WHERE provider_name = ?1", [provider_name])?;
+    conn.execute("DELETE FROM model_stats    WHERE provider_name = ?1", [provider_name])?;
+    Ok(())
+}
+
+pub fn load_provider_models(conn: &Connection) -> HashMap<String, Vec<String>> {
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT provider_name, model_name FROM model_stats ORDER BY provider_name, model_name",
+    ) {
+        if let Ok(rows) = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) {
+            for (provider, model) in rows.flatten() {
+                map.entry(provider).or_default().push(model);
+            }
+        }
+    }
+    map
+}
+
+/// Ensure discovered models exist in model_stats (preserves existing usage data).
+pub fn upsert_provider_models(conn: &Connection, provider: &str, models: &[String]) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "INSERT OR IGNORE INTO model_stats (provider_name, model_name, input, output)
+         VALUES (?1, ?2, 0, 0)",
     )?;
+    for model in models {
+        stmt.execute(params![provider, model])?;
+    }
     Ok(())
 }
 

@@ -404,8 +404,9 @@ fn test_provider_by_name(app: &mut App, name: &str) {
     app.pending_tests.insert(name_owned.clone());
     app.set_message(format!("Testing {name}…"), MessageKind::Info);
 
+    let client = app.test_client.clone();
     tokio::spawn(async move {
-        let result = crate::test_provider::test_connectivity(&provider).await;
+        let result = crate::test_provider::test_connectivity(&client, &provider).await;
         let _ = tx.send((name_owned, result));
     });
 }

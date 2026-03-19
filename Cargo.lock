@@ -236,7 +236,7 @@ dependencies = [
 
 [[package]]
 name = "ccs"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "async-stream",
  "axum",
@@ -258,6 +258,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "unicode-width 0.2.0",
  "uuid",
 ]
 

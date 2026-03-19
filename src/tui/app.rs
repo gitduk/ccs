@@ -61,6 +61,10 @@ pub struct App {
     test_rx: mpsc::Receiver<(String, TestResult)>,
     pub db: SharedDb,
     pub bg_proxy_pid: Option<u32>,
+    /// Model names per provider, loaded from DB and updated on test.
+    pub provider_models: HashMap<String, Vec<String>>,
+    /// Shared HTTP client for provider connectivity tests (reuses connection pool).
+    pub test_client: reqwest::Client,
 }
 
 pub struct ProviderForm {
@@ -231,9 +235,12 @@ impl App {
 
         let db = crate::db::open_with_fallback(&config.resolve_db_path());
 
-        let metrics = {
+        let (metrics, provider_models) = {
             let conn = db.lock().unwrap();
-            Arc::new(Mutex::new(crate::db::load_metrics(&conn)))
+            (
+                Arc::new(Mutex::new(crate::db::load_metrics(&conn))),
+                crate::db::load_provider_models(&conn),
+            )
         };
 
         let bg_proxy_pid = load_bg_proxy_pid();
@@ -255,6 +262,8 @@ impl App {
             test_rx,
             db,
             bg_proxy_pid,
+            provider_models,
+            test_client: reqwest::Client::new(),
         })
     }
 
@@ -423,6 +432,7 @@ impl App {
         *m = TokenMetrics::new();
         drop(conn);
         drop(m);
+        self.provider_models.clear();
         self.set_message("Usage data cleared", MessageKind::Success);
     }
 
@@ -450,6 +460,7 @@ impl App {
         if let Ok(mut m) = self.metrics.lock() {
             m.by_provider.remove(name);
         }
+        self.provider_models.remove(name);
         self.config.providers.shift_remove(name);
         if self.config.current == name {
             self.config.current = self.config.providers.keys().next().cloned().unwrap_or_default();
@@ -510,6 +521,12 @@ impl App {
     pub fn drain_test_results(&mut self) {
         while let Ok((name, result)) = self.test_rx.try_recv() {
             self.pending_tests.remove(&name);
+            if let Some(models) = &result.model_names {
+                if let Ok(conn) = self.db.lock() {
+                    let _ = crate::db::upsert_provider_models(&conn, &name, models);
+                }
+                self.provider_models.insert(name.clone(), models.clone());
+            }
             self.test_results.insert(name, result);
         }
     }
@@ -573,6 +590,10 @@ impl App {
                     self.table_state.select(None);
                 }
 
+                if let Ok(conn) = self.db.lock() {
+                    self.provider_models = crate::db::load_provider_models(&conn);
+                }
+
                 self.set_message("Configuration reloaded", MessageKind::Success);
                 Ok(())
             }
@@ -612,21 +633,26 @@ fn remove_pid_file_at(path: &std::path::Path) {
 }
 
 /// Check whether a process with the given PID is alive AND is a `ccs` process.
-///
-/// We verify the comm name to guard against PID reuse: the kernel recycles
-/// PIDs after a process exits, so a bare `/proc/<pid>` existence check can
-/// silently point at an unrelated process that happened to be assigned the
-/// same PID.  Reading `/proc/<pid>/comm` (max 15 chars, no symlink) is cheap
-/// and avoids sending SIGTERM to the wrong process.
 pub fn is_process_alive(pid: u32) -> bool {
-    // First, confirm the process entry still exists.
-    if std::fs::metadata(format!("/proc/{pid}")).is_err() {
-        return false;
+    #[cfg(target_os = "linux")]
+    {
+        // Verify comm name to guard against PID reuse (comm truncated to 15 chars).
+        if std::fs::metadata(format!("/proc/{pid}")).is_err() {
+            return false;
+        }
+        std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            .map(|comm| comm.trim().starts_with("ccs"))
+            .unwrap_or(false)
     }
-    // Then verify it is a `ccs` process (comm is truncated to 15 chars).
-    std::fs::read_to_string(format!("/proc/{pid}/comm"))
-        .map(|comm| comm.trim().starts_with("ccs"))
-        .unwrap_or(false)
+    #[cfg(not(target_os = "linux"))]
+    {
+        // On non-Linux platforms use `kill -0` (no-op signal, just checks existence).
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
 }
 
 /// Send SIGTERM to a process (uses system `kill` command to avoid libc dep).

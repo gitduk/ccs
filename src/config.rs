@@ -81,8 +81,8 @@ impl AppConfig {
     pub fn resolve_db_path(&self) -> String {
         self.db_path.clone().unwrap_or_else(|| {
             dirs::home_dir()
-                .map(|h| h.join(".ccs").join("usage.db").display().to_string())
-                .unwrap_or_else(|| ".ccs/usage.db".to_string())
+                .map(|h| h.join(".ccs").join("ccs.db").display().to_string())
+                .unwrap_or_else(|| ".ccs/ccs.db".to_string())
         })
     }
 }
@@ -111,7 +111,12 @@ pub fn save_config(config: &AppConfig) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let content = serde_json::to_string_pretty(config)?;
-    std::fs::write(&path, content)?;
+    std::fs::write(&path, &content)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
     Ok(())
 }
 
