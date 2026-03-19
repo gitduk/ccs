@@ -27,11 +27,17 @@ impl TokenMetrics {
     }
 
     pub fn record_failure(&mut self, name: &str) {
-        self.by_provider.entry(name.to_string()).or_default().failures += 1;
+        self.by_provider
+            .entry(name.to_string())
+            .or_default()
+            .failures += 1;
     }
 
     pub fn record_request(&mut self, name: &str) {
-        self.by_provider.entry(name.to_string()).or_default().requests += 1;
+        self.by_provider
+            .entry(name.to_string())
+            .or_default()
+            .requests += 1;
     }
 
     pub fn record_tokens(&mut self, input: u64, output: u64, name: &str) {

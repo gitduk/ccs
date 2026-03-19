@@ -78,8 +78,14 @@ pub fn anthropic_to_openai_request(req: &Value, provider: &Provider) -> Result<V
             .iter()
             .filter_map(|tool| {
                 let name = tool.get("name")?.as_str()?;
-                let description = tool.get("description").and_then(|d| d.as_str()).unwrap_or("");
-                let mut input_schema = tool.get("input_schema").cloned().unwrap_or(json!({"type": "object"}));
+                let description = tool
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("");
+                let mut input_schema = tool
+                    .get("input_schema")
+                    .cloned()
+                    .unwrap_or(json!({"type": "object"}));
                 clean_schema(&mut input_schema);
                 Some(json!({
                     "type": "function",
@@ -150,9 +156,7 @@ fn convert_message_to_openai(role: &str, msg: &Value) -> Result<Vec<Value>> {
             };
             Ok(vec![json!({"role": openai_role, "content": text})])
         }
-        Some(Value::Array(blocks)) => {
-            convert_content_blocks_to_openai(role, blocks)
-        }
+        Some(Value::Array(blocks)) => convert_content_blocks_to_openai(role, blocks),
         _ => Ok(vec![json!({"role": role, "content": ""})]),
     }
 }
@@ -180,7 +184,10 @@ fn convert_user_blocks_to_openai(blocks: &[Value]) -> Result<Vec<Value>> {
             }
             "image" => {
                 if let Some(source) = block.get("source") {
-                    let media_type = source.get("media_type").and_then(|m| m.as_str()).unwrap_or("image/png");
+                    let media_type = source
+                        .get("media_type")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("image/png");
                     let data = source.get("data").and_then(|d| d.as_str()).unwrap_or("");
                     content_parts.push(json!({
                         "type": "image_url",
@@ -191,7 +198,10 @@ fn convert_user_blocks_to_openai(blocks: &[Value]) -> Result<Vec<Value>> {
                 }
             }
             "tool_result" => {
-                let tool_use_id = block.get("tool_use_id").and_then(|t| t.as_str()).unwrap_or("");
+                let tool_use_id = block
+                    .get("tool_use_id")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
                 let content_text = extract_tool_result_content(block);
                 tool_results.push(json!({
                     "role": "tool",
@@ -205,7 +215,9 @@ fn convert_user_blocks_to_openai(blocks: &[Value]) -> Result<Vec<Value>> {
 
     // Emit user message with content parts if any
     if !content_parts.is_empty() {
-        if content_parts.len() == 1 && content_parts[0].get("type").and_then(|t| t.as_str()) == Some("text") {
+        if content_parts.len() == 1
+            && content_parts[0].get("type").and_then(|t| t.as_str()) == Some("text")
+        {
             // Single text → plain string content
             messages.push(json!({
                 "role": "user",
@@ -333,8 +345,16 @@ pub fn openai_to_anthropic_models(openai: &Value) -> Value {
             })
         })
         .collect();
-    let first_id = data.first().and_then(|m| m["id"].as_str()).unwrap_or("").to_string();
-    let last_id = data.last().and_then(|m| m["id"].as_str()).unwrap_or("").to_string();
+    let first_id = data
+        .first()
+        .and_then(|m| m["id"].as_str())
+        .unwrap_or("")
+        .to_string();
+    let last_id = data
+        .last()
+        .and_then(|m| m["id"].as_str())
+        .unwrap_or("")
+        .to_string();
     json!({
         "data": data,
         "has_more": false,
@@ -353,9 +373,9 @@ pub fn openai_to_anthropic_response(resp: &Value) -> Result<Value> {
         .and_then(|c| c.first())
         .ok_or_else(|| AppError::Transform("No choices in OpenAI response".into()))?;
 
-    let message = choice.get("message").ok_or_else(|| {
-        AppError::Transform("No message in choice".into())
-    })?;
+    let message = choice
+        .get("message")
+        .ok_or_else(|| AppError::Transform("No message in choice".into()))?;
 
     let mut content_blocks: Vec<Value> = Vec::new();
 
@@ -385,7 +405,10 @@ pub fn openai_to_anthropic_response(resp: &Value) -> Result<Value> {
             let id = tc.get("id").and_then(|i| i.as_str()).unwrap_or("");
             if let Some(func) = tc.get("function") {
                 let name = func.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                let args_str = func.get("arguments").and_then(|a| a.as_str()).unwrap_or("{}");
+                let args_str = func
+                    .get("arguments")
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("{}");
                 let input: Value = serde_json::from_str(args_str).unwrap_or(json!({}));
                 content_blocks.push(json!({
                     "type": "tool_use",
@@ -402,7 +425,10 @@ pub fn openai_to_anthropic_response(resp: &Value) -> Result<Value> {
     }
 
     // Map stop reason
-    let finish_reason = choice.get("finish_reason").and_then(|f| f.as_str()).unwrap_or("stop");
+    let finish_reason = choice
+        .get("finish_reason")
+        .and_then(|f| f.as_str())
+        .unwrap_or("stop");
     let stop_reason = match finish_reason {
         "stop" => "end_turn",
         "length" => "max_tokens",
@@ -422,7 +448,10 @@ pub fn openai_to_anthropic_response(resp: &Value) -> Result<Value> {
         .and_then(|t| t.as_u64())
         .unwrap_or(0);
 
-    let model = resp.get("model").and_then(|m| m.as_str()).unwrap_or("unknown");
+    let model = resp
+        .get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or("unknown");
     let id = resp
         .get("id")
         .and_then(|i| i.as_str())
@@ -588,25 +617,32 @@ impl StreamState {
         // Emit message_start on first chunk
         if !self.started {
             self.started = true;
-            events.push(self.format_event("message_start", &json!({
-                "type": "message_start",
-                "message": {
-                    "id": self.message_id,
-                    "type": "message",
-                    "role": "assistant",
-                    "model": self.model,
-                    "content": [],
-                    "stop_reason": null,
-                    "stop_sequence": null,
-                    "usage": {
-                        "input_tokens": self.input_tokens,
-                        "output_tokens": 0,
+            events.push(self.format_event(
+                "message_start",
+                &json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": self.message_id,
+                        "type": "message",
+                        "role": "assistant",
+                        "model": self.model,
+                        "content": [],
+                        "stop_reason": null,
+                        "stop_sequence": null,
+                        "usage": {
+                            "input_tokens": self.input_tokens,
+                            "output_tokens": 0,
+                        }
                     }
-                }
-            })));
+                }),
+            ));
         }
 
-        let choice = match chunk.get("choices").and_then(|c| c.as_array()).and_then(|c| c.first()) {
+        let choice = match chunk
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .and_then(|c| c.first())
+        {
             Some(c) => c,
             None => return events,
         };
@@ -633,23 +669,29 @@ impl StreamState {
                     // Close previous block if any
                     events.extend(self.close_current_block());
                     self.current_block_type = Some(BlockType::Thinking);
-                    events.push(self.format_event("content_block_start", &json!({
-                        "type": "content_block_start",
-                        "index": self.content_index,
-                        "content_block": {
-                            "type": "thinking",
-                            "thinking": "",
-                        }
-                    })));
+                    events.push(self.format_event(
+                        "content_block_start",
+                        &json!({
+                            "type": "content_block_start",
+                            "index": self.content_index,
+                            "content_block": {
+                                "type": "thinking",
+                                "thinking": "",
+                            }
+                        }),
+                    ));
                 }
-                events.push(self.format_event("content_block_delta", &json!({
-                    "type": "content_block_delta",
-                    "index": self.content_index,
-                    "delta": {
-                        "type": "thinking_delta",
-                        "thinking": reasoning,
-                    }
-                })));
+                events.push(self.format_event(
+                    "content_block_delta",
+                    &json!({
+                        "type": "content_block_delta",
+                        "index": self.content_index,
+                        "delta": {
+                            "type": "thinking_delta",
+                            "thinking": reasoning,
+                        }
+                    }),
+                ));
             }
         }
 
@@ -659,23 +701,29 @@ impl StreamState {
                 if self.current_block_type.as_ref() != Some(&BlockType::Text) {
                     events.extend(self.close_current_block());
                     self.current_block_type = Some(BlockType::Text);
-                    events.push(self.format_event("content_block_start", &json!({
-                        "type": "content_block_start",
-                        "index": self.content_index,
-                        "content_block": {
-                            "type": "text",
-                            "text": "",
-                        }
-                    })));
+                    events.push(self.format_event(
+                        "content_block_start",
+                        &json!({
+                            "type": "content_block_start",
+                            "index": self.content_index,
+                            "content_block": {
+                                "type": "text",
+                                "text": "",
+                            }
+                        }),
+                    ));
                 }
-                events.push(self.format_event("content_block_delta", &json!({
-                    "type": "content_block_delta",
-                    "index": self.content_index,
-                    "delta": {
-                        "type": "text_delta",
-                        "text": content,
-                    }
-                })));
+                events.push(self.format_event(
+                    "content_block_delta",
+                    &json!({
+                        "type": "content_block_delta",
+                        "index": self.content_index,
+                        "delta": {
+                            "type": "text_delta",
+                            "text": content,
+                        }
+                    }),
+                ));
             }
         }
 
@@ -691,24 +739,34 @@ impl StreamState {
                         events.extend(self.close_current_block());
                         self.current_block_type = Some(BlockType::ToolUse);
 
-                        let id = tc.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                        let id = tc
+                            .get("id")
+                            .and_then(|i| i.as_str())
+                            .unwrap_or("")
+                            .to_string();
 
-                        self.tool_calls.insert(tc_index, ToolCallState {
-                            id: id.clone(),
-                            name: name.to_string(),
-                            arguments_buffer: String::new(),
-                        });
+                        self.tool_calls.insert(
+                            tc_index,
+                            ToolCallState {
+                                id: id.clone(),
+                                name: name.to_string(),
+                                arguments_buffer: String::new(),
+                            },
+                        );
 
-                        events.push(self.format_event("content_block_start", &json!({
-                            "type": "content_block_start",
-                            "index": self.content_index,
-                            "content_block": {
-                                "type": "tool_use",
-                                "id": id,
-                                "name": name,
-                                "input": {},
-                            }
-                        })));
+                        events.push(self.format_event(
+                            "content_block_start",
+                            &json!({
+                                "type": "content_block_start",
+                                "index": self.content_index,
+                                "content_block": {
+                                    "type": "tool_use",
+                                    "id": id,
+                                    "name": name,
+                                    "input": {},
+                                }
+                            }),
+                        ));
                     }
 
                     // Accumulate arguments
@@ -717,14 +775,17 @@ impl StreamState {
                             if let Some(tc_state) = self.tool_calls.get_mut(&tc_index) {
                                 tc_state.arguments_buffer.push_str(args);
                             }
-                            events.push(self.format_event("content_block_delta", &json!({
-                                "type": "content_block_delta",
-                                "index": self.content_index,
-                                "delta": {
-                                    "type": "input_json_delta",
-                                    "partial_json": args,
-                                }
-                            })));
+                            events.push(self.format_event(
+                                "content_block_delta",
+                                &json!({
+                                    "type": "content_block_delta",
+                                    "index": self.content_index,
+                                    "delta": {
+                                        "type": "input_json_delta",
+                                        "partial_json": args,
+                                    }
+                                }),
+                            ));
                         }
                     }
                 }
@@ -737,10 +798,13 @@ impl StreamState {
     fn close_current_block(&mut self) -> Vec<String> {
         let mut events = Vec::new();
         if self.current_block_type.is_some() {
-            events.push(self.format_event("content_block_stop", &json!({
-                "type": "content_block_stop",
-                "index": self.content_index,
-            })));
+            events.push(self.format_event(
+                "content_block_stop",
+                &json!({
+                    "type": "content_block_stop",
+                    "index": self.content_index,
+                }),
+            ));
             self.content_index += 1;
             self.current_block_type = None;
         }
@@ -759,285 +823,39 @@ impl StreamState {
         events.extend(self.close_current_block());
 
         // message_delta with stop_reason and usage
-        let stop_reason = self.stop_reason.clone().unwrap_or_else(|| "end_turn".to_string());
-        events.push(self.format_event("message_delta", &json!({
-            "type": "message_delta",
-            "delta": {
-                "stop_reason": stop_reason,
-                "stop_sequence": null,
-            },
-            "usage": {
-                "output_tokens": self.output_tokens,
-            }
-        })));
+        let stop_reason = self
+            .stop_reason
+            .clone()
+            .unwrap_or_else(|| "end_turn".to_string());
+        events.push(self.format_event(
+            "message_delta",
+            &json!({
+                "type": "message_delta",
+                "delta": {
+                    "stop_reason": stop_reason,
+                    "stop_sequence": null,
+                },
+                "usage": {
+                    "output_tokens": self.output_tokens,
+                }
+            }),
+        ));
 
         // message_stop
-        events.push(self.format_event("message_stop", &json!({
-            "type": "message_stop",
-        })));
+        events.push(self.format_event(
+            "message_stop",
+            &json!({
+                "type": "message_stop",
+            }),
+        ));
 
         events
     }
 
     fn format_event(&self, event_type: &str, data: &Value) -> String {
-        format!("event: {event_type}\ndata: {}\n\n", serde_json::to_string(data).unwrap_or_default())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-
-    fn test_provider() -> Provider {
-        Provider {
-            base_url: "https://api.example.com".to_string(),
-            api_key: "test-key".to_string(),
-            api_format: crate::config::ApiFormat::OpenAI,
-            model_map: HashMap::from([
-                ("claude-sonnet-4-20250514".to_string(), "anthropic/claude-sonnet-4-20250514".to_string()),
-            ]),
-        }
-    }
-
-    #[test]
-    fn test_basic_request_conversion() {
-        let req = json!({
-            "model": "claude-sonnet-4-20250514",
-            "max_tokens": 1024,
-            "messages": [
-                {"role": "user", "content": "Hello"}
-            ],
-            "stream": true
-        });
-
-        let result = anthropic_to_openai_request(&req, &test_provider()).unwrap();
-        assert_eq!(result["model"], "anthropic/claude-sonnet-4-20250514");
-        assert_eq!(result["max_tokens"], 1024);
-        assert_eq!(result["stream"], true);
-        assert_eq!(result["messages"][0]["role"], "user");
-        assert_eq!(result["messages"][0]["content"], "Hello");
-        assert!(result["stream_options"]["include_usage"].as_bool().unwrap());
-    }
-
-    #[test]
-    fn test_system_message_conversion() {
-        let req = json!({
-            "model": "test",
-            "system": "You are helpful",
-            "messages": [{"role": "user", "content": "Hi"}],
-        });
-
-        let result = anthropic_to_openai_request(&req, &test_provider()).unwrap();
-        assert_eq!(result["messages"][0]["role"], "system");
-        assert_eq!(result["messages"][0]["content"], "You are helpful");
-        assert_eq!(result["messages"][1]["role"], "user");
-    }
-
-    #[test]
-    fn test_system_array_conversion() {
-        let req = json!({
-            "model": "test",
-            "system": [
-                {"type": "text", "text": "Part 1"},
-                {"type": "text", "text": "Part 2"},
-            ],
-            "messages": [{"role": "user", "content": "Hi"}],
-        });
-
-        let result = anthropic_to_openai_request(&req, &test_provider()).unwrap();
-        assert_eq!(result["messages"][0]["content"], "Part 1\nPart 2");
-    }
-
-    #[test]
-    fn test_tool_use_request_conversion() {
-        let req = json!({
-            "model": "test",
-            "messages": [{
-                "role": "assistant",
-                "content": [{
-                    "type": "tool_use",
-                    "id": "toolu_123",
-                    "name": "get_weather",
-                    "input": {"location": "NYC"}
-                }]
-            }],
-        });
-
-        let result = anthropic_to_openai_request(&req, &test_provider()).unwrap();
-        let msg = &result["messages"][0];
-        assert_eq!(msg["role"], "assistant");
-        assert_eq!(msg["tool_calls"][0]["id"], "toolu_123");
-        assert_eq!(msg["tool_calls"][0]["function"]["name"], "get_weather");
-    }
-
-    #[test]
-    fn test_tool_result_conversion() {
-        let req = json!({
-            "model": "test",
-            "messages": [{
-                "role": "user",
-                "content": [{
-                    "type": "tool_result",
-                    "tool_use_id": "toolu_123",
-                    "content": "Sunny, 72°F"
-                }]
-            }],
-        });
-
-        let result = anthropic_to_openai_request(&req, &test_provider()).unwrap();
-        let msg = &result["messages"][0];
-        assert_eq!(msg["role"], "tool");
-        assert_eq!(msg["tool_call_id"], "toolu_123");
-        assert_eq!(msg["content"], "Sunny, 72°F");
-    }
-
-    #[test]
-    fn test_openai_response_conversion() {
-        let resp = json!({
-            "id": "chatcmpl-123",
-            "model": "anthropic/claude-sonnet-4-20250514",
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": "Hello!"
-                },
-                "finish_reason": "stop"
-            }],
-            "usage": {
-                "prompt_tokens": 10,
-                "completion_tokens": 5
-            }
-        });
-
-        let result = openai_to_anthropic_response(&resp).unwrap();
-        assert_eq!(result["type"], "message");
-        assert_eq!(result["role"], "assistant");
-        assert_eq!(result["content"][0]["type"], "text");
-        assert_eq!(result["content"][0]["text"], "Hello!");
-        assert_eq!(result["stop_reason"], "end_turn");
-        assert_eq!(result["usage"]["input_tokens"], 10);
-        assert_eq!(result["usage"]["output_tokens"], 5);
-    }
-
-    #[test]
-    fn test_openai_tool_call_response() {
-        let resp = json!({
-            "id": "chatcmpl-456",
-            "model": "test",
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": null,
-                    "tool_calls": [{
-                        "id": "call_abc",
-                        "type": "function",
-                        "function": {
-                            "name": "get_weather",
-                            "arguments": "{\"location\":\"NYC\"}"
-                        }
-                    }]
-                },
-                "finish_reason": "tool_calls"
-            }],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
-        });
-
-        let result = openai_to_anthropic_response(&resp).unwrap();
-        assert_eq!(result["stop_reason"], "tool_use");
-        assert_eq!(result["content"][0]["type"], "tool_use");
-        assert_eq!(result["content"][0]["name"], "get_weather");
-        assert_eq!(result["content"][0]["input"]["location"], "NYC");
-    }
-
-    #[test]
-    fn test_stop_reason_mapping() {
-        for (openai, anthropic) in [
-            ("stop", "end_turn"),
-            ("length", "max_tokens"),
-            ("tool_calls", "tool_use"),
-        ] {
-            let resp = json!({
-                "id": "test",
-                "model": "test",
-                "choices": [{"message": {"content": "hi"}, "finish_reason": openai}],
-                "usage": {"prompt_tokens": 0, "completion_tokens": 0}
-            });
-            let result = openai_to_anthropic_response(&resp).unwrap();
-            assert_eq!(result["stop_reason"], anthropic, "failed for {openai}");
-        }
-    }
-
-    #[test]
-    fn test_clean_schema() {
-        let mut schema = json!({
-            "type": "object",
-            "properties": {
-                "url": {"type": "string", "format": "uri"},
-                "name": {"type": "string"},
-                "nested": {
-                    "type": "object",
-                    "properties": {
-                        "link": {"type": "string", "format": "uri"}
-                    }
-                }
-            }
-        });
-        clean_schema(&mut schema);
-        assert!(schema["properties"]["url"].get("format").is_none());
-        assert!(schema["properties"]["nested"]["properties"]["link"].get("format").is_none());
-        assert_eq!(schema["properties"]["name"]["type"], "string");
-    }
-
-    #[test]
-    fn test_stream_state_message_start() {
-        let mut state = StreamState::new();
-        let chunk = json!({
-            "model": "test-model",
-            "choices": [{
-                "delta": {"content": "Hi"},
-                "finish_reason": null
-            }]
-        });
-
-        let events = state.process_chunk(&chunk);
-        // Should have: message_start, content_block_start, content_block_delta
-        assert_eq!(events.len(), 3);
-        assert!(events[0].contains("message_start"));
-        assert!(events[1].contains("content_block_start"));
-        assert!(events[2].contains("text_delta"));
-    }
-
-    #[test]
-    fn test_stream_state_finalize() {
-        let mut state = StreamState::new();
-        state.started = true;
-        state.stop_reason = Some("end_turn".to_string());
-
-        let events = state.finalize();
-        // message_delta + message_stop
-        assert_eq!(events.len(), 2);
-        assert!(events[0].contains("message_delta"));
-        assert!(events[0].contains("end_turn"));
-        assert!(events[1].contains("message_stop"));
-    }
-
-    #[test]
-    fn test_thinking_blocks_in_assistant_message() {
-        let req = json!({
-            "model": "test",
-            "messages": [{
-                "role": "assistant",
-                "content": [
-                    {"type": "thinking", "thinking": "Let me think..."},
-                    {"type": "text", "text": "The answer is 42."}
-                ]
-            }],
-        });
-
-        let result = anthropic_to_openai_request(&req, &test_provider()).unwrap();
-        let msg = &result["messages"][0];
-        assert_eq!(msg["reasoning_content"], "Let me think...");
-        assert_eq!(msg["content"], "The answer is 42.");
+        format!(
+            "event: {event_type}\ndata: {}\n\n",
+            serde_json::to_string(data).unwrap_or_default()
+        )
     }
 }

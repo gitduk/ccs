@@ -3,7 +3,10 @@ pub mod serve;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "ccs", about = "Claude Code Switch - API proxy for routing Claude Code traffic")]
+#[command(
+    name = "ccs",
+    about = "Claude Code Switch - API proxy for routing Claude Code traffic"
+)]
 #[command(version)]
 pub struct Cli {
     #[command(subcommand)]

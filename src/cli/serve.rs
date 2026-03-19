@@ -26,11 +26,7 @@ pub async fn run(listen: Option<String>) -> Result<()> {
         );
     }
 
-    eprintln!(
-        "{} {}",
-        "Listening:".green(),
-        config.listen.cyan()
-    );
+    eprintln!("{} {}", "Listening:".green(), config.listen.cyan());
     eprintln!(
         "{} Set {} to use this proxy",
         "Tip:".blue(),

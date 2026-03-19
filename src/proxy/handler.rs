@@ -43,7 +43,7 @@ pub async fn reload_config(State(state): State<SharedState>) -> impl IntoRespons
                 axum::Json(serde_json::json!({
                     "status": "ok",
                     "message": "Configuration reloaded"
-                }))
+                })),
             )
         }
         Err(e) => {
@@ -53,7 +53,7 @@ pub async fn reload_config(State(state): State<SharedState>) -> impl IntoRespons
                 axum::Json(serde_json::json!({
                     "status": "error",
                     "message": "Failed to reload configuration"
-                }))
+                })),
             )
         }
     }
@@ -87,12 +87,7 @@ pub async fn handle_models(State(state): State<SharedState>) -> Result<Response,
     let status = response.status();
     if !status.is_success() {
         let body = response.bytes().await.unwrap_or_default();
-        return Ok((
-            status,
-            [("content-type", "application/json")],
-            body,
-        )
-            .into_response());
+        return Ok((status, [("content-type", "application/json")], body).into_response());
     }
 
     let body = response.bytes().await?;
@@ -126,7 +121,12 @@ pub async fn handle_messages(
             let len = config.providers.len();
             let list: Vec<(String, crate::config::Provider)> = (0..len)
                 .map(|i| (current_idx + i) % len)
-                .filter_map(|i| config.providers.get_index(i).map(|(k, v)| (k.clone(), v.clone())))
+                .filter_map(|i| {
+                    config
+                        .providers
+                        .get_index(i)
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                })
                 .collect();
             (list, true)
         } else {
@@ -163,7 +163,9 @@ pub async fn handle_messages(
         };
 
         // Record request count before forwarding (immediate feedback in TUI)
-        if let Ok(mut m) = state.metrics.lock() { m.record_request(provider_name); }
+        if let Ok(mut m) = state.metrics.lock() {
+            m.record_request(provider_name);
+        }
 
         let is_openai = provider.api_format == ApiFormat::OpenAI;
         let upstream_body = if is_openai {
@@ -185,8 +187,13 @@ pub async fn handle_messages(
         {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!("Provider {} network error: {e}, trying next", provider.base_url);
-                if let Ok(mut m) = state.metrics.lock() { m.record_failure(provider_name); }
+                tracing::warn!(
+                    "Provider {} network error: {e}, trying next",
+                    provider.base_url
+                );
+                if let Ok(mut m) = state.metrics.lock() {
+                    m.record_failure(provider_name);
+                }
                 consecutive_failures += 1;
                 if !do_cycle || consecutive_failures >= max_failures {
                     break;
@@ -199,8 +206,13 @@ pub async fn handle_messages(
 
         // 5xx or 429: try next provider
         if status.as_u16() >= 500 || status.as_u16() == 429 {
-            tracing::warn!("Provider {} returned {status}, trying next", provider.base_url);
-            if let Ok(mut m) = state.metrics.lock() { m.record_failure(provider_name); }
+            tracing::warn!(
+                "Provider {} returned {status}, trying next",
+                provider.base_url
+            );
+            if let Ok(mut m) = state.metrics.lock() {
+                m.record_failure(provider_name);
+            }
             last_status = Some(status);
             consecutive_failures += 1;
             if !do_cycle || consecutive_failures >= max_failures {
@@ -211,18 +223,20 @@ pub async fn handle_messages(
 
         // 401/403: auth error — try next provider in fallback mode
         if status.as_u16() == 401 || status.as_u16() == 403 {
-            tracing::warn!("Provider {} auth error {status}, trying next", provider.base_url);
-            if let Ok(mut m) = state.metrics.lock() { m.record_failure(provider_name); }
+            tracing::warn!(
+                "Provider {} auth error {status}, trying next",
+                provider.base_url
+            );
+            if let Ok(mut m) = state.metrics.lock() {
+                m.record_failure(provider_name);
+            }
             last_status = Some(status);
             consecutive_failures += 1;
             if !do_cycle || consecutive_failures >= max_failures {
                 let error_body = response.bytes().await.unwrap_or_default();
-                return Ok((
-                    status,
-                    [("content-type", "application/json")],
-                    error_body,
-                )
-                    .into_response());
+                return Ok(
+                    (status, [("content-type", "application/json")], error_body).into_response()
+                );
             }
             continue;
         }
@@ -232,20 +246,34 @@ pub async fn handle_messages(
             let error_body = response.bytes().await?;
             let preview = String::from_utf8_lossy(&error_body[..error_body.len().min(200)]);
             tracing::warn!("Upstream returned {status}: {preview}");
-            if let Ok(mut m) = state.metrics.lock() { m.record_failure(provider_name); }
-            return Ok((
-                status,
-                [("content-type", "application/json")],
-                error_body,
-            )
-                .into_response());
+            if let Ok(mut m) = state.metrics.lock() {
+                m.record_failure(provider_name);
+            }
+            return Ok((status, [("content-type", "application/json")], error_body).into_response());
         }
 
-        let pkey = ProviderKey { id: provider.id.clone(), name: provider_name.clone() };
+        let pkey = ProviderKey {
+            id: provider.id.clone(),
+            name: provider_name.clone(),
+        };
         return if is_stream {
-            handle_streaming_response(response, is_openai, state.metrics.clone(), state.db.clone(), pkey).await
+            handle_streaming_response(
+                response,
+                is_openai,
+                state.metrics.clone(),
+                state.db.clone(),
+                pkey,
+            )
+            .await
         } else {
-            handle_buffered_response(response, is_openai, state.metrics.clone(), state.db.clone(), pkey).await
+            handle_buffered_response(
+                response,
+                is_openai,
+                state.metrics.clone(),
+                state.db.clone(),
+                pkey,
+            )
+            .await
         };
     }
 
@@ -265,7 +293,10 @@ async fn handle_buffered_response(
     db: crate::db::SharedDb,
     pkey: ProviderKey,
 ) -> Result<Response, AppError> {
-    let ProviderKey { id: provider_id, name: provider_name } = pkey;
+    let ProviderKey {
+        id: provider_id,
+        name: provider_name,
+    } = pkey;
     let body = response.bytes().await?;
 
     let response_body = if is_openai {
@@ -294,7 +325,18 @@ async fn handle_buffered_response(
                     (0, 0)
                 }
             };
-            persist_stats(&db, &ProviderKey { id: provider_id, name: provider_name }, requests, failures, model.as_deref(), input, output);
+            persist_stats(
+                &db,
+                &ProviderKey {
+                    id: provider_id,
+                    name: provider_name,
+                },
+                requests,
+                failures,
+                model.as_deref(),
+                input,
+                output,
+            );
         }
     }
 
@@ -321,9 +363,24 @@ fn persist_stats(
     let mid = model_name.map(|s| s.to_string());
     tokio::task::spawn_blocking(move || {
         if let Ok(conn) = db.lock() {
-            let _ = crate::db::upsert_provider(&conn, &pkey.id, &pkey.name, input_delta, output_delta, requests, failures);
+            let _ = crate::db::upsert_provider(
+                &conn,
+                &pkey.id,
+                &pkey.name,
+                input_delta,
+                output_delta,
+                requests,
+                failures,
+            );
             if let Some(model) = mid {
-                let _ = crate::db::upsert_model(&conn, &pkey.id, &pkey.name, &model, input_delta, output_delta);
+                let _ = crate::db::upsert_model(
+                    &conn,
+                    &pkey.id,
+                    &pkey.name,
+                    &model,
+                    input_delta,
+                    output_delta,
+                );
             }
         }
     });

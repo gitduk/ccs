@@ -58,4 +58,3 @@ pub fn provider_color(id: &str) -> Color {
     h ^= h >> 33;
     PALETTE[h as usize % PALETTE.len()]
 }
-

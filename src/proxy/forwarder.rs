@@ -30,7 +30,10 @@ pub async fn forward_request(
             api_key.to_string(),
         ),
         ApiFormat::OpenAI => (
-            format!("{}/chat/completions", provider.base_url.trim_end_matches('/')),
+            format!(
+                "{}/chat/completions",
+                provider.base_url.trim_end_matches('/')
+            ),
             "authorization",
             format!("Bearer {api_key}"),
         ),
@@ -54,9 +57,7 @@ pub async fn forward_request(
     // Forward non-filtered headers
     for (name, value) in incoming_headers.iter() {
         let name_str = name.as_str().to_lowercase();
-        if !FILTERED_HEADERS.contains(&name_str.as_str())
-            && !name_str.starts_with("anthropic-")
-        {
+        if !FILTERED_HEADERS.contains(&name_str.as_str()) && !name_str.starts_with("anthropic-") {
             request = request.header(name, value);
         }
     }

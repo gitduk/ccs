@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use rusqlite::{Connection, Result, params};
+use rusqlite::{params, Connection, Result};
 
 use crate::proxy::metrics::TokenMetrics;
 
@@ -60,11 +60,14 @@ pub fn migrate_schema(db: &SharedDb, name_to_id: &HashMap<String, String>) {
 
 fn do_migrate(conn: &Connection, name_to_id: &HashMap<String, String>) -> Result<()> {
     // Check if provider_id column already exists — if so, nothing to do.
-    let already_migrated: bool = conn.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('provider_stats') WHERE name = 'provider_id'",
-        [],
-        |row| row.get::<_, i64>(0),
-    ).unwrap_or(0) > 0;
+    let already_migrated: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('provider_stats') WHERE name = 'provider_id'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
 
     if already_migrated {
         return Ok(());
@@ -75,30 +78,35 @@ fn do_migrate(conn: &Connection, name_to_id: &HashMap<String, String>) -> Result
         let mut stmt = conn.prepare(
             "SELECT provider_name, input, output, requests, failures FROM provider_stats",
         )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, u64>(1)?,
-                row.get::<_, u64>(2)?,
-                row.get::<_, u64>(3)?,
-                row.get::<_, u64>(4)?,
-            ))
-        })?.filter_map(|r| r.ok()).collect();
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, u64>(2)?,
+                    row.get::<_, u64>(3)?,
+                    row.get::<_, u64>(4)?,
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
         rows
     };
 
     let model_rows: Vec<(String, String, u64, u64)> = {
-        let mut stmt = conn.prepare(
-            "SELECT provider_name, model_name, input, output FROM model_stats",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, u64>(2)?,
-                row.get::<_, u64>(3)?,
-            ))
-        })?.filter_map(|r| r.ok()).collect();
+        let mut stmt =
+            conn.prepare("SELECT provider_name, model_name, input, output FROM model_stats")?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, u64>(2)?,
+                    row.get::<_, u64>(3)?,
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
         rows
     };
 
@@ -158,9 +166,9 @@ fn do_migrate(conn: &Connection, name_to_id: &HashMap<String, String>) -> Result
 pub fn load_metrics(conn: &Connection) -> TokenMetrics {
     let mut metrics = TokenMetrics::new();
 
-    if let Ok(mut stmt) = conn.prepare(
-        "SELECT provider_name, input, output, requests, failures FROM provider_stats",
-    ) {
+    if let Ok(mut stmt) =
+        conn.prepare("SELECT provider_name, input, output, requests, failures FROM provider_stats")
+    {
         match stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -183,9 +191,9 @@ pub fn load_metrics(conn: &Connection) -> TokenMetrics {
         }
     }
 
-    if let Ok(mut stmt) = conn.prepare(
-        "SELECT model_name, SUM(input), SUM(output) FROM model_stats GROUP BY model_name",
-    ) {
+    if let Ok(mut stmt) = conn
+        .prepare("SELECT model_name, SUM(input), SUM(output) FROM model_stats GROUP BY model_name")
+    {
         match stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -226,7 +234,14 @@ pub fn upsert_provider(
              output   = provider_stats.output   + excluded.output,
              requests = excluded.requests,
              failures = excluded.failures",
-        params![provider_id, provider_name, input_delta, output_delta, requests, failures],
+        params![
+            provider_id,
+            provider_name,
+            input_delta,
+            output_delta,
+            requests,
+            failures
+        ],
     )?;
     Ok(())
 }
@@ -253,8 +268,14 @@ pub fn upsert_model(
 }
 
 pub fn delete_provider(conn: &Connection, provider_id: &str) -> Result<()> {
-    conn.execute("DELETE FROM provider_stats WHERE provider_id = ?1", [provider_id])?;
-    conn.execute("DELETE FROM model_stats    WHERE provider_id = ?1", [provider_id])?;
+    conn.execute(
+        "DELETE FROM provider_stats WHERE provider_id = ?1",
+        [provider_id],
+    )?;
+    conn.execute(
+        "DELETE FROM model_stats    WHERE provider_id = ?1",
+        [provider_id],
+    )?;
     Ok(())
 }
 

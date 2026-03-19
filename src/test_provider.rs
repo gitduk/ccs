@@ -98,14 +98,20 @@ pub async fn test_connectivity(client: &reqwest::Client, provider: &Provider) ->
             .send()
             .await
             .ok()?;
-        if !r.status().is_success() { return None; }
+        if !r.status().is_success() {
+            return None;
+        }
         let json: serde_json::Value = r.json().await.ok()?;
         let arr = json["data"].as_array()?;
-        let names: Vec<String> = arr.iter()
+        let names: Vec<String> = arr
+            .iter()
             .filter_map(|v| v["id"].as_str().map(|s| s.to_string()))
             .collect();
         Some((names.len(), names))
-    }.await.map(|(c, n)| (Some(c), Some(n))).unwrap_or((None, None));
+    }
+    .await
+    .map(|(c, n)| (Some(c), Some(n)))
+    .unwrap_or((None, None));
 
     TestResult {
         status: msg_status,
