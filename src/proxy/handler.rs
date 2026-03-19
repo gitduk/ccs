@@ -27,10 +27,10 @@ pub async fn health_check(State(state): State<SharedState>) -> impl IntoResponse
 
 /// Reload configuration from disk.
 pub async fn reload_config(State(state): State<SharedState>) -> impl IntoResponse {
+    // Read from disk before acquiring the write lock to minimise lock hold time.
     match crate::config::load_config() {
         Ok(fresh_config) => {
-            let mut config = state.config.write().await;
-            *config = fresh_config;
+            *state.config.write().await = fresh_config;
             (
                 StatusCode::OK,
                 axum::Json(serde_json::json!({

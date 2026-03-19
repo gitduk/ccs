@@ -268,6 +268,7 @@ fn handle_normal_key(app: &mut App, code: KeyCode, server: &mut Option<ServerHan
 }
 
 /// Write the current TUI config into the proxy's shared RwLock so changes take effect immediately.
+/// When a detached background proxy is running, sends a POST /reload request instead.
 fn sync_proxy_config(app: &App, server: &Option<ServerHandle>) {
     if let Some(handle) = server {
         let config = app.config.clone();
@@ -276,6 +277,26 @@ fn sync_proxy_config(app: &App, server: &Option<ServerHandle>) {
             tokio::runtime::Handle::current().block_on(async move {
                 *proxy_config.write().await = config;
             });
+        });
+    } else if app.bg_proxy_pid.is_some() {
+        // Extract the port and always target loopback — app.config.listen may be "0.0.0.0:PORT".
+        let port = app.config.listen.rsplit(':').next().unwrap_or("7896");
+        let url = format!("http://127.0.0.1:{port}/reload");
+        let client = app.test_client.clone();
+        tokio::spawn(async move {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                client.post(&url).send(),
+            )
+            .await;
+            match result {
+                Err(_) => tracing::warn!("Reload request to background proxy timed out"),
+                Ok(Err(e)) => tracing::warn!("Failed to notify background proxy of config change: {e}"),
+                Ok(Ok(resp)) if !resp.status().is_success() => {
+                    tracing::warn!("Background proxy reload returned {}", resp.status());
+                }
+                Ok(Ok(_)) => {}
+            }
         });
     }
 }
