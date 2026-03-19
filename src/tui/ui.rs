@@ -290,7 +290,7 @@ fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_keybindings(f: &mut Frame, app: &App, area: Rect) {
-    let bg_label = if app.bg_proxy_pid.is_some() { "BgStop" } else { "BgProxy" };
+    let bg_label = if app.bg_proxy_pid.is_some() { "Stop" } else { "Server" };
     // (key, desc, key_color, desc_color)
     let all_keys: &[(&str, &str, Color, Color)] = &[
         ("s", "Switch",   t::SUCCESS, t::MUTED),
@@ -489,28 +489,22 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
             if !model_entries.is_empty() {
                 lines.push(Line::from(""));
             }
+            // Grid layout: fixed cell width = longest name + 2-space gap
+            let cell_width = inactive_models.iter().map(|(m, _)| m.len()).max().unwrap_or(1) + 2;
             let available_width = inner.width as usize;
-            let mut row_spans: Vec<Span> = vec![];
-            let mut row_len = 0usize;
-            for (i, (model, in_current)) in inactive_models.iter().enumerate() {
-                let color = if *in_current { t::SUCCESS } else { t::MUTED };
-                let needed = if i == 0 { model.len() } else { 2 + model.len() };
-                if row_len + needed > available_width && i > 0 {
-                    lines.push(Line::from(std::mem::take(&mut row_spans)));
-                    row_len = 0;
-                    row_spans.push(Span::styled(model.to_string(), Style::default().fg(color)));
-                    row_len += model.len();
-                } else {
-                    if i > 0 {
-                        row_spans.push(Span::raw("  "));
-                        row_len += 2;
-                    }
-                    row_spans.push(Span::styled(model.to_string(), Style::default().fg(color)));
-                    row_len += model.len();
-                }
-            }
-            if !row_spans.is_empty() {
-                lines.push(Line::from(row_spans));
+            let cols = (available_width / cell_width).max(1);
+            for chunk in inactive_models.chunks(cols) {
+                let spans: Vec<Span> = chunk
+                    .iter()
+                    .map(|(model, in_current)| {
+                        let color = if *in_current { t::SUCCESS } else { t::MUTED };
+                        Span::styled(
+                            format!("{:<width$}", model, width = cell_width),
+                            Style::default().fg(color),
+                        )
+                    })
+                    .collect();
+                lines.push(Line::from(spans));
             }
         }
     }
