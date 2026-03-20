@@ -930,6 +930,9 @@ fn draw_form(f: &mut Frame, app: &App) {
 
     let in_routes = form.in_routes();
 
+    // Provider color: derived from the Name field so it updates live as the user types.
+    let prov_color = t::provider_color(form.fields[0].value.trim());
+
     // ── Title: show action + Vim mode tag ────────────────────────────────────
     let vim_tag = match form.vim_mode {
         VimMode::Normal => "[N]",
@@ -1007,7 +1010,7 @@ fn draw_form(f: &mut Frame, app: &App) {
 
         let value_display = if field.is_toggle {
             let selected = Style::default()
-                .fg(t::TEXT)
+                .fg(prov_color)
                 .add_modifier(Modifier::REVERSED | Modifier::BOLD);
             let unselected = Style::default().fg(t::MUTED);
             let (left, right) = if field.value == "anthropic" {
@@ -1055,7 +1058,9 @@ fn draw_form(f: &mut Frame, app: &App) {
                                 Span::raw(before.to_string()),
                                 Span::styled(
                                     cursor_char.to_string(),
-                                    Style::default().add_modifier(Modifier::REVERSED),
+                                    Style::default()
+                                        .fg(prov_color)
+                                        .add_modifier(Modifier::REVERSED),
                                 ),
                                 Span::raw(after.to_string()),
                             ])
@@ -1116,7 +1121,9 @@ fn draw_form(f: &mut Frame, app: &App) {
                     before_span,
                     Span::styled(
                         cursor_char.to_string(),
-                        Style::default().add_modifier(Modifier::REVERSED),
+                        Style::default()
+                            .fg(prov_color)
+                            .add_modifier(Modifier::REVERSED),
                     ),
                     after_span,
                 ])
@@ -1186,7 +1193,9 @@ fn draw_form(f: &mut Frame, app: &App) {
                     Span::raw(before.to_string()),
                     Span::styled(
                         cursor_char.to_string(),
-                        Style::default().add_modifier(Modifier::REVERSED),
+                        Style::default()
+                            .fg(prov_color)
+                            .add_modifier(Modifier::REVERSED),
                     ),
                     Span::raw(after.to_string()),
                 ]));
