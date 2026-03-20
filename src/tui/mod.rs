@@ -564,6 +564,14 @@ fn handle_editing_key(
         return Ok(());
     }
 
+    // ── q — cancel (Normal mode only, not while editing a route pattern) ──────
+    if form.vim_mode == VimMode::Normal && !form.route_editing && matches!(code, KeyCode::Char('q'))
+    {
+        app.form = None;
+        app.mode = Mode::Normal;
+        return Ok(());
+    }
+
     // ── Ctrl+S — save (Insert-mode compatible shortcut) ───────────────────────
     if ctrl && matches!(code, KeyCode::Char('s')) {
         let pname = if form.is_new {

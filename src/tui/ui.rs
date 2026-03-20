@@ -1244,8 +1244,10 @@ fn draw_form(f: &mut Frame, app: &App) {
                     Span::styled(" Del  ", Style::default().fg(t::MUTED)),
                     Span::styled("i/Enter", Style::default().fg(t::PRIMARY)),
                     Span::styled(" Edit  ", Style::default().fg(t::MUTED)),
-                    Span::styled("ZZ", Style::default().fg(t::SUCCESS)),
-                    Span::styled(" Save", Style::default().fg(t::MUTED)),
+                    Span::styled("^S", Style::default().fg(t::SUCCESS)),
+                    Span::styled(" Save  ", Style::default().fg(t::MUTED)),
+                    Span::styled("q", Style::default().fg(t::WARNING)),
+                    Span::styled(" Quit", Style::default().fg(t::MUTED)),
                 ])
             }
         } else if form.vim_mode == VimMode::Insert {
@@ -1280,10 +1282,10 @@ fn draw_form(f: &mut Frame, app: &App) {
                 Span::styled(" Insert  ", Style::default().fg(t::MUTED)),
                 Span::styled("j/k", Style::default().fg(t::PRIMARY)),
                 Span::styled(" Field  ", Style::default().fg(t::MUTED)),
-                Span::styled("ZZ", Style::default().fg(t::SUCCESS)),
+                Span::styled("^S", Style::default().fg(t::SUCCESS)),
                 Span::styled(" Save  ", Style::default().fg(t::MUTED)),
-                Span::styled("ZQ", Style::default().fg(t::WARNING)),
-                Span::styled(" Cancel", Style::default().fg(t::MUTED)),
+                Span::styled("q", Style::default().fg(t::WARNING)),
+                Span::styled(" Quit", Style::default().fg(t::MUTED)),
             ])
         };
 
