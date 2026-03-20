@@ -1001,7 +1001,7 @@ fn draw_form(f: &mut Frame, app: &App) {
             is_focused && field.editable && (form.vim_mode == VimMode::Insert || field.is_toggle);
 
         let label_style = if is_focused {
-            Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD)
+            Style::default().fg(prov_color).add_modifier(Modifier::BOLD)
         } else if !field.editable {
             Style::default().fg(t::MUTED)
         } else {
@@ -1148,7 +1148,7 @@ fn draw_form(f: &mut Frame, app: &App) {
     // ── Routes section ───────────────────────────────────────────────────────
     let routes_chunk = chunks[form.fields.len()];
     let routes_label_style = if in_routes {
-        Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD)
+        Style::default().fg(prov_color).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(t::TEXT)
     };
