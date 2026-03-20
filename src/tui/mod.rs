@@ -572,12 +572,18 @@ fn handle_editing_key(
         return Ok(());
     }
 
-    // ── Ctrl+S — save (Insert-mode compatible shortcut) ───────────────────────
+    // ── Ctrl+S ────────────────────────────────────────────────────────────────
+    // In any Insert sub-mode → commit the edit and return to Normal.
+    // Only in Normal mode → save the whole form.
     if ctrl && matches!(code, KeyCode::Char('s')) {
-        // When editing a route pattern, Ctrl+S just commits the edit (exits
-        // route Insert mode) without saving the whole form.
+        // Route pattern Insert mode: commit pattern, stay in form.
         if in_routes && form.route_editing {
             form.route_editing = false;
+            return Ok(());
+        }
+        // Field Insert mode: exit Insert → Normal, stay in form.
+        if form.vim_mode == VimMode::Insert {
+            form.vim_mode = VimMode::Normal;
             return Ok(());
         }
 

@@ -1266,19 +1266,21 @@ fn draw_form(f: &mut Frame, app: &App) {
                 Line::from(vec![
                     Span::raw("   "),
                     Span::styled("Esc", Style::default().fg(t::WARNING)),
+                    Span::styled("/", Style::default().fg(t::MUTED)),
+                    Span::styled("^S", Style::default().fg(t::WARNING)),
                     Span::styled(" Normal  ", Style::default().fg(t::MUTED)),
-                    Span::styled("Ctrl+S", Style::default().fg(t::SUCCESS)),
-                    Span::styled(" Save  ", Style::default().fg(t::MUTED)),
                     Span::styled("Enter", Style::default().fg(t::PRIMARY)),
-                    Span::styled(" Newline", Style::default().fg(t::MUTED)),
+                    Span::styled(" Newline  ", Style::default().fg(t::MUTED)),
+                    Span::styled("^S", Style::default().fg(t::SUCCESS)),
+                    Span::styled("(N) Save", Style::default().fg(t::MUTED)),
                 ])
             } else {
                 Line::from(vec![
                     Span::raw("   "),
                     Span::styled("Esc", Style::default().fg(t::WARNING)),
+                    Span::styled("/", Style::default().fg(t::MUTED)),
+                    Span::styled("^S", Style::default().fg(t::WARNING)),
                     Span::styled(" Normal  ", Style::default().fg(t::MUTED)),
-                    Span::styled("Ctrl+S", Style::default().fg(t::SUCCESS)),
-                    Span::styled(" Save  ", Style::default().fg(t::MUTED)),
                     Span::styled("Tab", Style::default().fg(t::PRIMARY)),
                     Span::styled(" Next field", Style::default().fg(t::MUTED)),
                 ])
