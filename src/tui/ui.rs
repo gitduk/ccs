@@ -5,7 +5,7 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Padding, Paragraph, Row, Tab
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
-use super::app::{App, ConfirmAction, MessageKind, Mode};
+use super::app::{App, ConfirmAction, MessageKind, Mode, VimMode};
 use super::theme::{self as t};
 use crate::test_provider::TestStatus;
 
@@ -417,11 +417,12 @@ fn draw_keybindings(f: &mut Frame, app: &App, area: Rect) {
         "Server"
     };
     // (key, desc, key_color, desc_color)
-    // PRIMARY = normal actions, WARNING = destructive/exit, MUTED = secondary
     let all_keys: &[(&str, &str, Color, Color)] = &[
+        ("j/k", "Nav", t::MUTED, t::MUTED),
         ("s", "Switch", t::PRIMARY, t::MUTED),
         ("a", "Add", t::PRIMARY, t::MUTED),
         ("e", "Edit", t::PRIMARY, t::MUTED),
+        ("dd", "Delete", t::WARNING, t::MUTED),
         ("f", "Fallback", t::PRIMARY, t::MUTED),
         ("S", bg_label, t::PRIMARY, t::MUTED),
         ("c", "Clear", t::WARNING, t::MUTED),
@@ -819,30 +820,68 @@ fn masked_api_key(key: &str) -> Cell<'static> {
 }
 
 fn draw_help(f: &mut Frame, _app: &App) {
-    let entries: &[(&str, &str)] = &[
-        ("s", "Switch to selected provider"),
-        ("a", "Add new provider"),
-        ("e", "Edit selected provider"),
-        ("d", "Delete selected provider"),
-        ("t", "Test provider connectivity"),
-        ("J / K", "Move provider down / up"),
-        ("j / k", "Select next / previous"),
-        ("↑ / ↓", "Select next / previous"),
-        ("f", "Toggle fallback mode"),
-        ("r", "Reload config from disk"),
-        ("S", "Toggle background proxy (safe to quit TUI)"),
-        ("q / Esc", "Quit"),
-        ("h / ?", "Show this help"),
+    // Section: (heading, &[(key, desc)])
+    type Section = (&'static str, &'static [(&'static str, &'static str)]);
+    let sections: &[Section] = &[
+        (
+            "Provider List",
+            &[
+                ("j / k / ↑↓", "Navigate providers"),
+                ("gg / G", "Go to top / bottom"),
+                ("s", "Switch to selected provider"),
+                ("a / o", "Add new provider"),
+                ("e / Enter", "Edit selected provider"),
+                ("dd", "Delete selected provider"),
+                ("t", "Test provider connectivity"),
+                ("K / J", "Move provider up / down"),
+                ("f", "Toggle fallback mode"),
+                ("r", "Reload config from disk"),
+                ("S", "Toggle background proxy"),
+                ("c", "Clear usage data"),
+                ("q / Esc", "Quit"),
+                ("h / ?", "Show this help"),
+            ],
+        ),
+        (
+            "Provider Editor  (default: Normal mode)",
+            &[
+                ("i / a", "Enter Insert mode"),
+                ("Esc", "Exit Insert → Normal  |  Normal → cancel"),
+                ("j / k", "Navigate fields (Normal)"),
+                ("h / l", "Move cursor / toggle field (Normal)"),
+                ("Space", "Toggle format field (Normal)"),
+                ("ZZ", "Save and close editor"),
+                ("ZQ", "Cancel and close editor"),
+                ("Ctrl+S", "Save (works in Insert mode too)"),
+                ("Tab / S-Tab", "Next / previous field"),
+            ],
+        ),
+        (
+            "Route Rules  (inside editor, Routes section)",
+            &[
+                ("j / k", "Navigate rules"),
+                ("n", "New rule (auto-enters Insert)"),
+                ("Space", "Toggle rule enabled / disabled"),
+                ("i / Enter", "Edit rule pattern (Insert mode)"),
+                ("dd", "Delete selected rule"),
+                ("K / J", "Move rule up / down (priority)"),
+                ("Esc", "Exit Insert → Normal"),
+            ],
+        ),
     ];
 
-    let width: u16 = 50;
-    let height: u16 = entries.len() as u16 + 4; // entries + border + title + footer
-    let area = centered_fixed(
-        (width * 100 / f.area().width.max(1)).min(80),
-        height,
-        f.area(),
-    );
+    let key_w = 14usize;
+    let content_width: u16 = 62;
 
+    // Count total lines needed.
+    let total_lines: u16 = sections
+        .iter()
+        .map(|(_, entries)| 2 + entries.len() as u16) // heading blank + heading + entries
+        .sum::<u16>()
+        + 2; // footer
+    let dialog_height = total_lines + 4; // borders + padding
+
+    let area = centered_fixed(content_width, dialog_height, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
@@ -852,41 +891,58 @@ fn draw_help(f: &mut Frame, _app: &App) {
         .title_style(Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD))
         .padding(Padding::new(2, 2, 1, 1));
     let inner = block.inner(area);
-    f.render_widget(block, area);
+    f.render_widget(block.clone(), area);
 
-    let mut lines: Vec<Line> = entries
-        .iter()
-        .map(|(key, desc)| {
-            Line::from(vec![
+    let mut lines: Vec<Line> = Vec::new();
+
+    for (i, (heading, entries)) in sections.iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(Span::styled(
+            *heading,
+            Style::default()
+                .fg(t::TEXT)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        )));
+        for (key, desc) in *entries {
+            lines.push(Line::from(vec![
                 Span::styled(
-                    format!("{:<10}", key),
+                    format!("  {:<width$}", key, width = key_w),
                     Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(*desc, Style::default().fg(t::TEXT)),
-            ])
-        })
-        .collect();
+            ]));
+        }
+    }
 
-    // Footer hint
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![Span::styled(
+    lines.push(Line::from(Span::styled(
         "Press any key to close",
         Style::default().fg(t::MUTED),
-    )]));
+    )));
 
-    f.render_widget(Paragraph::new(lines), inner);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn draw_form(f: &mut Frame, app: &App) {
     let Some(form) = &app.form else { return };
 
-    let title = if form.is_new {
-        " Add Provider "
-    } else {
-        " Edit Provider "
-    };
+    let in_routes = form.in_routes();
 
-    // Height per field: multiline focused = max(3, line_count+1), others = 2
+    // ── Title: show action + Vim mode tag ────────────────────────────────────
+    let vim_tag = match form.vim_mode {
+        VimMode::Normal => "[N]",
+        VimMode::Insert => "[I]",
+    };
+    let title = format!(
+        " {} Provider  {} ",
+        if form.is_new { "Add" } else { "Edit" },
+        vim_tag
+    );
+
+    // ── Per-field heights ────────────────────────────────────────────────────
+    // Multiline field expands when focused; all others are 3 lines tall.
     let field_heights: Vec<u16> = form
         .fields
         .iter()
@@ -901,24 +957,31 @@ fn draw_form(f: &mut Frame, app: &App) {
         })
         .collect();
     let fields_total: u16 = field_heights.iter().sum();
-    let dialog_height = fields_total + 3 + 2 + 2; // hint(3) + borders(2) + padding(2)
-    let area = centered_fixed(60, dialog_height, f.area());
+
+    // Routes section: 1 header line + max(1, rule count) item lines.
+    let routes_items = form.routes.len().max(1) as u16;
+    let routes_height = 1 + routes_items;
+
+    let dialog_height = fields_total + routes_height + 3 + 2 + 2; // fields+routes+hint+borders+pad
+    let area = centered_fixed(62, dialog_height, f.area());
 
     f.render_widget(Clear, area);
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(t::PRIMARY))
-        .title(title)
+        .title(title.as_str())
         .title_style(Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD))
         .padding(Padding::new(2, 2, 1, 1));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    // Layout: one slot per regular field + routes section + hint.
     let field_constraints: Vec<Constraint> = field_heights
         .iter()
         .map(|&h| Constraint::Length(h))
-        .chain(std::iter::once(Constraint::Length(3)))
+        .chain(std::iter::once(Constraint::Length(routes_height))) // routes
+        .chain(std::iter::once(Constraint::Length(3))) // hint
         .collect();
 
     let chunks = Layout::default()
@@ -926,8 +989,14 @@ fn draw_form(f: &mut Frame, app: &App) {
         .constraints(field_constraints)
         .split(inner);
 
+    // ── Regular fields ───────────────────────────────────────────────────────
     for (i, field) in form.fields.iter().enumerate() {
         let is_focused = i == form.focused;
+        // In Normal vim-mode, show cursor only when the field has focus AND
+        // we are also in Insert mode (or the field is a toggle).
+        let show_cursor =
+            is_focused && field.editable && (form.vim_mode == VimMode::Insert || field.is_toggle);
+
         let label_style = if is_focused {
             Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD)
         } else if !field.editable {
@@ -959,14 +1028,12 @@ fn draw_form(f: &mut Frame, app: &App) {
                 right,
             ])
         } else if field.is_multiline {
-            // Multiline field: render as Paragraph with real terminal cursor when focused
-            if is_focused && field.editable {
+            if show_cursor {
                 let cursor_pos = field.cursor.min(field.value.len());
                 let before_cursor = &field.value[..cursor_pos];
                 let cursor_row = before_cursor.chars().filter(|&c| c == '\n').count() as u16;
                 let last_nl = before_cursor.rfind('\n').map(|p| p + 1).unwrap_or(0);
                 let cursor_col = before_cursor[last_nl..].width() as u16;
-                // Render all lines
                 let lines: Vec<Line> = field
                     .value
                     .split('\n')
@@ -1004,7 +1071,6 @@ fn draw_form(f: &mut Frame, app: &App) {
                 f.render_widget(Paragraph::new(all_lines), chunks[i]);
                 continue;
             } else {
-                // Not focused: show label on first line, first line of content on second (truncated)
                 let first_line = field.value.lines().next().unwrap_or("");
                 let label_line =
                     Line::from(Span::styled(format!("{:<10}", field.label), label_style));
@@ -1028,14 +1094,13 @@ fn draw_form(f: &mut Frame, app: &App) {
                 field.value.clone()
             };
 
-            if is_focused && field.editable {
+            if show_cursor {
                 let cursor_pos = field.cursor.min(display_val.len());
                 let before = display_val[..cursor_pos].to_string();
                 let cursor_char = display_val[cursor_pos..].chars().next().unwrap_or(' ');
                 let after_start =
                     cursor_pos + cursor_char.len_utf8().min(display_val.len() - cursor_pos);
                 let after = display_val[after_start..].to_string();
-                // Name field: tint text with its future provider color as user types
                 let (before_span, after_span) = if field.label == "Name" && !display_val.is_empty()
                 {
                     let color = t::provider_color(&display_val);
@@ -1073,31 +1138,159 @@ fn draw_form(f: &mut Frame, app: &App) {
         f.render_widget(Paragraph::new(value_display), chunks[i]);
     }
 
-    let hint_idx = form.fields.len();
+    // ── Routes section ───────────────────────────────────────────────────────
+    let routes_chunk = chunks[form.fields.len()];
+    let routes_label_style = if in_routes {
+        Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(t::TEXT)
+    };
+
+    let mut routes_lines: Vec<Line> =
+        vec![Line::from(Span::styled("Routes    ", routes_label_style))];
+
+    if form.routes.is_empty() {
+        routes_lines.push(Line::from(Span::styled(
+            if in_routes {
+                "  n  New rule"
+            } else {
+                "  (none)"
+            },
+            Style::default().fg(t::MUTED),
+        )));
+    } else {
+        for (i, rule) in form.routes.iter().enumerate() {
+            let is_selected = in_routes && i == form.route_cursor;
+            let toggle_ch = if rule.enabled { '✓' } else { '✗' };
+            let toggle_style = if rule.enabled {
+                Style::default().fg(t::SUCCESS)
+            } else {
+                Style::default().fg(t::MUTED)
+            };
+
+            if is_selected && form.route_editing {
+                // Insert mode: show cursor within pattern.
+                let pat = &rule.pattern;
+                let cursor_pos = form.route_pat_cursor.min(pat.len());
+                let before = &pat[..cursor_pos];
+                let cursor_char = pat[cursor_pos..].chars().next().unwrap_or(' ');
+                let after_start = if cursor_pos < pat.len() {
+                    cursor_pos + cursor_char.len_utf8()
+                } else {
+                    cursor_pos
+                };
+                let after = if after_start <= pat.len() {
+                    &pat[after_start..]
+                } else {
+                    ""
+                };
+                routes_lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(format!("[{toggle_ch}] "), toggle_style),
+                    Span::raw(before.to_string()),
+                    Span::styled(
+                        cursor_char.to_string(),
+                        Style::default().add_modifier(Modifier::REVERSED),
+                    ),
+                    Span::raw(after.to_string()),
+                ]));
+            } else if is_selected {
+                // Normal mode: highlight selected rule.
+                routes_lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(format!("[{toggle_ch}] "), Style::default().fg(t::PRIMARY)),
+                    Span::styled(
+                        rule.pattern.as_str(),
+                        Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+            } else {
+                let pat_style = if rule.enabled {
+                    Style::default().fg(t::TEXT)
+                } else {
+                    Style::default().fg(t::MUTED)
+                };
+                routes_lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(format!("[{toggle_ch}] "), toggle_style),
+                    Span::styled(rule.pattern.as_str(), pat_style),
+                ]));
+            }
+        }
+    }
+    f.render_widget(Paragraph::new(routes_lines), routes_chunk);
+
+    // ── Hint bar ─────────────────────────────────────────────────────────────
+    let hint_idx = form.fields.len() + 1;
     if hint_idx < chunks.len() {
-        let focused_field = &form.fields[form.focused];
-        let mut hint_lines = if focused_field.is_multiline {
-            vec![Line::from(vec![
-                Span::raw("   "),
-                Span::styled("Ctrl+S", Style::default().fg(t::SUCCESS)),
-                Span::styled(" Save  ", Style::default().fg(t::MUTED)),
-                Span::styled("Enter", Style::default().fg(t::PRIMARY)),
-                Span::styled(" Newline  ", Style::default().fg(t::MUTED)),
-                Span::styled("Esc", Style::default().fg(t::WARNING)),
-                Span::styled(" Cancel", Style::default().fg(t::MUTED)),
-            ])]
+        let hint_line = if in_routes {
+            if form.route_editing {
+                // Route Insert mode.
+                Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled("Esc", Style::default().fg(t::WARNING)),
+                    Span::styled(" Normal  ", Style::default().fg(t::MUTED)),
+                    Span::styled("Ctrl+S", Style::default().fg(t::SUCCESS)),
+                    Span::styled(" Save  ", Style::default().fg(t::MUTED)),
+                    Span::styled("←/→", Style::default().fg(t::PRIMARY)),
+                    Span::styled(" Move cursor", Style::default().fg(t::MUTED)),
+                ])
+            } else {
+                // Route Normal mode.
+                Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled("n", Style::default().fg(t::SUCCESS)),
+                    Span::styled(" New  ", Style::default().fg(t::MUTED)),
+                    Span::styled("Space", Style::default().fg(t::PRIMARY)),
+                    Span::styled(" Toggle  ", Style::default().fg(t::MUTED)),
+                    Span::styled("dd", Style::default().fg(t::WARNING)),
+                    Span::styled(" Del  ", Style::default().fg(t::MUTED)),
+                    Span::styled("i/Enter", Style::default().fg(t::PRIMARY)),
+                    Span::styled(" Edit  ", Style::default().fg(t::MUTED)),
+                    Span::styled("ZZ", Style::default().fg(t::SUCCESS)),
+                    Span::styled(" Save", Style::default().fg(t::MUTED)),
+                ])
+            }
+        } else if form.vim_mode == VimMode::Insert {
+            // Field Insert mode.
+            let focused_field = &form.fields[form.focused];
+            if focused_field.is_multiline {
+                Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled("Esc", Style::default().fg(t::WARNING)),
+                    Span::styled(" Normal  ", Style::default().fg(t::MUTED)),
+                    Span::styled("Ctrl+S", Style::default().fg(t::SUCCESS)),
+                    Span::styled(" Save  ", Style::default().fg(t::MUTED)),
+                    Span::styled("Enter", Style::default().fg(t::PRIMARY)),
+                    Span::styled(" Newline", Style::default().fg(t::MUTED)),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled("Esc", Style::default().fg(t::WARNING)),
+                    Span::styled(" Normal  ", Style::default().fg(t::MUTED)),
+                    Span::styled("Ctrl+S", Style::default().fg(t::SUCCESS)),
+                    Span::styled(" Save  ", Style::default().fg(t::MUTED)),
+                    Span::styled("Tab", Style::default().fg(t::PRIMARY)),
+                    Span::styled(" Next field", Style::default().fg(t::MUTED)),
+                ])
+            }
         } else {
-            vec![Line::from(vec![
+            // Field Normal mode.
+            Line::from(vec![
                 Span::raw("   "),
-                Span::styled("Ctrl+S", Style::default().fg(t::SUCCESS)),
+                Span::styled("i", Style::default().fg(t::PRIMARY)),
+                Span::styled(" Insert  ", Style::default().fg(t::MUTED)),
+                Span::styled("j/k", Style::default().fg(t::PRIMARY)),
+                Span::styled(" Field  ", Style::default().fg(t::MUTED)),
+                Span::styled("ZZ", Style::default().fg(t::SUCCESS)),
                 Span::styled(" Save  ", Style::default().fg(t::MUTED)),
-                Span::styled("Enter", Style::default().fg(t::PRIMARY)),
-                Span::styled(" Next  ", Style::default().fg(t::MUTED)),
-                Span::styled("Esc", Style::default().fg(t::WARNING)),
+                Span::styled("ZQ", Style::default().fg(t::WARNING)),
                 Span::styled(" Cancel", Style::default().fg(t::MUTED)),
-            ])]
+            ])
         };
-        hint_lines.push(Line::from(""));
+
+        let mut hint_lines = vec![hint_line, Line::from("")];
         if let Some(err) = &form.error {
             hint_lines.push(Line::from(Span::styled(
                 format!("✗ {}", err),

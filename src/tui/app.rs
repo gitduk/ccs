@@ -4,7 +4,7 @@ use std::sync::{mpsc, Arc, Mutex};
 
 use ratatui::widgets::TableState;
 
-use crate::config::{self, ApiFormat, AppConfig, Provider};
+use crate::config::{self, ApiFormat, AppConfig, Provider, RouteRule};
 use crate::db::SharedDb;
 use crate::error::Result;
 use crate::proxy::metrics::{SharedMetrics, TokenMetrics};
@@ -19,6 +19,15 @@ pub enum Mode {
     Editing,
     Confirm,
     Help,
+}
+
+/// Vim-style sub-mode used inside the provider editor form.
+#[derive(Debug, Clone, PartialEq)]
+pub enum VimMode {
+    /// Navigation / command mode (default on form open).
+    Normal,
+    /// Text-input mode, entered with `i` / `a`.
+    Insert,
 }
 
 #[derive(Debug, Clone)]
@@ -64,14 +73,35 @@ pub struct App {
     pub provider_models: HashMap<String, Vec<String>>,
     /// Shared HTTP client for provider connectivity tests (reuses connection pool).
     pub test_client: reqwest::Client,
+    /// Pending first key of a two-key sequence (`dd`, `gg`) in the normal list view.
+    pub pending_key: Option<(char, std::time::Instant)>,
 }
+
+// ─── Provider editor form ─────────────────────────────────────────────────────
 
 pub struct ProviderForm {
     pub is_new: bool,
     /// Original name before editing — used to detect renames.
     pub original_name: Option<String>,
     pub fields: Vec<FormField>,
+    /// Focused slot index: 0..fields.len()-1 = a regular field;
+    /// fields.len() = the Routes section.
     pub focused: usize,
+    /// Current Vim sub-mode for the form.
+    pub vim_mode: VimMode,
+
+    // ── Route rules ──
+    /// Working copy of the provider's route rules.
+    pub routes: Vec<RouteRule>,
+    /// Which route is highlighted when the Routes section has focus.
+    pub route_cursor: usize,
+    /// True while a route's pattern field is being edited (Insert sub-mode).
+    pub route_editing: bool,
+    /// Byte cursor inside the currently edited route pattern.
+    pub route_pat_cursor: usize,
+
+    /// Pending first key of a two-key sequence (`ZZ`, `ZQ`, `dd`) inside the form.
+    pub pending_key: Option<(char, std::time::Instant)>,
     pub error: Option<String>,
 }
 
@@ -83,6 +113,8 @@ pub struct FormField {
     pub is_toggle: bool,
     pub is_multiline: bool,
 }
+
+// ─── FormField helpers ────────────────────────────────────────────────────────
 
 impl FormField {
     fn text(label: &'static str, value: &str) -> Self {
@@ -132,7 +164,7 @@ impl FormField {
             return false; // already on first line
         }
         let col = self.cursor - line_start;
-        let prev_line_end = line_start - 1; // position of the '\n'
+        let prev_line_end = line_start - 1;
         let prev_line_start = self.value[..prev_line_end]
             .rfind('\n')
             .map(|p| p + 1)
@@ -147,7 +179,7 @@ impl FormField {
     pub fn move_down(&mut self) -> bool {
         let next_nl = self.value[self.cursor..].find('\n');
         let Some(rel) = next_nl else {
-            return false; // already on last line
+            return false;
         };
         let next_line_start = self.cursor + rel + 1;
         let before = &self.value[..self.cursor];
@@ -217,11 +249,7 @@ impl FormField {
             return;
         }
         let mut pos = self.cursor;
-        // Skip trailing spaces (step back by char boundary)
         while pos > 0 {
-            // SAFETY: pos is always maintained as a valid UTF-8 char boundary
-            // by insert/backspace/move_left; next_back() on a non-empty slice
-            // is always Some, but we use expect for a clear panic message.
             let c = self.value[..pos]
                 .chars()
                 .next_back()
@@ -231,7 +259,6 @@ impl FormField {
             }
             pos -= c.len_utf8();
         }
-        // Delete until next space
         while pos > 0 {
             let c = self.value[..pos]
                 .chars()
@@ -266,31 +293,54 @@ impl FormField {
     }
 }
 
+// ─── ProviderForm helpers ─────────────────────────────────────────────────────
+
 impl ProviderForm {
-    /// Move focus to the next editable field (wraps around).
+    /// Returns true when the Routes section currently has focus.
+    pub fn in_routes(&self) -> bool {
+        self.focused == self.fields.len()
+    }
+
+    /// Move focus to the next editable slot (wraps; Routes section is always
+    /// reachable).
     pub fn focus_next(&mut self) {
-        let len = self.fields.len();
-        for offset in 1..len {
-            let next = (self.focused + offset) % len;
-            if self.fields[next].editable {
+        let total = self.fields.len() + 1; // +1 for Routes slot
+        for offset in 1..=total {
+            let next = (self.focused + offset) % total;
+            if next < self.fields.len() {
+                if self.fields[next].editable {
+                    self.focused = next;
+                    return;
+                }
+            } else {
+                // Routes slot
                 self.focused = next;
-                break;
+                self.route_editing = false;
+                return;
             }
         }
     }
 
-    /// Move focus to the previous editable field (wraps around).
+    /// Move focus to the previous editable slot (wraps; Routes section included).
     pub fn focus_prev(&mut self) {
-        let len = self.fields.len();
-        for offset in 1..len {
-            let prev = (self.focused + len - offset) % len;
-            if self.fields[prev].editable {
+        let total = self.fields.len() + 1;
+        for offset in 1..=total {
+            let prev = (self.focused + total - offset) % total;
+            if prev < self.fields.len() {
+                if self.fields[prev].editable {
+                    self.focused = prev;
+                    return;
+                }
+            } else {
                 self.focused = prev;
-                break;
+                self.route_editing = false;
+                return;
             }
         }
     }
 }
+
+// ─── App ──────────────────────────────────────────────────────────────────────
 
 impl App {
     pub fn new() -> Result<Self> {
@@ -338,6 +388,7 @@ impl App {
             bg_proxy_pid,
             provider_models,
             test_client: reqwest::Client::new(),
+            pending_key: None,
         })
     }
 
@@ -402,6 +453,12 @@ impl App {
                 FormField::multiline("Notes", ""),
             ],
             focused: 0,
+            vim_mode: VimMode::Normal,
+            routes: vec![],
+            route_cursor: 0,
+            route_editing: false,
+            route_pat_cursor: 0,
+            pending_key: None,
             error: None,
         });
         self.mode = Mode::Editing;
@@ -426,6 +483,12 @@ impl App {
                 FormField::multiline("Notes", &provider.notes),
             ],
             focused: 0,
+            vim_mode: VimMode::Normal,
+            routes: provider.routes.clone(),
+            route_cursor: 0,
+            route_editing: false,
+            route_pat_cursor: 0,
+            pending_key: None,
             error: None,
         });
         self.mode = Mode::Editing;
@@ -447,6 +510,7 @@ impl App {
         let notes = form.fields[4].value.clone();
         let is_new = form.is_new;
         let original_name = form.original_name.clone();
+        let routes = form.routes.clone();
 
         let is_rename = !is_new && original_name.as_deref() != Some(new_name.as_str());
 
@@ -487,11 +551,11 @@ impl App {
             api_format,
             model_map,
             notes,
+            routes,
         };
 
         if is_rename {
             let old_name = original_name.as_deref().unwrap();
-            // Rebuild IndexMap preserving insertion order, swapping the key in one pass.
             self.config.providers = std::mem::take(&mut self.config.providers)
                 .into_iter()
                 .map(|(k, v)| {
@@ -507,19 +571,16 @@ impl App {
                 self.config.current = new_name.clone();
             }
 
-            // Update DB: rename provider_name in all rows.
             if let Ok(conn) = self.db.lock() {
                 let _ = crate::db::rename_provider(&conn, &provider_id, &new_name);
             }
 
-            // Update in-memory metrics key.
             if let Ok(mut m) = self.metrics.lock() {
                 if let Some(stats) = m.by_provider.remove(old_name) {
                     m.by_provider.insert(new_name.clone(), stats);
                 }
             }
 
-            // Update provider_models, test_results, pending_tests keys.
             if let Some(models) = self.provider_models.remove(old_name) {
                 self.provider_models.insert(new_name.clone(), models);
             }
@@ -556,10 +617,6 @@ impl App {
     }
 
     pub fn clear_metrics(&mut self) {
-        // Acquire both locks together so the DB and in-memory state are cleared
-        // atomically from the perspective of any concurrent reader: no other
-        // thread holds both locks simultaneously, so lock ordering (db first,
-        // then metrics) is deadlock-free.
         let Ok(conn) = self.db.lock() else { return };
         let Ok(mut m) = self.metrics.lock() else {
             return;
@@ -625,7 +682,7 @@ impl App {
         self.message = Some((msg.into(), kind, std::time::Instant::now()));
     }
 
-    /// Clear message if it has expired (after 3 seconds).
+    /// Clear message if it has expired (after MESSAGE_TIMEOUT_SECS seconds).
     pub fn tick_message(&mut self) {
         if let Some((_, _, created)) = &self.message {
             if created.elapsed() > std::time::Duration::from_secs(MESSAGE_TIMEOUT_SECS) {
@@ -698,7 +755,6 @@ impl App {
             .stderr(std::process::Stdio::null())
             .spawn()?;
         let pid = child.id();
-        // Drop handle — child is detached; it will be reparented to init when TUI exits.
         drop(child);
         if let Some(path) = pid_file_path() {
             if let Some(parent) = path.parent() {
@@ -719,7 +775,6 @@ impl App {
     }
 
     /// Called when the background proxy is found to have exited on its own.
-    /// Clears the in-memory PID and removes the PID file (no kill needed).
     pub fn on_bg_proxy_died(&mut self) {
         self.bg_proxy_pid = None;
         self.remove_pid_file();
@@ -738,7 +793,6 @@ impl App {
                 self.config = fresh_config;
                 self.refresh_ids();
 
-                // Reselect current provider if it exists
                 if let Some(idx) = self
                     .provider_names
                     .iter()
@@ -772,7 +826,6 @@ pub fn pid_file_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".ccs").join("proxy.pid"))
 }
 
-/// Read PID file and return the PID if the process is still alive.
 pub fn load_bg_proxy_pid() -> Option<u32> {
     let path = pid_file_path()?;
     let content = std::fs::read_to_string(&path).ok()?;
@@ -786,14 +839,9 @@ pub fn load_bg_proxy_pid() -> Option<u32> {
 }
 
 fn remove_pid_file_at(path: &std::path::Path) {
-    if let Err(e) = std::fs::remove_file(path) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!("Could not remove PID file {}: {e}", path.display());
-        }
-    }
+    let _ = std::fs::remove_file(path);
 }
 
-/// Check whether a process with the given PID is alive AND is a `ccs` process.
 pub fn is_process_alive(pid: u32) -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -816,7 +864,6 @@ pub fn is_process_alive(pid: u32) -> bool {
     }
 }
 
-/// Send SIGTERM to a process (uses system `kill` command to avoid libc dep).
 pub fn kill_process(pid: u32) {
     let _ = std::process::Command::new("kill")
         .arg(pid.to_string())

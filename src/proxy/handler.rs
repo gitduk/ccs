@@ -113,14 +113,31 @@ pub async fn handle_messages(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    // Build the candidate provider list
+    // Parse body once to extract routing hints (model name + stream flag).
+    // `body` is `Bytes` (cheaply cloneable); we do not consume it here.
+    let req_json = serde_json::from_slice::<serde_json::Value>(&body).ok();
+    let is_stream = req_json
+        .as_ref()
+        .and_then(|v| v.get("stream").and_then(|s| s.as_bool()))
+        .unwrap_or(false);
+    let req_model = req_json
+        .as_ref()
+        .and_then(|v| v.get("model").and_then(|m| m.as_str()))
+        .unwrap_or("")
+        .to_string();
+
+    // Build the candidate provider list, honouring per-provider route rules.
+    // If a route rule matches the requested model, that provider is used as the
+    // starting point (instead of `current`).  Fallback cycling still applies.
     let (pool, do_cycle) = {
         let config = state.config.read().await;
+        let routed = config.resolve_route(&req_model).map(|(n, _)| n.to_string());
         if config.fallback {
-            let current_idx = config.providers.get_index_of(&config.current).unwrap_or(0);
+            let start_name = routed.as_deref().unwrap_or(&config.current);
+            let start_idx = config.providers.get_index_of(start_name).unwrap_or(0);
             let len = config.providers.len();
             let list: Vec<(String, crate::config::Provider)> = (0..len)
-                .map(|i| (current_idx + i) % len)
+                .map(|i| (start_idx + i) % len)
                 .filter_map(|i| {
                     config
                         .providers
@@ -130,15 +147,14 @@ pub async fn handle_messages(
                 .collect();
             (list, true)
         } else {
-            let (name, p) = config.current_provider()?;
-            (vec![(name.to_string(), p.clone())], false)
+            let provider_name = routed.as_deref().unwrap_or(&config.current);
+            let provider = config
+                .providers
+                .get(provider_name)
+                .ok_or_else(|| AppError::ProviderNotFound(provider_name.to_string()))?;
+            (vec![(provider_name.to_string(), provider.clone())], false)
         }
     };
-
-    let is_stream = serde_json::from_slice::<serde_json::Value>(&body)
-        .ok()
-        .and_then(|v| v.get("stream").and_then(|s| s.as_bool()))
-        .unwrap_or(false);
 
     // Cycle infinitely; terminate when a full round of consecutive failures occurs
     let round_size = pool.len();

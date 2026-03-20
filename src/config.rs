@@ -1,6 +1,79 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+// ─── Route Rules ─────────────────────────────────────────────────────────────
+
+/// A single model-routing rule attached to a provider.
+/// When enabled and the incoming model name matches `pattern`, this provider
+/// is selected ahead of the global `current` setting.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RouteRule {
+    /// Optional human-readable label (not used for matching).
+    #[serde(default)]
+    pub name: String,
+    /// Glob pattern matched against the request `model` field.
+    /// Supports `*` as wildcard (e.g. `"claude-sonnet*"`, `"*opus*"`).
+    pub pattern: String,
+    /// When false this rule is skipped during routing.
+    #[serde(default = "route_enabled_default")]
+    pub enabled: bool,
+}
+
+fn route_enabled_default() -> bool {
+    true
+}
+
+impl RouteRule {
+    pub fn new(pattern: impl Into<String>) -> Self {
+        Self {
+            name: String::new(),
+            pattern: pattern.into(),
+            enabled: true,
+        }
+    }
+
+    /// Returns true when this rule is enabled and `model` matches `pattern`.
+    pub fn matches(&self, model: &str) -> bool {
+        self.enabled && glob_match(&self.pattern, model)
+    }
+}
+
+/// Glob pattern matching where `*` matches any sequence of characters.
+///
+/// Examples:
+/// - `"claude-sonnet*"` matches `"claude-sonnet-4-20250514"`
+/// - `"*opus*"`          matches `"anthropic/claude-opus-4"`
+/// - `"claude-opus-4"`  only matches exactly `"claude-opus-4"`
+pub fn glob_match(pattern: &str, text: &str) -> bool {
+    if !pattern.contains('*') {
+        return pattern == text;
+    }
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let mut remaining = text;
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if i == 0 {
+            // First segment must be a strict prefix.
+            if !remaining.starts_with(part) {
+                return false;
+            }
+            remaining = &remaining[part.len()..];
+        } else if i == parts.len() - 1 {
+            // Last segment must be a strict suffix.
+            return remaining.ends_with(part);
+        } else {
+            // Middle segments must appear somewhere in the remainder.
+            match remaining.find(part) {
+                Some(pos) => remaining = &remaining[pos + part.len()..],
+                None => return false,
+            }
+        }
+    }
+    true
+}
+
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -35,6 +108,10 @@ pub struct Provider {
     pub model_map: HashMap<String, String>,
     #[serde(default)]
     pub notes: String,
+    /// Model-routing rules. The first enabled rule whose pattern matches the
+    /// incoming request model causes this provider to be selected.
+    #[serde(default)]
+    pub routes: Vec<RouteRule>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -81,6 +158,20 @@ impl AppConfig {
             .get(&self.current)
             .map(|p| (self.current.as_str(), p))
             .ok_or_else(|| AppError::ProviderNotFound(self.current.clone()))
+    }
+
+    /// Find the first provider (in insertion order) that has an enabled route
+    /// rule matching `model`. Returns `(name, provider)` or `None`.
+    pub fn resolve_route<'a>(&'a self, model: &str) -> Option<(&'a str, &'a Provider)> {
+        if model.is_empty() {
+            return None;
+        }
+        for (name, provider) in &self.providers {
+            if provider.routes.iter().any(|r| r.matches(model)) {
+                return Some((name.as_str(), provider));
+            }
+        }
+        None
     }
 
     /// Build a name → id map for all providers (used for DB migration).
