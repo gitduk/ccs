@@ -548,11 +548,26 @@ impl App {
         let notes = form.fields[4].value.clone();
         let is_new = form.is_new;
         let original_name = form.original_name.clone();
-        // Drop routes with empty patterns — they are invalid and should not be persisted.
+        // Look up the known model list for this provider (used for route validation).
+        // If not yet loaded we skip the target check (conservative).
+        let models_key = original_name.as_deref().unwrap_or(new_name.as_str());
+        let known_models: Vec<String> = self
+            .provider_models
+            .get(models_key)
+            .cloned()
+            .unwrap_or_default();
+        // Drop invalid routes:
+        //   1. pattern is empty
+        //   2. target is non-empty AND not in the known model list (when list is loaded)
         let routes: Vec<_> = form
             .routes
             .iter()
-            .filter(|r| !r.pattern.trim().is_empty())
+            .filter(|r| {
+                !r.pattern.trim().is_empty()
+                    && (r.target.is_empty()
+                        || known_models.is_empty()
+                        || known_models.contains(&r.target))
+            })
             .cloned()
             .collect();
 
@@ -656,7 +671,12 @@ impl App {
             // an edit from now on so subsequent autosaves don't try to re-insert.
             if let Some(f) = &mut self.form {
                 // Mirror the cleanup: remove invalid routes from the live form too.
-                f.routes.retain(|r| !r.pattern.trim().is_empty());
+                f.routes.retain(|r| {
+                    !r.pattern.trim().is_empty()
+                        && (r.target.is_empty()
+                            || known_models.is_empty()
+                            || known_models.contains(&r.target))
+                });
                 if f.route_cursor >= f.routes.len() && !f.routes.is_empty() {
                     f.route_cursor = f.routes.len() - 1;
                 } else if f.routes.is_empty() {

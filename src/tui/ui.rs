@@ -1222,7 +1222,7 @@ fn draw_form(f: &mut Frame, app: &App) {
     } else {
         for (i, rule) in form.routes.iter().enumerate() {
             let is_selected = in_routes && i == form.route_cursor;
-            let toggle_ch = if rule.enabled { '✓' } else { '✗' };
+            let toggle_ch = if rule.enabled { '✓' } else { ' ' };
             let toggle_style = if rule.enabled {
                 Style::default().fg(t::SUCCESS)
             } else {
