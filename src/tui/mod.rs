@@ -653,10 +653,12 @@ fn handle_routes_key(
                     form.route_cursor -= 1;
                 }
             }
-            // j / Down → move cursor down (stops at last rule).
+            // j / Down → move cursor down, or leave section when at the last rule.
             KeyCode::Char('j') | KeyCode::Down => {
                 if !form.routes.is_empty() && form.route_cursor + 1 < form.routes.len() {
                     form.route_cursor += 1;
+                } else {
+                    form.focus_next();
                 }
             }
 
