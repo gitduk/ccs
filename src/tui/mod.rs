@@ -304,6 +304,28 @@ fn handle_normal_key(
 // ─── Routes section key handler ───────────────────────────────────────────────
 
 /// Filter `models` by case-insensitive contains of `filter`, return up to 8 matches.
+/// Remove the rule at `route_cursor` if it is invalid:
+///   1. pattern is empty, OR
+///   2. target is non-empty AND not in the known model list (when list is loaded)
+fn prune_current_rule(form: &mut app::ProviderForm, provider_models: &[String]) {
+    let valid = form
+        .routes
+        .get(form.route_cursor)
+        .map(|r| {
+            !r.pattern.trim().is_empty()
+                && (r.target.is_empty()
+                    || provider_models.is_empty()
+                    || provider_models.contains(&r.target))
+        })
+        .unwrap_or(true);
+    if !valid {
+        form.routes.remove(form.route_cursor);
+        if form.route_cursor > 0 && form.route_cursor >= form.routes.len() {
+            form.route_cursor -= 1;
+        }
+    }
+}
+
 fn filter_suggestions<'a>(models: &'a [String], filter: &str) -> Vec<&'a str> {
     let f = filter.to_lowercase();
     models
@@ -336,12 +358,13 @@ fn handle_routes_key(
                     form.route_edit_target = false;
                     form.route_suggest_active = false;
                     form.route_suggest_idx = 0;
+                    prune_current_rule(form, provider_models);
                 }
             }
             KeyCode::Enter => {
                 if form.route_suggest_active {
                     // Select highlighted suggestion.
-                    let suggestions = if form.route_edit_target {
+                    let suggestions: Vec<&str> = if form.route_edit_target {
                         let filter = form
                             .routes
                             .get(form.route_cursor)
@@ -361,11 +384,13 @@ fn handle_routes_key(
                     form.route_suggest_idx = 0;
                     form.route_editing = false;
                     form.route_edit_target = false;
+                    prune_current_rule(form, provider_models);
                 } else {
                     form.route_editing = false;
                     form.route_edit_target = false;
                     form.route_suggest_active = false;
                     form.route_suggest_idx = 0;
+                    prune_current_rule(form, provider_models);
                 }
             }
             // Tab: switch pattern ↔ target; if already on target → exit Insert.
@@ -378,6 +403,7 @@ fn handle_routes_key(
                 } else {
                     form.route_editing = false;
                     form.route_edit_target = false;
+                    prune_current_rule(form, provider_models);
                 }
             }
             // BackTab: switch target → pattern; if on pattern → focus_prev.
@@ -394,6 +420,7 @@ fn handle_routes_key(
                     form.route_edit_target = false;
                     form.route_suggest_active = false;
                     form.route_suggest_idx = 0;
+                    prune_current_rule(form, provider_models);
                     form.focus_prev();
                 }
             }
