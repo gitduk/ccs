@@ -822,6 +822,21 @@ fn handle_editing_key(
             .cloned()
             .unwrap_or_default();
         handle_routes_key(form, code, ctrl, &provider_models);
+        // If focus just left the routes section, prune invalid routes immediately
+        // so the user gets instant visual feedback (don't wait for save).
+        if !form.in_routes() {
+            form.routes.retain(|r| {
+                !r.pattern.trim().is_empty()
+                    && (r.target.is_empty()
+                        || provider_models.is_empty()
+                        || provider_models.contains(&r.target))
+            });
+            if form.route_cursor >= form.routes.len() && !form.routes.is_empty() {
+                form.route_cursor = form.routes.len() - 1;
+            } else if form.routes.is_empty() {
+                form.route_cursor = 0;
+            }
+        }
         return Ok(());
     }
 
