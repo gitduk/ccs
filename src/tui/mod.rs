@@ -866,12 +866,24 @@ fn handle_editing_key(
                     form.fields[form.focused].toggle_value();
                 }
             }
-            // Enter on a regular field: move to next (or enter Insert for multiline).
+            // Enter on a regular field: save form (or enter Insert for multiline).
             KeyCode::Enter => {
                 if form.fields[form.focused].is_multiline {
                     form.vim_mode = VimMode::Insert;
                 } else {
-                    form.focus_next();
+                    let pname = if form.is_new {
+                        let n = form.fields[0].value.trim().to_string();
+                        (!n.is_empty()).then_some(n)
+                    } else {
+                        None
+                    };
+                    app.save_form()?;
+                    sync_proxy_config(app, server);
+                    let name = pname.or_else(|| app.selected_name().map(|s| s.to_string()));
+                    if let Some(n) = name {
+                        test_provider_by_name(app, &n);
+                    }
+                    return Ok(());
                 }
             }
             // Cursor jumps.
@@ -889,7 +901,19 @@ fn handle_editing_key(
             if is_ml {
                 form.fields[form.focused].insert_newline();
             } else {
-                form.focus_next();
+                let pname = if form.is_new {
+                    let n = form.fields[0].value.trim().to_string();
+                    (!n.is_empty()).then_some(n)
+                } else {
+                    None
+                };
+                app.save_form()?;
+                sync_proxy_config(app, server);
+                let name = pname.or_else(|| app.selected_name().map(|s| s.to_string()));
+                if let Some(n) = name {
+                    test_provider_by_name(app, &n);
+                }
+                return Ok(());
             }
         }
         KeyCode::Tab => form.focus_next(),
