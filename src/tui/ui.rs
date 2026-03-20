@@ -1297,10 +1297,10 @@ fn draw_form(f: &mut Frame, app: &App) {
                     Span::styled(format!("[{toggle_ch}] "), Style::default().fg(prov_color)),
                     Span::styled(
                         rule.pattern.as_str(),
-                        Style::default().fg(prov_color).add_modifier(Modifier::BOLD),
+                        Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(" -> ", Style::default().fg(t::MUTED)),
-                    Span::styled(tgt_text, Style::default().fg(prov_color)),
+                    Span::styled(tgt_text, Style::default().fg(t::TEXT)),
                 ]));
             } else {
                 let pat_style = if rule.enabled {
