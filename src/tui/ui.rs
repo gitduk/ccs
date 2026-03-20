@@ -958,9 +958,9 @@ fn draw_form(f: &mut Frame, app: &App) {
         .collect();
     let fields_total: u16 = field_heights.iter().sum();
 
-    // Routes section: 1 header line + max(1, rule count) item lines.
+    // Routes section: 1 header line + max(1, rule count) item lines + 1 blank separator.
     let routes_items = form.routes.len().max(1) as u16;
-    let routes_height = 1 + routes_items;
+    let routes_height = 1 + routes_items + 1;
 
     let dialog_height = fields_total + routes_height + 3 + 2 + 2; // fields+routes+hint+borders+pad
     let area = centered_fixed(62, dialog_height, f.area());
@@ -1151,11 +1151,7 @@ fn draw_form(f: &mut Frame, app: &App) {
 
     if form.routes.is_empty() {
         routes_lines.push(Line::from(Span::styled(
-            if in_routes {
-                "  n  New rule"
-            } else {
-                "  (none)"
-            },
+            "  (no rules)",
             Style::default().fg(t::MUTED),
         )));
     } else {
@@ -1218,6 +1214,7 @@ fn draw_form(f: &mut Frame, app: &App) {
             }
         }
     }
+    routes_lines.push(Line::from(""));
     f.render_widget(Paragraph::new(routes_lines), routes_chunk);
 
     // ── Hint bar ─────────────────────────────────────────────────────────────
