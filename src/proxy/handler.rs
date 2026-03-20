@@ -129,9 +129,21 @@ pub async fn handle_messages(
     // Build the candidate provider list, honouring per-provider route rules.
     // If a route rule matches the requested model, that provider is used as the
     // starting point (instead of `current`).  Fallback cycling still applies.
-    let (pool, do_cycle) = {
+    let (pool, do_cycle, routed_target) = {
         let config = state.config.read().await;
-        let routed = config.resolve_route(&req_model).map(|(n, _)| n.to_string());
+        let (routed, routed_target) = config
+            .resolve_route(&req_model)
+            .map(|(n, _, t)| {
+                (
+                    Some(n.to_string()),
+                    if t.is_empty() {
+                        None
+                    } else {
+                        Some(t.to_string())
+                    },
+                )
+            })
+            .unwrap_or((None, None));
         if config.fallback {
             let start_name = routed.as_deref().unwrap_or(&config.current);
             let start_idx = config.providers.get_index_of(start_name).unwrap_or(0);
@@ -145,15 +157,31 @@ pub async fn handle_messages(
                         .map(|(k, v)| (k.clone(), v.clone()))
                 })
                 .collect();
-            (list, true)
+            (list, true, routed_target)
         } else {
             let provider_name = routed.as_deref().unwrap_or(&config.current);
             let provider = config
                 .providers
                 .get(provider_name)
                 .ok_or_else(|| AppError::ProviderNotFound(provider_name.to_string()))?;
-            (vec![(provider_name.to_string(), provider.clone())], false)
+            (
+                vec![(provider_name.to_string(), provider.clone())],
+                false,
+                routed_target,
+            )
         }
+    };
+
+    // Patch body: rewrite `model` field with route target when applicable.
+    let body = if let Some(target) = &routed_target {
+        if let Some(mut json) = req_json.clone() {
+            json["model"] = serde_json::Value::String(target.clone());
+            Bytes::from(serde_json::to_vec(&json).unwrap_or_else(|_| body.to_vec()))
+        } else {
+            body
+        }
+    } else {
+        body
     };
 
     // Cycle infinitely; terminate when a full round of consecutive failures occurs

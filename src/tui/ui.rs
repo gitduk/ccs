@@ -966,7 +966,7 @@ fn draw_form(f: &mut Frame, app: &App) {
     let routes_height = 1 + routes_items + 1;
 
     let dialog_height = fields_total + routes_height + 3 + 2 + 2; // fields+routes+hint+borders+pad
-    let area = centered_fixed(62, dialog_height, f.area());
+    let area = centered_fixed(70, dialog_height, f.area());
 
     f.render_widget(Clear, area);
 
@@ -1171,43 +1171,78 @@ fn draw_form(f: &mut Frame, app: &App) {
                 Style::default().fg(t::MUTED)
             };
 
+            // Helper: render a text field with optional cursor at `cursor_pos`.
+            let render_field =
+                |text: &str, cursor_pos: usize, active: bool, color: ratatui::style::Color| {
+                    if active {
+                        let cursor_pos = cursor_pos.min(text.len());
+                        let before = &text[..cursor_pos];
+                        let cursor_char = text[cursor_pos..].chars().next().unwrap_or(' ');
+                        let after_start = cursor_pos
+                            + if cursor_pos < text.len() {
+                                cursor_char.len_utf8()
+                            } else {
+                                0
+                            };
+                        let after = if after_start <= text.len() {
+                            &text[after_start..]
+                        } else {
+                            ""
+                        };
+                        vec![
+                            Span::raw(before.to_string()),
+                            Span::styled(
+                                cursor_char.to_string(),
+                                Style::default().fg(color).add_modifier(Modifier::REVERSED),
+                            ),
+                            Span::raw(after.to_string()),
+                        ]
+                    } else {
+                        vec![Span::raw(text.to_string())]
+                    }
+                };
+
             if is_selected && form.route_editing {
-                // Insert mode: show cursor within pattern.
-                let pat = &rule.pattern;
-                let cursor_pos = form.route_pat_cursor.min(pat.len());
-                let before = &pat[..cursor_pos];
-                let cursor_char = pat[cursor_pos..].chars().next().unwrap_or(' ');
-                let after_start = if cursor_pos < pat.len() {
-                    cursor_pos + cursor_char.len_utf8()
+                // Insert mode: show cursor in the active field.
+                let pat_active = !form.route_edit_target;
+                let tgt_active = form.route_edit_target;
+
+                let pat_spans =
+                    render_field(&rule.pattern, form.route_pat_cursor, pat_active, prov_color);
+                let tgt_text_owned;
+                let tgt_text = if rule.target.is_empty() && !tgt_active {
+                    "(pass-through)"
                 } else {
-                    cursor_pos
+                    tgt_text_owned = rule.target.clone();
+                    &tgt_text_owned
                 };
-                let after = if after_start <= pat.len() {
-                    &pat[after_start..]
-                } else {
-                    ""
-                };
-                routes_lines.push(Line::from(vec![
+                let tgt_spans =
+                    render_field(tgt_text, form.route_tgt_cursor, tgt_active, prov_color);
+
+                let mut spans = vec![
                     Span::raw("  "),
                     Span::styled(format!("[{toggle_ch}] "), toggle_style),
-                    Span::raw(before.to_string()),
-                    Span::styled(
-                        cursor_char.to_string(),
-                        Style::default()
-                            .fg(prov_color)
-                            .add_modifier(Modifier::REVERSED),
-                    ),
-                    Span::raw(after.to_string()),
-                ]));
+                ];
+                spans.extend(pat_spans);
+                spans.push(Span::styled(" -> ", Style::default().fg(t::MUTED)));
+                spans.extend(tgt_spans);
+                routes_lines.push(Line::from(spans));
             } else if is_selected {
                 // Normal mode: highlight selected rule.
+                let tgt_text = if rule.target.is_empty() {
+                    "(pass-through)".to_string()
+                } else {
+                    rule.target.clone()
+                };
                 routes_lines.push(Line::from(vec![
                     Span::raw("  "),
-                    Span::styled(format!("[{toggle_ch}] "), Style::default().fg(t::PRIMARY)),
+                    Span::styled(format!("[{toggle_ch}] "), Style::default().fg(prov_color)),
                     Span::styled(
                         rule.pattern.as_str(),
-                        Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD),
+                        Style::default().fg(prov_color).add_modifier(Modifier::BOLD),
                     ),
+                    Span::styled(" -> ", Style::default().fg(t::MUTED)),
+                    Span::styled(tgt_text, Style::default().fg(prov_color)),
                 ]));
             } else {
                 let pat_style = if rule.enabled {
@@ -1215,10 +1250,17 @@ fn draw_form(f: &mut Frame, app: &App) {
                 } else {
                     Style::default().fg(t::MUTED)
                 };
+                let tgt_text = if rule.target.is_empty() {
+                    "(pass-through)".to_string()
+                } else {
+                    rule.target.clone()
+                };
                 routes_lines.push(Line::from(vec![
                     Span::raw("  "),
                     Span::styled(format!("[{toggle_ch}] "), toggle_style),
                     Span::styled(rule.pattern.as_str(), pat_style),
+                    Span::styled(" -> ", Style::default().fg(t::MUTED)),
+                    Span::styled(tgt_text, Style::default().fg(t::MUTED)),
                 ]));
             }
         }
@@ -1235,9 +1277,11 @@ fn draw_form(f: &mut Frame, app: &App) {
                 Line::from(vec![
                     Span::raw("   "),
                     Span::styled("Esc", Style::default().fg(t::WARNING)),
+                    Span::styled("/", Style::default().fg(t::MUTED)),
+                    Span::styled("^S", Style::default().fg(t::WARNING)),
                     Span::styled(" Normal  ", Style::default().fg(t::MUTED)),
-                    Span::styled("Ctrl+S", Style::default().fg(t::SUCCESS)),
-                    Span::styled(" Save  ", Style::default().fg(t::MUTED)),
+                    Span::styled("Tab", Style::default().fg(t::PRIMARY)),
+                    Span::styled(" Pat↔Tgt  ", Style::default().fg(t::MUTED)),
                     Span::styled("←/→", Style::default().fg(t::PRIMARY)),
                     Span::styled(" Move cursor", Style::default().fg(t::MUTED)),
                 ])
@@ -1251,8 +1295,10 @@ fn draw_form(f: &mut Frame, app: &App) {
                     Span::styled(" Toggle  ", Style::default().fg(t::MUTED)),
                     Span::styled("dd", Style::default().fg(t::WARNING)),
                     Span::styled(" Del  ", Style::default().fg(t::MUTED)),
-                    Span::styled("i/Enter", Style::default().fg(t::PRIMARY)),
-                    Span::styled(" Edit  ", Style::default().fg(t::MUTED)),
+                    Span::styled("i", Style::default().fg(t::PRIMARY)),
+                    Span::styled(" Pat  ", Style::default().fg(t::MUTED)),
+                    Span::styled("t", Style::default().fg(t::PRIMARY)),
+                    Span::styled(" Tgt  ", Style::default().fg(t::MUTED)),
                     Span::styled("^S", Style::default().fg(t::SUCCESS)),
                     Span::styled(" Save  ", Style::default().fg(t::MUTED)),
                     Span::styled("q", Style::default().fg(t::WARNING)),

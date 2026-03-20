@@ -14,6 +14,10 @@ pub struct RouteRule {
     /// Glob pattern matched against the request `model` field.
     /// Supports `*` as wildcard (e.g. `"claude-sonnet*"`, `"*opus*"`).
     pub pattern: String,
+    /// Model name sent to the upstream when this rule matches.
+    /// Empty string = forward the original model name unchanged.
+    #[serde(default)]
+    pub target: String,
     /// When false this rule is skipped during routing.
     #[serde(default = "route_enabled_default")]
     pub enabled: bool,
@@ -28,6 +32,7 @@ impl RouteRule {
         Self {
             name: String::new(),
             pattern: pattern.into(),
+            target: String::new(),
             enabled: true,
         }
     }
@@ -161,14 +166,15 @@ impl AppConfig {
     }
 
     /// Find the first provider (in insertion order) that has an enabled route
-    /// rule matching `model`. Returns `(name, provider)` or `None`.
-    pub fn resolve_route<'a>(&'a self, model: &str) -> Option<(&'a str, &'a Provider)> {
+    /// rule matching `model`. Returns `(name, provider, target)` or `None`.
+    /// `target` is the model name to send upstream (empty = forward unchanged).
+    pub fn resolve_route<'a>(&'a self, model: &str) -> Option<(&'a str, &'a Provider, &'a str)> {
         if model.is_empty() {
             return None;
         }
         for (name, provider) in &self.providers {
-            if provider.routes.iter().any(|r| r.matches(model)) {
-                return Some((name.as_str(), provider));
+            if let Some(rule) = provider.routes.iter().find(|r| r.matches(model)) {
+                return Some((name.as_str(), provider, rule.target.as_str()));
             }
         }
         None

@@ -99,6 +99,10 @@ pub struct ProviderForm {
     pub route_editing: bool,
     /// Byte cursor inside the currently edited route pattern.
     pub route_pat_cursor: usize,
+    /// True while editing the target field; false = editing pattern field.
+    pub route_edit_target: bool,
+    /// Byte cursor inside the currently edited route target.
+    pub route_tgt_cursor: usize,
 
     /// Pending first key of a two-key sequence (`ZZ`, `ZQ`, `dd`) inside the form.
     pub pending_key: Option<(char, std::time::Instant)>,
@@ -458,6 +462,8 @@ impl App {
             route_cursor: 0,
             route_editing: false,
             route_pat_cursor: 0,
+            route_edit_target: false,
+            route_tgt_cursor: 0,
             pending_key: None,
             error: None,
         });
@@ -488,6 +494,8 @@ impl App {
             route_cursor: 0,
             route_editing: false,
             route_pat_cursor: 0,
+            route_edit_target: false,
+            route_tgt_cursor: 0,
             pending_key: None,
             error: None,
         });
