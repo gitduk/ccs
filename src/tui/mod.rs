@@ -901,19 +901,7 @@ fn handle_editing_key(
             if is_ml {
                 form.fields[form.focused].insert_newline();
             } else {
-                let pname = if form.is_new {
-                    let n = form.fields[0].value.trim().to_string();
-                    (!n.is_empty()).then_some(n)
-                } else {
-                    None
-                };
-                app.save_form()?;
-                sync_proxy_config(app, server);
-                let name = pname.or_else(|| app.selected_name().map(|s| s.to_string()));
-                if let Some(n) = name {
-                    test_provider_by_name(app, &n);
-                }
-                return Ok(());
+                form.vim_mode = VimMode::Normal;
             }
         }
         KeyCode::Tab => form.focus_next(),
