@@ -1318,7 +1318,7 @@ fn draw_form(f: &mut Frame, app: &App) {
                     Span::styled(format!("[{toggle_ch}] "), toggle_style),
                     Span::styled(rule.pattern.as_str(), pat_style),
                     Span::styled(" -> ", Style::default().fg(t::MUTED)),
-                    Span::styled(tgt_text, Style::default().fg(t::MUTED)),
+                    Span::styled(tgt_text, pat_style),
                 ]));
             }
         }
