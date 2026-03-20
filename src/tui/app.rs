@@ -515,6 +515,14 @@ impl App {
     }
 
     pub fn save_form(&mut self) -> Result<()> {
+        self.do_save_form(true)
+    }
+
+    pub fn save_form_in_place(&mut self) -> Result<()> {
+        self.do_save_form(false)
+    }
+
+    fn do_save_form(&mut self, close: bool) -> Result<()> {
         let Some(form) = &self.form else {
             return Ok(());
         };
@@ -620,13 +628,22 @@ impl App {
 
         config::save_config(&self.config)?;
         self.refresh_ids();
-        if is_new {
-            if let Some(idx) = self.provider_names.iter().position(|s| s == &new_name) {
-                self.table_state.select(Some(idx));
+        if let Some(idx) = self.provider_names.iter().position(|s| s == &new_name) {
+            self.table_state.select(Some(idx));
+        }
+
+        if close {
+            self.mode = Mode::Normal;
+            self.form = None;
+        } else {
+            // Keep the form open; if this was a brand-new provider, mark it as
+            // an edit from now on so subsequent autosaves don't try to re-insert.
+            if let Some(f) = &mut self.form {
+                f.is_new = false;
+                f.original_name = Some(new_name);
+                f.error = None;
             }
         }
-        self.mode = Mode::Normal;
-        self.form = None;
 
         Ok(())
     }

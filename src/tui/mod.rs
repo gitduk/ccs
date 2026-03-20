@@ -756,6 +756,8 @@ fn handle_editing_key(
             }
         } else if is_vim_insert {
             form.vim_mode = VimMode::Normal;
+            app.save_form_in_place()?;
+            sync_proxy_config(app, server);
         } else {
             // Normal mode Esc → cancel the form.
             app.form = None;
@@ -786,6 +788,8 @@ fn handle_editing_key(
         // Field Insert mode: exit Insert → Normal, stay in form.
         if form.vim_mode == VimMode::Insert {
             form.vim_mode = VimMode::Normal;
+            app.save_form_in_place()?;
+            sync_proxy_config(app, server);
             return Ok(());
         }
 
@@ -902,6 +906,8 @@ fn handle_editing_key(
                 form.fields[form.focused].insert_newline();
             } else {
                 form.vim_mode = VimMode::Normal;
+                app.save_form_in_place()?;
+                sync_proxy_config(app, server);
             }
         }
         KeyCode::Tab => form.focus_next(),
