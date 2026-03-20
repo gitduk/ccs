@@ -574,6 +574,13 @@ fn handle_editing_key(
 
     // ── Ctrl+S — save (Insert-mode compatible shortcut) ───────────────────────
     if ctrl && matches!(code, KeyCode::Char('s')) {
+        // When editing a route pattern, Ctrl+S just commits the edit (exits
+        // route Insert mode) without saving the whole form.
+        if in_routes && form.route_editing {
+            form.route_editing = false;
+            return Ok(());
+        }
+
         let pname = if form.is_new {
             let n = form.fields[0].value.trim().to_string();
             (!n.is_empty()).then_some(n)
