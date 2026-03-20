@@ -103,6 +103,10 @@ pub struct ProviderForm {
     pub route_edit_target: bool,
     /// Byte cursor inside the currently edited route target.
     pub route_tgt_cursor: usize,
+    /// True when keyboard navigation focus is inside the suggestion list.
+    pub route_suggest_active: bool,
+    /// Currently highlighted index inside the filtered suggestion list.
+    pub route_suggest_idx: usize,
 
     /// Pending first key of a two-key sequence (`ZZ`, `ZQ`, `dd`) inside the form.
     pub pending_key: Option<(char, std::time::Instant)>,
@@ -320,6 +324,8 @@ impl ProviderForm {
                 // Routes slot
                 self.focused = next;
                 self.route_editing = false;
+                self.route_suggest_active = false;
+                self.route_suggest_idx = 0;
                 return;
             }
         }
@@ -338,6 +344,8 @@ impl ProviderForm {
             } else {
                 self.focused = prev;
                 self.route_editing = false;
+                self.route_suggest_active = false;
+                self.route_suggest_idx = 0;
                 return;
             }
         }
@@ -464,6 +472,8 @@ impl App {
             route_pat_cursor: 0,
             route_edit_target: false,
             route_tgt_cursor: 0,
+            route_suggest_active: false,
+            route_suggest_idx: 0,
             pending_key: None,
             error: None,
         });
@@ -496,6 +506,8 @@ impl App {
             route_pat_cursor: 0,
             route_edit_target: false,
             route_tgt_cursor: 0,
+            route_suggest_active: false,
+            route_suggest_idx: 0,
             pending_key: None,
             error: None,
         });

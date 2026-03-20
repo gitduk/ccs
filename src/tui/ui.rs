@@ -925,6 +925,17 @@ fn draw_help(f: &mut Frame, _app: &App) {
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
+/// Filter `models` by case-insensitive contains of `filter`, return up to 8 matches.
+fn filter_suggestions<'a>(models: &'a [String], filter: &str) -> Vec<&'a str> {
+    let f = filter.to_lowercase();
+    models
+        .iter()
+        .filter(|m| f.is_empty() || m.to_lowercase().contains(&f))
+        .map(|s| s.as_str())
+        .take(8)
+        .collect()
+}
+
 fn draw_form(f: &mut Frame, app: &App) {
     let Some(form) = &app.form else { return };
 
@@ -932,6 +943,27 @@ fn draw_form(f: &mut Frame, app: &App) {
 
     // Provider color: derived from the Name field so it updates live as the user types.
     let prov_color = t::provider_color(form.fields[0].value.trim());
+
+    // Compute suggestion count for layout height (only when editing target).
+    let suggest_items: u16 = if form.route_editing && form.route_edit_target && form.in_routes() {
+        let prov_key = form
+            .original_name
+            .as_deref()
+            .unwrap_or_else(|| form.fields[0].value.trim());
+        let models = app
+            .provider_models
+            .get(prov_key)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        let tgt_filter = form
+            .routes
+            .get(form.route_cursor)
+            .map(|r| r.target.as_str())
+            .unwrap_or("");
+        filter_suggestions(models, tgt_filter).len() as u16
+    } else {
+        0
+    };
 
     // ── Title: show action + Vim mode tag ────────────────────────────────────
     let vim_tag = match form.vim_mode {
@@ -961,9 +993,14 @@ fn draw_form(f: &mut Frame, app: &App) {
         .collect();
     let fields_total: u16 = field_heights.iter().sum();
 
-    // Routes section: 1 header line + max(1, rule count) item lines + 1 blank separator.
+    // Routes section: 1 header line + max(1, rule count) item lines + suggestion panel + 1 blank separator.
     let routes_items = form.routes.len().max(1) as u16;
-    let routes_height = 1 + routes_items + 1;
+    let suggest_section = if suggest_items > 0 {
+        1 + suggest_items
+    } else {
+        0
+    };
+    let routes_height = 1 + routes_items + suggest_section + 1;
 
     let dialog_height = fields_total + routes_height + 3 + 2 + 2; // fields+routes+hint+borders+pad
     let area = centered_fixed(70, dialog_height, f.area());
@@ -1265,6 +1302,46 @@ fn draw_form(f: &mut Frame, app: &App) {
             }
         }
     }
+    // ── Suggestion panel ───────────────────────────────────────────────────
+    if suggest_items > 0 {
+        let prov_key = form
+            .original_name
+            .as_deref()
+            .unwrap_or_else(|| form.fields[0].value.trim());
+        let models = app
+            .provider_models
+            .get(prov_key)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        let tgt_filter = form
+            .routes
+            .get(form.route_cursor)
+            .map(|r| r.target.as_str())
+            .unwrap_or("");
+        let suggestions = filter_suggestions(models, tgt_filter);
+
+        routes_lines.push(Line::from(Span::styled(
+            "  ── Suggestions ────────────────────────",
+            Style::default().fg(t::MUTED),
+        )));
+        for (si, model) in suggestions.iter().enumerate() {
+            let is_hi = form.route_suggest_active && si == form.route_suggest_idx;
+            if is_hi {
+                routes_lines.push(Line::from(vec![
+                    Span::styled("  ▶ ", Style::default().fg(prov_color)),
+                    Span::styled(
+                        model.to_string(),
+                        Style::default().fg(prov_color).add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+            } else {
+                routes_lines.push(Line::from(vec![
+                    Span::styled("    ", Style::default()),
+                    Span::styled(model.to_string(), Style::default().fg(t::MUTED)),
+                ]));
+            }
+        }
+    }
     routes_lines.push(Line::from(""));
     f.render_widget(Paragraph::new(routes_lines), routes_chunk);
 
@@ -1273,18 +1350,35 @@ fn draw_form(f: &mut Frame, app: &App) {
     if hint_idx < chunks.len() {
         let hint_line = if in_routes {
             if form.route_editing {
-                // Route Insert mode.
-                Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled("Esc", Style::default().fg(t::WARNING)),
-                    Span::styled("/", Style::default().fg(t::MUTED)),
-                    Span::styled("^S", Style::default().fg(t::WARNING)),
-                    Span::styled(" Normal  ", Style::default().fg(t::MUTED)),
-                    Span::styled("Tab", Style::default().fg(t::PRIMARY)),
-                    Span::styled(" Pat↔Tgt  ", Style::default().fg(t::MUTED)),
-                    Span::styled("←/→", Style::default().fg(t::PRIMARY)),
-                    Span::styled(" Move cursor", Style::default().fg(t::MUTED)),
-                ])
+                if form.route_edit_target {
+                    // Route Insert mode (target field) — show ↓ Suggest hint.
+                    Line::from(vec![
+                        Span::raw("   "),
+                        Span::styled("Esc", Style::default().fg(t::WARNING)),
+                        Span::styled("/", Style::default().fg(t::MUTED)),
+                        Span::styled("^S", Style::default().fg(t::WARNING)),
+                        Span::styled(" Normal  ", Style::default().fg(t::MUTED)),
+                        Span::styled("↓", Style::default().fg(t::PRIMARY)),
+                        Span::styled(" Suggest  ", Style::default().fg(t::MUTED)),
+                        Span::styled("Tab", Style::default().fg(t::PRIMARY)),
+                        Span::styled(" Pat↔Tgt  ", Style::default().fg(t::MUTED)),
+                        Span::styled("←/→", Style::default().fg(t::PRIMARY)),
+                        Span::styled(" Move cursor", Style::default().fg(t::MUTED)),
+                    ])
+                } else {
+                    // Route Insert mode (pattern field).
+                    Line::from(vec![
+                        Span::raw("   "),
+                        Span::styled("Esc", Style::default().fg(t::WARNING)),
+                        Span::styled("/", Style::default().fg(t::MUTED)),
+                        Span::styled("^S", Style::default().fg(t::WARNING)),
+                        Span::styled(" Normal  ", Style::default().fg(t::MUTED)),
+                        Span::styled("Tab", Style::default().fg(t::PRIMARY)),
+                        Span::styled(" Pat↔Tgt  ", Style::default().fg(t::MUTED)),
+                        Span::styled("←/→", Style::default().fg(t::PRIMARY)),
+                        Span::styled(" Move cursor", Style::default().fg(t::MUTED)),
+                    ])
+                }
             } else {
                 // Route Normal mode.
                 Line::from(vec![
