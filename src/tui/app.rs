@@ -309,45 +309,55 @@ impl ProviderForm {
         self.focused == self.fields.len()
     }
 
-    /// Move focus to the next editable slot (wraps; Routes section is always
-    /// reachable).
+    /// Move focus to the next editable slot.
+    /// Visual order: Name → Base URL → API Key → Format → Routes → Notes → (wrap)
     pub fn focus_next(&mut self) {
-        let total = self.fields.len() + 1; // +1 for Routes slot
-        for offset in 1..=total {
-            let next = (self.focused + offset) % total;
-            if next < self.fields.len() {
-                if self.fields[next].editable {
-                    self.focused = next;
-                    return;
-                }
-            } else {
-                // Routes slot
-                self.focused = next;
-                self.route_editing = false;
-                self.route_suggest_active = false;
-                self.route_suggest_idx = 0;
-                return;
-            }
+        let routes_slot = self.fields.len(); // virtual index for Routes
+        let notes_idx = routes_slot - 1; // Notes is always the last field
+
+        let next = if self.focused == notes_idx {
+            0 // Notes → Name (wrap)
+        } else if self.focused == routes_slot {
+            notes_idx // Routes → Notes
+        } else if self.focused == notes_idx - 1 {
+            routes_slot // Format → Routes
+        } else {
+            self.focused + 1 // sequential advance
+        };
+
+        if next == routes_slot {
+            self.focused = routes_slot;
+            self.route_editing = false;
+            self.route_suggest_active = false;
+            self.route_suggest_idx = 0;
+        } else {
+            self.focused = next;
         }
     }
 
-    /// Move focus to the previous editable slot (wraps; Routes section included).
+    /// Move focus to the previous editable slot.
+    /// Visual order (reverse): Notes → Routes → Format → API Key → Base URL → Name → (wrap)
     pub fn focus_prev(&mut self) {
-        let total = self.fields.len() + 1;
-        for offset in 1..=total {
-            let prev = (self.focused + total - offset) % total;
-            if prev < self.fields.len() {
-                if self.fields[prev].editable {
-                    self.focused = prev;
-                    return;
-                }
-            } else {
-                self.focused = prev;
-                self.route_editing = false;
-                self.route_suggest_active = false;
-                self.route_suggest_idx = 0;
-                return;
-            }
+        let routes_slot = self.fields.len();
+        let notes_idx = routes_slot - 1;
+
+        let prev = if self.focused == 0 {
+            notes_idx // Name → Notes (wrap)
+        } else if self.focused == notes_idx {
+            routes_slot // Notes → Routes
+        } else if self.focused == routes_slot {
+            notes_idx - 1 // Routes → Format
+        } else {
+            self.focused - 1 // sequential retreat
+        };
+
+        if prev == routes_slot {
+            self.focused = routes_slot;
+            self.route_editing = false;
+            self.route_suggest_active = false;
+            self.route_suggest_idx = 0;
+        } else {
+            self.focused = prev;
         }
     }
 }
@@ -538,7 +548,13 @@ impl App {
         let notes = form.fields[4].value.clone();
         let is_new = form.is_new;
         let original_name = form.original_name.clone();
-        let routes = form.routes.clone();
+        // Drop routes with empty patterns — they are invalid and should not be persisted.
+        let routes: Vec<_> = form
+            .routes
+            .iter()
+            .filter(|r| !r.pattern.trim().is_empty())
+            .cloned()
+            .collect();
 
         let is_rename = !is_new && original_name.as_deref() != Some(new_name.as_str());
 
@@ -639,6 +655,13 @@ impl App {
             // Keep the form open; if this was a brand-new provider, mark it as
             // an edit from now on so subsequent autosaves don't try to re-insert.
             if let Some(f) = &mut self.form {
+                // Mirror the cleanup: remove invalid routes from the live form too.
+                f.routes.retain(|r| !r.pattern.trim().is_empty());
+                if f.route_cursor >= f.routes.len() && !f.routes.is_empty() {
+                    f.route_cursor = f.routes.len() - 1;
+                } else if f.routes.is_empty() {
+                    f.route_cursor = 0;
+                }
                 f.is_new = false;
                 f.original_name = Some(new_name);
                 f.error = None;

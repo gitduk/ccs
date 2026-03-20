@@ -1016,11 +1016,14 @@ fn draw_form(f: &mut Frame, app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Layout: one slot per regular field + routes section + hint.
-    let field_constraints: Vec<Constraint> = field_heights
+    // Layout: Name, Base URL, API Key, Format, Routes, Notes, Hint
+    // Notes (last field) is rendered after the Routes section.
+    let notes_h = *field_heights.last().unwrap_or(&3);
+    let field_constraints: Vec<Constraint> = field_heights[..field_heights.len() - 1]
         .iter()
         .map(|&h| Constraint::Length(h))
-        .chain(std::iter::once(Constraint::Length(routes_height))) // routes
+        .chain(std::iter::once(Constraint::Length(routes_height))) // routes (before Notes)
+        .chain(std::iter::once(Constraint::Length(notes_h))) // Notes (after Routes)
         .chain(std::iter::once(Constraint::Length(3))) // hint
         .collect();
 
@@ -1030,7 +1033,11 @@ fn draw_form(f: &mut Frame, app: &App) {
         .split(inner);
 
     // ── Regular fields ───────────────────────────────────────────────────────
+    // Notes (last field, index fields.len()-1) lives at chunks[fields.len()] because
+    // the Routes chunk is inserted before it at chunks[fields.len()-1].
+    let notes_field_idx = form.fields.len() - 1;
     for (i, field) in form.fields.iter().enumerate() {
+        let ci = if i < notes_field_idx { i } else { i + 1 };
         let is_focused = i == form.focused;
         // In Normal vim-mode, show cursor only when the field has focus AND
         // we are also in Insert mode (or the field is a toggle).
@@ -1110,7 +1117,7 @@ fn draw_form(f: &mut Frame, app: &App) {
                     Line::from(Span::styled(format!("{:<10}", field.label), label_style));
                 let mut all_lines = vec![label_line];
                 all_lines.extend(lines);
-                f.render_widget(Paragraph::new(all_lines), chunks[i]);
+                f.render_widget(Paragraph::new(all_lines), chunks[ci]);
                 continue;
             } else if is_focused {
                 // Normal mode, focused: show all lines without cursor highlight.
@@ -1123,14 +1130,14 @@ fn draw_form(f: &mut Frame, app: &App) {
                     .collect();
                 let mut all_lines = vec![label_line];
                 all_lines.extend(lines);
-                f.render_widget(Paragraph::new(all_lines), chunks[i]);
+                f.render_widget(Paragraph::new(all_lines), chunks[ci]);
                 continue;
             } else {
                 let first_line = field.value.lines().next().unwrap_or("");
                 let label_line =
                     Line::from(Span::styled(format!("{:<10}", field.label), label_style));
                 let content_chars: Vec<char> = first_line.chars().collect();
-                let max_w = chunks[i].width.saturating_sub(2) as usize;
+                let max_w = chunks[ci].width.saturating_sub(2) as usize;
                 let display_str = if content_chars.len() > max_w && max_w > 1 {
                     let truncated: String = content_chars[..max_w - 1].iter().collect();
                     format!("{}\u{2026}", truncated)
@@ -1139,7 +1146,7 @@ fn draw_form(f: &mut Frame, app: &App) {
                 };
                 let content_line =
                     Line::from(Span::styled(display_str, Style::default().fg(t::MUTED)));
-                f.render_widget(Paragraph::new(vec![label_line, content_line]), chunks[i]);
+                f.render_widget(Paragraph::new(vec![label_line, content_line]), chunks[ci]);
                 continue;
             }
         } else {
@@ -1192,11 +1199,12 @@ fn draw_form(f: &mut Frame, app: &App) {
             }
         };
 
-        f.render_widget(Paragraph::new(value_display), chunks[i]);
+        f.render_widget(Paragraph::new(value_display), chunks[ci]);
     }
 
     // ── Routes section ───────────────────────────────────────────────────────
-    let routes_chunk = chunks[form.fields.len()];
+    // Routes is rendered at chunks[fields.len()-1]; Notes follows at chunks[fields.len()].
+    let routes_chunk = chunks[form.fields.len() - 1];
     let routes_label_style = if in_routes {
         Style::default().fg(prov_color).add_modifier(Modifier::BOLD)
     } else {
@@ -1261,7 +1269,7 @@ fn draw_form(f: &mut Frame, app: &App) {
                     render_field(&rule.pattern, form.route_pat_cursor, pat_active, prov_color);
                 let tgt_text_owned;
                 let tgt_text = if rule.target.is_empty() && !tgt_active {
-                    "(pass-through)"
+                    "target"
                 } else {
                     tgt_text_owned = rule.target.clone();
                     &tgt_text_owned
@@ -1280,7 +1288,7 @@ fn draw_form(f: &mut Frame, app: &App) {
             } else if is_selected {
                 // Normal mode: highlight selected rule.
                 let tgt_text = if rule.target.is_empty() {
-                    "(pass-through)".to_string()
+                    "target".to_string()
                 } else {
                     rule.target.clone()
                 };
@@ -1301,7 +1309,7 @@ fn draw_form(f: &mut Frame, app: &App) {
                     Style::default().fg(t::MUTED)
                 };
                 let tgt_text = if rule.target.is_empty() {
-                    "(pass-through)".to_string()
+                    "target".to_string()
                 } else {
                     rule.target.clone()
                 };
