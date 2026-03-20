@@ -1112,6 +1112,19 @@ fn draw_form(f: &mut Frame, app: &App) {
                 all_lines.extend(lines);
                 f.render_widget(Paragraph::new(all_lines), chunks[i]);
                 continue;
+            } else if is_focused {
+                // Normal mode, focused: show all lines without cursor highlight.
+                let label_line =
+                    Line::from(Span::styled(format!("{:<10}", field.label), label_style));
+                let lines: Vec<Line> = field
+                    .value
+                    .split('\n')
+                    .map(|l| Line::from(Span::raw(l.to_string())))
+                    .collect();
+                let mut all_lines = vec![label_line];
+                all_lines.extend(lines);
+                f.render_widget(Paragraph::new(all_lines), chunks[i]);
+                continue;
             } else {
                 let first_line = field.value.lines().next().unwrap_or("");
                 let label_line =
