@@ -424,6 +424,33 @@ fn handle_routes_key(
                     }
                 }
             }
+            // Ctrl+J / Ctrl+K: same as ↓ / ↑ for suggestion navigation.
+            KeyCode::Char('j') if ctrl && form.route_edit_target => {
+                let filter = form
+                    .routes
+                    .get(form.route_cursor)
+                    .map(|r| r.target.as_str())
+                    .unwrap_or("");
+                let suggestions = filter_suggestions(provider_models, filter);
+                if !suggestions.is_empty() {
+                    if !form.route_suggest_active {
+                        form.route_suggest_active = true;
+                        form.route_suggest_idx = 0;
+                    } else {
+                        form.route_suggest_idx =
+                            (form.route_suggest_idx + 1).min(suggestions.len().saturating_sub(1));
+                    }
+                }
+            }
+            KeyCode::Char('k') if ctrl && form.route_edit_target => {
+                if form.route_suggest_active {
+                    if form.route_suggest_idx == 0 {
+                        form.route_suggest_active = false;
+                    } else {
+                        form.route_suggest_idx -= 1;
+                    }
+                }
+            }
             // Character input (no spaces: model names never contain spaces).
             KeyCode::Char(c) if !ctrl && c != ' ' => {
                 if let Some(rule) = form.routes.get_mut(form.route_cursor) {

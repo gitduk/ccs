@@ -1359,6 +1359,8 @@ fn draw_form(f: &mut Frame, app: &App) {
                         Span::styled("^S", Style::default().fg(t::WARNING)),
                         Span::styled(" Normal  ", Style::default().fg(t::MUTED)),
                         Span::styled("↓", Style::default().fg(t::PRIMARY)),
+                        Span::styled("/", Style::default().fg(t::MUTED)),
+                        Span::styled("^J", Style::default().fg(t::PRIMARY)),
                         Span::styled(" Suggest  ", Style::default().fg(t::MUTED)),
                         Span::styled("Tab", Style::default().fg(t::PRIMARY)),
                         Span::styled(" Pat↔Tgt  ", Style::default().fg(t::MUTED)),
