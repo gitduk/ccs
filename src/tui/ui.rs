@@ -231,14 +231,23 @@ fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
             .values()
             .map(|p| api_key_display_len(&p.api_key)),
     );
-    let notes_col = col_width(
-        "Notes",
-        app.config
-            .providers
-            .values()
-            .map(|p| p.notes.lines().next().unwrap_or("").width()),
-    )
-    .min(30);
+    let has_notes = app
+        .config
+        .providers
+        .values()
+        .any(|p| !p.notes.trim().is_empty());
+    let notes_col = if has_notes {
+        col_width(
+            "Notes",
+            app.config
+                .providers
+                .values()
+                .map(|p| p.notes.lines().next().unwrap_or("").width()),
+        )
+        .min(30)
+    } else {
+        0
+    };
     // Name col = longest name + 2 for the " ◀" indicator + 4 gap
     let max_name_len = app
         .provider_names
@@ -249,14 +258,18 @@ fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
         .max("Name".len());
     let name_col = (max_name_len + 2 + 4) as u16;
 
-    let header = Row::new(vec![
+    let mut header_cells = vec![
         Cell::from("Name").style(Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD)),
         Cell::from("Format").style(Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD)),
         Cell::from("Base URL").style(Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD)),
         Cell::from("API Key").style(Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD)),
-        Cell::from("Notes").style(Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD)),
-    ])
-    .height(1);
+    ];
+    if has_notes {
+        header_cells.push(
+            Cell::from("Notes").style(Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD)),
+        );
+    }
+    let header = Row::new(header_cells).height(1);
 
     let selected = app.table_state.selected();
 
@@ -313,34 +326,37 @@ fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 notes_first_line.to_string()
             };
-            Row::new(vec![
+            let mut cells = vec![
                 name_cell,
                 Cell::from(Span::styled(provider.api_format.to_string(), detail_style)),
                 Cell::from(Span::styled(provider.base_url.as_str(), detail_style)),
                 masked_api_key(&provider.api_key),
-                Cell::from(Span::styled(notes_text, detail_style)),
-            ])
+            ];
+            if has_notes {
+                cells.push(Cell::from(Span::styled(notes_text, detail_style)));
+            }
+            Row::new(cells)
         })
         .collect();
 
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(name_col),
-            Constraint::Length(12),
-            Constraint::Length(url_col),
-            Constraint::Length(key_col),
-            Constraint::Length(notes_col),
-        ],
-    )
-    .header(header)
-    .block(
-        Block::default()
-            .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
-            .border_style(Style::default().fg(t::MUTED))
-            .padding(Padding::horizontal(1)),
-    )
-    .row_highlight_style(Style::default());
+    let mut col_constraints = vec![
+        Constraint::Length(name_col),
+        Constraint::Length(12),
+        Constraint::Length(url_col),
+        Constraint::Length(key_col),
+    ];
+    if has_notes {
+        col_constraints.push(Constraint::Length(notes_col));
+    }
+    let table = Table::new(rows, col_constraints)
+        .header(header)
+        .block(
+            Block::default()
+                .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
+                .border_style(Style::default().fg(t::MUTED))
+                .padding(Padding::horizontal(1)),
+        )
+        .row_highlight_style(Style::default());
 
     f.render_stateful_widget(table, area, &mut app.table_state);
 }
@@ -491,11 +507,10 @@ fn draw_keybindings(f: &mut Frame, app: &App, area: Rect) {
     };
     // (key, desc, key_color, desc_color)
     let all_keys: &[(&str, &str, Color, Color)] = &[
-        ("j/k", "Nav", t::MUTED, t::MUTED),
-        ("s", "Switch", t::PRIMARY, t::MUTED),
         ("a", "Add", t::PRIMARY, t::MUTED),
         ("e", "Edit", t::PRIMARY, t::MUTED),
         ("dd", "Delete", t::WARNING, t::MUTED),
+        ("s", "Switch", t::PRIMARY, t::MUTED),
         ("f", "Fallback", t::PRIMARY, t::MUTED),
         ("S", bg_label, t::PRIMARY, t::MUTED),
         ("c", "Clear", t::WARNING, t::MUTED),
@@ -704,7 +719,8 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
         .into_iter()
         .filter(|(m, _)| !used_models.contains(m))
         .collect();
-    inactive_models.sort_unstable_by_key(|(name, _)| *name);
+    inactive_models
+        .sort_unstable_by(|(a, _), (b, _)| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
 
     if model_entries.is_empty() && inactive_models.is_empty() {
         lines.push(Line::from(Span::styled("  No data yet", muted)));
@@ -717,6 +733,10 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
         );
         let value_width = 8usize; // "  1234.5K"
         let bar_area = (inner.width as usize).saturating_sub(model_col_width + 2 + value_width);
+        // Mix weight: 0.0 = pure log (small values always visible),
+        //             1.0 = pure linear (proportionally accurate).
+        const LINEAR_WEIGHT: f64 = 0.8;
+
         let max_total = model_entries
             .iter()
             .map(|(_, i, o)| i + o)
@@ -727,7 +747,9 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
         for (model, input, output) in &model_entries {
             let total = input + output;
             let total_bar = if bar_area > 0 && total > 0 {
-                let ratio = ((total + 1) as f64).ln() / log_max;
+                let log_ratio = ((total + 1) as f64).ln() / log_max;
+                let linear_ratio = total as f64 / max_total as f64;
+                let ratio = LINEAR_WEIGHT * linear_ratio + (1.0 - LINEAR_WEIGHT) * log_ratio;
                 ((ratio * bar_area as f64) as usize).min(bar_area)
             } else {
                 0
@@ -1509,7 +1531,7 @@ fn draw_form(f: &mut Frame, app: &App) {
                     Span::raw("   "),
                     Span::styled("Esc", Style::default().fg(t::WARNING)),
                     Span::styled(" Normal  ", Style::default().fg(t::MUTED)),
-                    Span::styled("Enter", Style::default().fg(t::PRIMARY)),
+                    Span::styled("^J", Style::default().fg(t::PRIMARY)),
                     Span::styled(" Newline", Style::default().fg(t::MUTED)),
                 ])
             } else {

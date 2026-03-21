@@ -119,14 +119,17 @@ async fn fetch_models(
     base: &str,
     auth_header: &(String, String),
 ) -> (Option<usize>, Option<Vec<String>>) {
-    let Ok(r) = client
+    let mut req = client
         .get(format!("{base}/v1/models"))
         .header(&auth_header.0, &auth_header.1)
         .header("anthropic-version", "2023-06-01")
-        .timeout(Duration::from_secs(TEST_TIMEOUT_SECS))
-        .send()
-        .await
-    else {
+        .timeout(Duration::from_secs(TEST_TIMEOUT_SECS));
+    // /v1/models is an OpenAI-compatible endpoint; some proxies require Bearer auth
+    // even when the messages endpoint accepts x-api-key. Send both to cover both cases.
+    if auth_header.0 == "x-api-key" {
+        req = req.header("authorization", format!("Bearer {}", auth_header.1));
+    }
+    let Ok(r) = req.send().await else {
         return (None, None);
     };
     if !r.status().is_success() {

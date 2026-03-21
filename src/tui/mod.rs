@@ -799,14 +799,13 @@ fn handle_editing_key(
     // ── Regular field — Insert mode ───────────────────────────────────────────
     match code {
         KeyCode::Enter => {
-            let is_ml = form.fields[form.focused].is_multiline;
-            if is_ml {
-                form.fields[form.focused].insert_newline();
-            } else {
-                form.vim_mode = VimMode::Normal;
-                app.save_form_in_place()?;
-                sync_proxy_config(app, server);
-            }
+            form.vim_mode = VimMode::Normal;
+            app.save_form_in_place()?;
+            sync_proxy_config(app, server);
+        }
+        // Ctrl+J inserts a newline in multiline fields.
+        KeyCode::Char('j') if ctrl && form.fields[form.focused].is_multiline => {
+            form.fields[form.focused].insert_newline();
         }
         KeyCode::Tab => form.focus_next(),
         KeyCode::BackTab => form.focus_prev(),
