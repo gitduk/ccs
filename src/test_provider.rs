@@ -5,7 +5,7 @@ use serde_json::json;
 use crate::config::{ApiFormat, Provider};
 
 const TEST_TIMEOUT_SECS: u64 = 10;
-const TEST_MODEL: &str = "claude-haiku-4-5-20251001";
+const FALLBACK_MODEL: &str = "claude-haiku-4-5-20251001";
 
 #[derive(Debug, Clone)]
 pub enum TestStatus {
@@ -23,7 +23,11 @@ pub struct TestResult {
     pub tested_at: Instant,
 }
 
-pub async fn test_connectivity(client: &reqwest::Client, provider: &Provider) -> TestResult {
+pub async fn test_connectivity(
+    client: &reqwest::Client,
+    provider: &Provider,
+    test_model: Option<String>,
+) -> TestResult {
     let api_key = match provider.resolve_api_key() {
         Ok(k) => k,
         Err(e) => {
@@ -38,22 +42,32 @@ pub async fn test_connectivity(client: &reqwest::Client, provider: &Provider) ->
     };
     let base = provider.base_url.trim_end_matches('/');
 
-    let (msg_url, auth_header) = match provider.api_format {
+    let auth_header = match provider.api_format {
+        ApiFormat::Anthropic => ("x-api-key".to_string(), api_key.clone()),
+        ApiFormat::OpenAI => ("authorization".to_string(), format!("Bearer {api_key}")),
+    };
+
+    let model = test_model.as_deref().unwrap_or(FALLBACK_MODEL).to_string();
+
+    // Real latency test: POST to messages/chat endpoint.
+    let (msg_url, body) = match provider.api_format {
         ApiFormat::Anthropic => (
             format!("{base}/v1/messages"),
-            ("x-api-key".to_string(), api_key.clone()),
+            json!({
+                "model": model,
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
         ),
         ApiFormat::OpenAI => (
             format!("{base}/chat/completions"),
-            ("authorization".to_string(), format!("Bearer {api_key}")),
+            json!({
+                "model": model,
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
         ),
     };
-
-    let body = json!({
-        "model": TEST_MODEL,
-        "max_tokens": 1,
-        "messages": [{"role": "user", "content": "hi"}]
-    });
 
     let t0 = Instant::now();
     let response = client
@@ -88,30 +102,8 @@ pub async fn test_connectivity(client: &reqwest::Client, provider: &Provider) ->
         TestStatus::Error(format!("HTTP {}", status.as_u16()))
     };
 
-    // Fetch model list from /v1/models.
-    let (model_count, model_names) = async {
-        let r = client
-            .get(format!("{base}/v1/models"))
-            .header(&auth_header.0, &auth_header.1)
-            .header("anthropic-version", "2023-06-01")
-            .timeout(Duration::from_secs(TEST_TIMEOUT_SECS))
-            .send()
-            .await
-            .ok()?;
-        if !r.status().is_success() {
-            return None;
-        }
-        let json: serde_json::Value = r.json().await.ok()?;
-        let arr = json["data"].as_array()?;
-        let names: Vec<String> = arr
-            .iter()
-            .filter_map(|v| v["id"].as_str().map(|s| s.to_string()))
-            .collect();
-        Some((names.len(), names))
-    }
-    .await
-    .map(|(c, n)| (Some(c), Some(n)))
-    .unwrap_or((None, None));
+    // Fetch model list (best-effort, does not affect status or latency).
+    let (model_count, model_names) = fetch_models(client, base, &auth_header).await;
 
     TestResult {
         status: msg_status,
@@ -120,4 +112,35 @@ pub async fn test_connectivity(client: &reqwest::Client, provider: &Provider) ->
         model_names,
         tested_at: Instant::now(),
     }
+}
+
+async fn fetch_models(
+    client: &reqwest::Client,
+    base: &str,
+    auth_header: &(String, String),
+) -> (Option<usize>, Option<Vec<String>>) {
+    let Ok(r) = client
+        .get(format!("{base}/v1/models"))
+        .header(&auth_header.0, &auth_header.1)
+        .header("anthropic-version", "2023-06-01")
+        .timeout(Duration::from_secs(TEST_TIMEOUT_SECS))
+        .send()
+        .await
+    else {
+        return (None, None);
+    };
+    if !r.status().is_success() {
+        return (None, None);
+    }
+    let Ok(json) = r.json::<serde_json::Value>().await else {
+        return (None, None);
+    };
+    let Some(arr) = json["data"].as_array() else {
+        return (None, None);
+    };
+    let names: Vec<String> = arr
+        .iter()
+        .filter_map(|v| v["id"].as_str().map(|s| s.to_string()))
+        .collect();
+    (Some(names.len()), Some(names))
 }

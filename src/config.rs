@@ -1,16 +1,21 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::error::{AppError, Result};
+
 // ─── Route Rules ─────────────────────────────────────────────────────────────
 
 /// A single model-routing rule attached to a provider.
 /// When enabled and the incoming model name matches `pattern`, this provider
 /// is selected ahead of the global `current` setting.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteRule {
-    /// Optional human-readable label (not used for matching).
-    #[serde(default)]
-    pub name: String,
+    /// Stable UUID for this route rule.
+    pub id: String,
     /// Glob pattern matched against the request `model` field.
     /// Supports `*` as wildcard (e.g. `"claude-sonnet*"`, `"*opus*"`).
     pub pattern: String,
@@ -30,7 +35,7 @@ fn route_enabled_default() -> bool {
 impl RouteRule {
     pub fn new(pattern: impl Into<String>) -> Self {
         Self {
-            name: String::new(),
+            id: Uuid::new_v4().to_string(),
             pattern: pattern.into(),
             target: String::new(),
             enabled: true,
@@ -40,6 +45,14 @@ impl RouteRule {
     /// Returns true when this rule is enabled and `model` matches `pattern`.
     pub fn matches(&self, model: &str) -> bool {
         self.enabled && glob_match(&self.pattern, model)
+    }
+
+    /// Returns true when this rule has a valid pattern and target.
+    /// When `known_models` is non-empty, the target must also be in the list.
+    pub fn is_valid(&self, known_models: &[String]) -> bool {
+        !self.pattern.trim().is_empty()
+            && !self.target.is_empty()
+            && (known_models.is_empty() || known_models.contains(&self.target))
     }
 }
 
@@ -78,12 +91,6 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
     }
     true
 }
-
-use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-
-use crate::error::{AppError, Result};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {

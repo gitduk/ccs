@@ -18,7 +18,7 @@ use tokio::task::JoinHandle;
 
 use crate::config::RouteRule;
 use crate::error::Result;
-use app::{App, ConfirmAction, MessageKind, Mode, ProviderForm, VimMode};
+use app::{filter_suggestions, App, ConfirmAction, MessageKind, Mode, ProviderForm, VimMode};
 
 struct ServerHandle {
     task: JoinHandle<()>,
@@ -303,37 +303,53 @@ fn handle_normal_key(
 
 // ─── Routes section key handler ───────────────────────────────────────────────
 
-/// Filter `models` by case-insensitive contains of `filter`, return up to 8 matches.
-/// Remove the rule at `route_cursor` if it is invalid:
-///   1. pattern is empty, OR
-///   2. target is non-empty AND not in the known model list (when list is loaded)
+/// Remove the rule at `route_cursor` if it is invalid.
 fn prune_current_rule(form: &mut app::ProviderForm, provider_models: &[String]) {
     let valid = form
         .routes
         .get(form.route_cursor)
-        .map(|r| {
-            !r.pattern.trim().is_empty()
-                && (r.target.is_empty()
-                    || provider_models.is_empty()
-                    || provider_models.contains(&r.target))
-        })
+        .map(|r| r.is_valid(provider_models))
         .unwrap_or(true);
     if !valid {
         form.routes.remove(form.route_cursor);
-        if form.route_cursor > 0 && form.route_cursor >= form.routes.len() {
-            form.route_cursor -= 1;
+        form.clamp_route_cursor();
+    }
+}
+
+/// Navigate the suggestion list downward (↓ / Ctrl+J).
+fn suggest_nav_down(form: &mut ProviderForm, provider_models: &[String]) {
+    let filter = form
+        .routes
+        .get(form.route_cursor)
+        .map(|r| r.target.as_str())
+        .unwrap_or("");
+    let suggestions = filter_suggestions(provider_models, filter);
+    if !suggestions.is_empty() {
+        if !form.route_suggest_active {
+            form.route_suggest_active = true;
+            form.route_suggest_idx = 0;
+        } else {
+            form.route_suggest_idx =
+                (form.route_suggest_idx + 1).min(suggestions.len().saturating_sub(1));
         }
     }
 }
 
-fn filter_suggestions<'a>(models: &'a [String], filter: &str) -> Vec<&'a str> {
-    let f = filter.to_lowercase();
-    models
-        .iter()
-        .filter(|m| f.is_empty() || m.to_lowercase().contains(&f))
-        .map(|s| s.as_str())
-        .take(8)
-        .collect()
+/// Navigate the suggestion list upward (↑ / Ctrl+K).
+fn suggest_nav_up(form: &mut ProviderForm) {
+    if form.route_suggest_active {
+        if form.route_suggest_idx == 0 {
+            form.route_suggest_active = false;
+        } else {
+            form.route_suggest_idx -= 1;
+        }
+    }
+}
+
+/// Exit route Insert mode, prune invalid rule, and reset editing state.
+fn exit_route_insert(form: &mut ProviderForm, provider_models: &[String]) {
+    form.reset_route_editing();
+    prune_current_rule(form, provider_models);
 }
 
 /// Handle a key press when the Routes section of the provider form has focus.
@@ -351,47 +367,28 @@ fn handle_routes_key(
             // Confirm / exit Insert mode.
             KeyCode::Esc => {
                 if form.route_suggest_active {
-                    // Close suggestion focus, return to text input.
                     form.route_suggest_active = false;
                 } else {
-                    form.route_editing = false;
-                    form.route_edit_target = false;
-                    form.route_suggest_active = false;
-                    form.route_suggest_idx = 0;
-                    prune_current_rule(form, provider_models);
+                    exit_route_insert(form, provider_models);
                 }
             }
             KeyCode::Enter => {
                 if form.route_suggest_active {
                     // Select highlighted suggestion.
-                    let suggestions: Vec<&str> = if form.route_edit_target {
-                        let filter = form
-                            .routes
-                            .get(form.route_cursor)
-                            .map(|r| r.target.as_str())
-                            .unwrap_or("");
-                        filter_suggestions(provider_models, filter)
-                    } else {
-                        vec![]
-                    };
+                    let filter = form
+                        .routes
+                        .get(form.route_cursor)
+                        .map(|r| r.target.as_str())
+                        .unwrap_or("");
+                    let suggestions = filter_suggestions(provider_models, filter);
                     if let Some(&model) = suggestions.get(form.route_suggest_idx) {
                         if let Some(rule) = form.routes.get_mut(form.route_cursor) {
                             rule.target = model.to_string();
                             form.route_tgt_cursor = rule.target.len();
                         }
                     }
-                    form.route_suggest_active = false;
-                    form.route_suggest_idx = 0;
-                    form.route_editing = false;
-                    form.route_edit_target = false;
-                    prune_current_rule(form, provider_models);
-                } else {
-                    form.route_editing = false;
-                    form.route_edit_target = false;
-                    form.route_suggest_active = false;
-                    form.route_suggest_idx = 0;
-                    prune_current_rule(form, provider_models);
                 }
+                exit_route_insert(form, provider_models);
             }
             // Tab: switch pattern ↔ target; if already on target → exit Insert.
             KeyCode::Tab => {
@@ -401,9 +398,7 @@ fn handle_routes_key(
                         form.route_tgt_cursor = rule.target.len();
                     }
                 } else {
-                    form.route_editing = false;
-                    form.route_edit_target = false;
-                    prune_current_rule(form, provider_models);
+                    exit_route_insert(form, provider_models);
                 }
             }
             // BackTab: switch target → pattern; if on pattern → focus_prev.
@@ -416,67 +411,23 @@ fn handle_routes_key(
                         form.route_pat_cursor = rule.pattern.len();
                     }
                 } else {
-                    form.route_editing = false;
-                    form.route_edit_target = false;
-                    form.route_suggest_active = false;
-                    form.route_suggest_idx = 0;
-                    prune_current_rule(form, provider_models);
+                    exit_route_insert(form, provider_models);
                     form.focus_prev();
                 }
             }
-            // ↓ / ↑: navigate suggestion list (only when editing target).
+            // ↓ / Ctrl+J: navigate suggestion list down (only when editing target).
             KeyCode::Down if form.route_edit_target => {
-                let filter = form
-                    .routes
-                    .get(form.route_cursor)
-                    .map(|r| r.target.as_str())
-                    .unwrap_or("");
-                let suggestions = filter_suggestions(provider_models, filter);
-                if !suggestions.is_empty() {
-                    if !form.route_suggest_active {
-                        form.route_suggest_active = true;
-                        form.route_suggest_idx = 0;
-                    } else {
-                        form.route_suggest_idx =
-                            (form.route_suggest_idx + 1).min(suggestions.len().saturating_sub(1));
-                    }
-                }
+                suggest_nav_down(form, provider_models);
             }
-            KeyCode::Up if form.route_edit_target => {
-                if form.route_suggest_active {
-                    if form.route_suggest_idx == 0 {
-                        form.route_suggest_active = false;
-                    } else {
-                        form.route_suggest_idx -= 1;
-                    }
-                }
-            }
-            // Ctrl+J / Ctrl+K: same as ↓ / ↑ for suggestion navigation.
             KeyCode::Char('j') if ctrl && form.route_edit_target => {
-                let filter = form
-                    .routes
-                    .get(form.route_cursor)
-                    .map(|r| r.target.as_str())
-                    .unwrap_or("");
-                let suggestions = filter_suggestions(provider_models, filter);
-                if !suggestions.is_empty() {
-                    if !form.route_suggest_active {
-                        form.route_suggest_active = true;
-                        form.route_suggest_idx = 0;
-                    } else {
-                        form.route_suggest_idx =
-                            (form.route_suggest_idx + 1).min(suggestions.len().saturating_sub(1));
-                    }
-                }
+                suggest_nav_down(form, provider_models);
+            }
+            // ↑ / Ctrl+K: navigate suggestion list up (only when editing target).
+            KeyCode::Up if form.route_edit_target => {
+                suggest_nav_up(form);
             }
             KeyCode::Char('k') if ctrl && form.route_edit_target => {
-                if form.route_suggest_active {
-                    if form.route_suggest_idx == 0 {
-                        form.route_suggest_active = false;
-                    } else {
-                        form.route_suggest_idx -= 1;
-                    }
-                }
+                suggest_nav_up(form);
             }
             // Character input (no spaces: model names never contain spaces).
             KeyCode::Char(c) if !ctrl && c != ' ' => {
@@ -618,8 +569,8 @@ fn handle_routes_key(
     } else {
         // ── Normal mode ─────────────────────────────────────────────────────
         match code {
-            // n → new rule (append, enter Insert mode on pattern immediately).
-            KeyCode::Char('n') if !ctrl => {
+            // a → add rule (append, enter Insert mode on pattern immediately).
+            KeyCode::Char('a') if !ctrl => {
                 form.routes.push(RouteRule::new(""));
                 form.route_cursor = form.routes.len() - 1;
                 form.route_pat_cursor = 0;
@@ -693,10 +644,6 @@ fn handle_routes_key(
             KeyCode::Tab => form.focus_next(),
             KeyCode::BackTab => form.focus_prev(),
 
-            // 'Z' — first key of ZZ / ZQ: store as pending.
-            KeyCode::Char('Z') => {
-                form.pending_key = Some(('Z', std::time::Instant::now()));
-            }
             _ => {}
         }
     }
@@ -724,36 +671,6 @@ fn handle_editing_key(
         .take()
         .and_then(|(k, t)| (t.elapsed() < std::time::Duration::from_millis(500)).then_some(k));
 
-    // ── ZZ / ZQ (Normal mode only) ────────────────────────────────────────────
-    if prev == Some('Z') && form.vim_mode == VimMode::Normal {
-        match code {
-            KeyCode::Char('Z') | KeyCode::Char('Q') => {
-                let is_save = matches!(code, KeyCode::Char('Z'));
-                // Capture everything we need from form before releasing the borrow.
-                let pname = if form.is_new {
-                    let n = form.fields[0].value.trim().to_string();
-                    (!n.is_empty()).then_some(n)
-                } else {
-                    None
-                };
-                // form borrow ends here; we only hold owned values now.
-                if is_save {
-                    app.save_form()?;
-                    sync_proxy_config(app, server);
-                    let name = pname.or_else(|| app.selected_name().map(|s| s.to_string()));
-                    if let Some(n) = name {
-                        test_provider_by_name(app, &n);
-                    }
-                } else {
-                    app.form = None;
-                    app.mode = Mode::Normal;
-                }
-                return Ok(());
-            }
-            _ => { /* unrecognised after Z — fall through */ }
-        }
-    }
-
     // ── dd in route Normal nav mode ───────────────────────────────────────────
     if in_routes
         && !form.route_editing
@@ -763,30 +680,21 @@ fn handle_editing_key(
     {
         if !form.routes.is_empty() && form.route_cursor < form.routes.len() {
             form.routes.remove(form.route_cursor);
-            if form.route_cursor > 0 && form.route_cursor >= form.routes.len() {
-                form.route_cursor -= 1;
-            }
+            form.clamp_route_cursor();
         }
         return Ok(());
     }
 
     // ── Esc ───────────────────────────────────────────────────────────────────
     if matches!(code, KeyCode::Esc) {
-        let is_route_insert = in_routes && form.route_editing;
-        let is_vim_insert = form.vim_mode == VimMode::Insert;
-        if is_route_insert {
+        if in_routes && form.route_editing {
             if form.route_suggest_active {
                 form.route_suggest_active = false;
             } else {
-                form.route_editing = false;
-                form.route_edit_target = false;
-                form.route_suggest_active = false;
-                form.route_suggest_idx = 0;
+                form.reset_route_editing();
             }
-        } else if is_vim_insert {
+        } else if form.vim_mode == VimMode::Insert {
             form.vim_mode = VimMode::Normal;
-            app.save_form_in_place()?;
-            sync_proxy_config(app, server);
         } else {
             // Normal mode Esc → cancel the form.
             app.form = None;
@@ -800,40 +708,6 @@ fn handle_editing_key(
     {
         app.form = None;
         app.mode = Mode::Normal;
-        return Ok(());
-    }
-
-    // ── Ctrl+S ────────────────────────────────────────────────────────────────
-    // In any Insert sub-mode → commit the edit and return to Normal.
-    // Only in Normal mode → save the whole form.
-    if ctrl && matches!(code, KeyCode::Char('s')) {
-        // Route pattern Insert mode: commit pattern, stay in form.
-        if in_routes && form.route_editing {
-            form.route_editing = false;
-            form.route_suggest_active = false;
-            form.route_suggest_idx = 0;
-            return Ok(());
-        }
-        // Field Insert mode: exit Insert → Normal, stay in form.
-        if form.vim_mode == VimMode::Insert {
-            form.vim_mode = VimMode::Normal;
-            app.save_form_in_place()?;
-            sync_proxy_config(app, server);
-            return Ok(());
-        }
-
-        let pname = if form.is_new {
-            let n = form.fields[0].value.trim().to_string();
-            (!n.is_empty()).then_some(n)
-        } else {
-            None
-        };
-        app.save_form()?;
-        sync_proxy_config(app, server);
-        let name = pname.or_else(|| app.selected_name().map(|s| s.to_string()));
-        if let Some(n) = name {
-            test_provider_by_name(app, &n);
-        }
         return Ok(());
     }
 
@@ -852,17 +726,14 @@ fn handle_editing_key(
         // If focus just left the routes section, prune invalid routes immediately
         // so the user gets instant visual feedback (don't wait for save).
         if !form.in_routes() {
-            form.routes.retain(|r| {
-                !r.pattern.trim().is_empty()
-                    && (r.target.is_empty()
-                        || provider_models.is_empty()
-                        || provider_models.contains(&r.target))
-            });
-            if form.route_cursor >= form.routes.len() && !form.routes.is_empty() {
-                form.route_cursor = form.routes.len() - 1;
-            } else if form.routes.is_empty() {
-                form.route_cursor = 0;
-            }
+            form.routes.retain(|r| r.is_valid(&provider_models));
+            form.clamp_route_cursor();
+        }
+        // Only save when not actively editing a route — do_save_form retains only
+        // valid routes, which would immediately prune any rule being typed.
+        if !form.route_editing {
+            app.save_form_in_place()?;
+            sync_proxy_config(app, server);
         }
         return Ok(());
     }
@@ -874,19 +745,10 @@ fn handle_editing_key(
             KeyCode::Char('i') | KeyCode::Insert => {
                 form.vim_mode = VimMode::Insert;
             }
-            // 'a' → Insert at end of current value.
-            KeyCode::Char('a') => {
+            // 'a' / 'A' → Insert at end of current value.
+            KeyCode::Char('a') | KeyCode::Char('A') => {
                 form.vim_mode = VimMode::Insert;
                 form.fields[form.focused].end();
-            }
-            // 'A' → same as 'a'.
-            KeyCode::Char('A') => {
-                form.vim_mode = VimMode::Insert;
-                form.fields[form.focused].end();
-            }
-            // First key of ZZ / ZQ.
-            KeyCode::Char('Z') => {
-                form.pending_key = Some(('Z', std::time::Instant::now()));
             }
             // Navigation.
             KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => form.focus_next(),
@@ -896,6 +758,8 @@ fn handle_editing_key(
                 let f = &mut form.fields[form.focused];
                 if f.is_toggle {
                     f.toggle_value();
+                    app.save_form_in_place()?;
+                    sync_proxy_config(app, server);
                 } else {
                     f.move_left();
                 }
@@ -904,6 +768,8 @@ fn handle_editing_key(
                 let f = &mut form.fields[form.focused];
                 if f.is_toggle {
                     f.toggle_value();
+                    app.save_form_in_place()?;
+                    sync_proxy_config(app, server);
                 } else {
                     f.move_right();
                 }
@@ -912,26 +778,14 @@ fn handle_editing_key(
             KeyCode::Char(' ') => {
                 if form.fields[form.focused].is_toggle {
                     form.fields[form.focused].toggle_value();
+                    app.save_form_in_place()?;
+                    sync_proxy_config(app, server);
                 }
             }
-            // Enter on a regular field: save form (or enter Insert for multiline).
+            // Enter on a regular field: enter Insert for multiline, no-op otherwise.
             KeyCode::Enter => {
                 if form.fields[form.focused].is_multiline {
                     form.vim_mode = VimMode::Insert;
-                } else {
-                    let pname = if form.is_new {
-                        let n = form.fields[0].value.trim().to_string();
-                        (!n.is_empty()).then_some(n)
-                    } else {
-                        None
-                    };
-                    app.save_form()?;
-                    sync_proxy_config(app, server);
-                    let name = pname.or_else(|| app.selected_name().map(|s| s.to_string()));
-                    if let Some(n) = name {
-                        test_provider_by_name(app, &n);
-                    }
-                    return Ok(());
                 }
             }
             // Cursor jumps.
@@ -1001,17 +855,37 @@ fn handle_editing_key(
                 }
             } else {
                 match code {
-                    KeyCode::Char(c) if !ctrl => field.insert(c),
-                    KeyCode::Char('w') if ctrl => field.delete_word_back(),
-                    KeyCode::Char('h') if ctrl => field.backspace(),
-                    KeyCode::Char('a') if ctrl => field.home(),
-                    KeyCode::Char('e') if ctrl => field.end(),
-                    KeyCode::Backspace => field.backspace(),
-                    KeyCode::Delete => field.delete(),
+                    KeyCode::Char(c) if !ctrl => {
+                        field.insert(c);
+                        app.save_form_in_place()?;
+                        sync_proxy_config(app, server);
+                    }
+                    KeyCode::Char('w') if ctrl => {
+                        field.delete_word_back();
+                        app.save_form_in_place()?;
+                        sync_proxy_config(app, server);
+                    }
+                    KeyCode::Char('h') if ctrl => {
+                        field.backspace();
+                        app.save_form_in_place()?;
+                        sync_proxy_config(app, server);
+                    }
+                    KeyCode::Backspace => {
+                        field.backspace();
+                        app.save_form_in_place()?;
+                        sync_proxy_config(app, server);
+                    }
+                    KeyCode::Delete => {
+                        field.delete();
+                        app.save_form_in_place()?;
+                        sync_proxy_config(app, server);
+                    }
                     KeyCode::Left => field.move_left(),
                     KeyCode::Right => field.move_right(),
                     KeyCode::Home => field.home(),
                     KeyCode::End => field.end(),
+                    KeyCode::Char('a') if ctrl => field.home(),
+                    KeyCode::Char('e') if ctrl => field.end(),
                     _ => {}
                 }
             }
@@ -1120,12 +994,46 @@ fn test_provider_by_name(app: &mut App, name: &str) {
     let tx = app.test_tx.clone();
     let name_owned = name.to_string();
 
+    // Pick the best test model:
+    // 1. Most-used model from the provider's supported list (intersection with usage data).
+    // 2. Random model from the supported list (no usage intersection).
+    // 3. Globally most-used model (supported list empty).
+    let best_model: Option<String> = app.metrics.lock().ok().and_then(|m| {
+        let supported = app.provider_models.get(name);
+        if let Some(supported) = supported.filter(|s| !s.is_empty()) {
+            // Cases 1 & 2: provider has a known model list.
+            let best = supported
+                .iter()
+                .filter(|model| m.by_model.contains_key(*model))
+                .max_by_key(|model| {
+                    m.by_model
+                        .get(*model)
+                        .map(|s| s.input + s.output)
+                        .unwrap_or(0)
+                });
+            best.or_else(|| {
+                let idx = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.subsec_nanos() as usize)
+                    .unwrap_or(0);
+                supported.get(idx % supported.len())
+            })
+            .map(|s| s.to_string())
+        } else {
+            // Case 3: no supported list — use the globally most-used model.
+            m.by_model
+                .iter()
+                .max_by_key(|(_, s)| s.input + s.output)
+                .map(|(model, _)| model.clone())
+        }
+    });
+
     app.pending_tests.insert(name_owned.clone());
     app.set_message(format!("Testing {name}…"), MessageKind::Info);
 
     let client = app.test_client.clone();
     tokio::spawn(async move {
-        let result = crate::test_provider::test_connectivity(&client, &provider).await;
+        let result = crate::test_provider::test_connectivity(&client, &provider, best_model).await;
         let _ = tx.send((name_owned, result));
     });
 }

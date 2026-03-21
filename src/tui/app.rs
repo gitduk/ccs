@@ -304,9 +304,63 @@ impl FormField {
 // ─── ProviderForm helpers ─────────────────────────────────────────────────────
 
 impl ProviderForm {
+    /// Create a new form for adding or editing a provider.
+    fn new(is_new: bool, name: &str, provider: Option<&Provider>) -> Self {
+        let (base_url, api_key, format, notes, routes) = match provider {
+            Some(p) => (
+                p.base_url.as_str(),
+                p.api_key.as_str(),
+                p.api_format.to_string(),
+                p.notes.as_str(),
+                p.routes.clone(),
+            ),
+            None => ("", "", "anthropic".to_string(), "", vec![]),
+        };
+        Self {
+            is_new,
+            original_name: if is_new { None } else { Some(name.to_string()) },
+            fields: vec![
+                FormField::text("Name", name),
+                FormField::text("Base URL", base_url),
+                FormField::text("API Key", api_key),
+                FormField::toggle("Format", &format),
+                FormField::multiline("Notes", notes),
+            ],
+            focused: 0,
+            vim_mode: VimMode::Normal,
+            routes,
+            route_cursor: 0,
+            route_editing: false,
+            route_pat_cursor: 0,
+            route_edit_target: false,
+            route_tgt_cursor: 0,
+            route_suggest_active: false,
+            route_suggest_idx: 0,
+            pending_key: None,
+            error: None,
+        }
+    }
+
     /// Returns true when the Routes section currently has focus.
     pub fn in_routes(&self) -> bool {
         self.focused == self.fields.len()
+    }
+
+    /// Reset route editing state (exit Insert mode in routes section).
+    pub fn reset_route_editing(&mut self) {
+        self.route_editing = false;
+        self.route_edit_target = false;
+        self.route_suggest_active = false;
+        self.route_suggest_idx = 0;
+    }
+
+    /// Clamp route_cursor to valid range after routes have been modified.
+    pub fn clamp_route_cursor(&mut self) {
+        if self.routes.is_empty() {
+            self.route_cursor = 0;
+        } else if self.route_cursor >= self.routes.len() {
+            self.route_cursor = self.routes.len() - 1;
+        }
     }
 
     /// Move focus to the next editable slot.
@@ -325,13 +379,9 @@ impl ProviderForm {
             self.focused + 1 // sequential advance
         };
 
+        self.focused = next;
         if next == routes_slot {
-            self.focused = routes_slot;
-            self.route_editing = false;
-            self.route_suggest_active = false;
-            self.route_suggest_idx = 0;
-        } else {
-            self.focused = next;
+            self.reset_route_editing();
         }
     }
 
@@ -351,13 +401,9 @@ impl ProviderForm {
             self.focused - 1 // sequential retreat
         };
 
+        self.focused = prev;
         if prev == routes_slot {
-            self.focused = routes_slot;
-            self.route_editing = false;
-            self.route_suggest_active = false;
-            self.route_suggest_idx = 0;
-        } else {
-            self.focused = prev;
+            self.reset_route_editing();
         }
     }
 }
@@ -464,29 +510,7 @@ impl App {
     }
 
     pub fn start_add(&mut self) {
-        self.form = Some(ProviderForm {
-            is_new: true,
-            original_name: None,
-            fields: vec![
-                FormField::text("Name", ""),
-                FormField::text("Base URL", ""),
-                FormField::text("API Key", ""),
-                FormField::toggle("Format", "anthropic"),
-                FormField::multiline("Notes", ""),
-            ],
-            focused: 0,
-            vim_mode: VimMode::Normal,
-            routes: vec![],
-            route_cursor: 0,
-            route_editing: false,
-            route_pat_cursor: 0,
-            route_edit_target: false,
-            route_tgt_cursor: 0,
-            route_suggest_active: false,
-            route_suggest_idx: 0,
-            pending_key: None,
-            error: None,
-        });
+        self.form = Some(ProviderForm::new(true, "", None));
         self.mode = Mode::Editing;
     }
 
@@ -498,34 +522,8 @@ impl App {
             return;
         };
 
-        self.form = Some(ProviderForm {
-            is_new: false,
-            original_name: Some(name.to_string()),
-            fields: vec![
-                FormField::text("Name", name),
-                FormField::text("Base URL", &provider.base_url),
-                FormField::text("API Key", &provider.api_key),
-                FormField::toggle("Format", &provider.api_format.to_string()),
-                FormField::multiline("Notes", &provider.notes),
-            ],
-            focused: 0,
-            vim_mode: VimMode::Normal,
-            routes: provider.routes.clone(),
-            route_cursor: 0,
-            route_editing: false,
-            route_pat_cursor: 0,
-            route_edit_target: false,
-            route_tgt_cursor: 0,
-            route_suggest_active: false,
-            route_suggest_idx: 0,
-            pending_key: None,
-            error: None,
-        });
+        self.form = Some(ProviderForm::new(false, name, Some(provider)));
         self.mode = Mode::Editing;
-    }
-
-    pub fn save_form(&mut self) -> Result<()> {
-        self.do_save_form(true)
     }
 
     pub fn save_form_in_place(&mut self) -> Result<()> {
@@ -556,18 +554,11 @@ impl App {
             .get(models_key)
             .cloned()
             .unwrap_or_default();
-        // Drop invalid routes:
-        //   1. pattern is empty
-        //   2. target is non-empty AND not in the known model list (when list is loaded)
+        // Drop invalid routes (empty pattern/target, or target not in known models).
         let routes: Vec<_> = form
             .routes
             .iter()
-            .filter(|r| {
-                !r.pattern.trim().is_empty()
-                    && (r.target.is_empty()
-                        || known_models.is_empty()
-                        || known_models.contains(&r.target))
-            })
+            .filter(|r| r.is_valid(&known_models))
             .cloned()
             .collect();
 
@@ -671,17 +662,8 @@ impl App {
             // an edit from now on so subsequent autosaves don't try to re-insert.
             if let Some(f) = &mut self.form {
                 // Mirror the cleanup: remove invalid routes from the live form too.
-                f.routes.retain(|r| {
-                    !r.pattern.trim().is_empty()
-                        && (r.target.is_empty()
-                            || known_models.is_empty()
-                            || known_models.contains(&r.target))
-                });
-                if f.route_cursor >= f.routes.len() && !f.routes.is_empty() {
-                    f.route_cursor = f.routes.len() - 1;
-                } else if f.routes.is_empty() {
-                    f.route_cursor = 0;
-                }
+                f.routes.retain(|r| r.is_valid(&known_models));
+                f.clamp_route_cursor();
                 f.is_new = false;
                 f.original_name = Some(new_name);
                 f.error = None;
@@ -948,4 +930,15 @@ pub fn kill_process(pid: u32) {
     let _ = std::process::Command::new("kill")
         .arg(pid.to_string())
         .status();
+}
+
+/// Filter `models` by case-insensitive contains of `filter`, return up to 8 matches.
+pub fn filter_suggestions<'a>(models: &'a [String], filter: &str) -> Vec<&'a str> {
+    let f = filter.to_lowercase();
+    models
+        .iter()
+        .filter(|m| f.is_empty() || m.to_lowercase().contains(&f))
+        .map(|s| s.as_str())
+        .take(8)
+        .collect()
 }

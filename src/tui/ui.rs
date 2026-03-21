@@ -7,7 +7,35 @@ use unicode_width::UnicodeWidthStr;
 
 use super::app::{App, ConfirmAction, MessageKind, Mode, VimMode};
 use super::theme::{self as t};
+use crate::config::RouteRule;
 use crate::test_provider::TestStatus;
+
+const ROUTE_LABEL_WIDTH: usize = 7; // "Routes "
+
+/// Pack enabled routes into wrapped lines given the available text width.
+/// Returns groups of routes, each group rendered on one line.
+fn pack_routes<'a>(routes: &[&'a RouteRule], avail_width: usize) -> Vec<Vec<&'a RouteRule>> {
+    let mut result: Vec<Vec<&RouteRule>> = vec![];
+    let mut current: Vec<&RouteRule> = vec![];
+    let mut used = 0usize;
+
+    for route in routes {
+        let item_w = route.pattern.width() + 3 + route.target.width(); // 3 = " → "
+        let sep_w = if current.is_empty() { 0 } else { 2 };
+        if current.is_empty() || used + sep_w + item_w <= avail_width {
+            current.push(route);
+            used += sep_w + item_w;
+        } else {
+            result.push(std::mem::take(&mut current));
+            current.push(route);
+            used = item_w;
+        }
+    }
+    if !current.is_empty() {
+        result.push(current);
+    }
+    result
+}
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
@@ -76,7 +104,24 @@ fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
     let table_height = (app.provider_names.len() as u16 + 2)
         .max(3)
         .min(area.height * 2 / 3);
-    let detail_height = 3u16;
+    // detail panel: LEFT+RIGHT border (2) + horizontal padding (2) = 4 overhead
+    let detail_inner_width = (area.width as usize).saturating_sub(4);
+    let route_avail = detail_inner_width.saturating_sub(ROUTE_LABEL_WIDTH);
+    let max_route_lines = app
+        .config
+        .providers
+        .values()
+        .map(|p| {
+            let enabled: Vec<_> = p.routes.iter().filter(|r| r.enabled).collect();
+            if enabled.is_empty() {
+                0
+            } else {
+                pack_routes(&enabled, route_avail).len()
+            }
+        })
+        .max()
+        .unwrap_or(0);
+    let detail_height = 3u16 + max_route_lines as u16;
     // stats: blank + title + N provider rows + bottom border
     let n_providers = app.provider_names.len() as u16;
     let stats_min_height = 3 + n_providers;
@@ -407,6 +452,34 @@ fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
+    // Enabled routes for the selected provider.
+    let provider = app.config.providers.get(name.as_str());
+    let enabled_routes: Vec<_> = provider
+        .map(|p| p.routes.iter().filter(|r| r.enabled).collect())
+        .unwrap_or_default();
+    if !enabled_routes.is_empty() {
+        let prov_color = provider
+            .map(|p| t::provider_color(&p.id))
+            .unwrap_or(t::PRIMARY);
+        let avail = (area.width as usize).saturating_sub(4 + ROUTE_LABEL_WIDTH);
+        for (row_idx, group) in pack_routes(&enabled_routes, avail).into_iter().enumerate() {
+            let mut spans: Vec<Span> = vec![if row_idx == 0 {
+                Span::styled("Routes ", label)
+            } else {
+                Span::raw("       ")
+            }];
+            for (i, route) in group.iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::raw("  "));
+                }
+                spans.push(Span::styled(&route.pattern, Style::default().fg(t::TEXT)));
+                spans.push(Span::styled(" → ", Style::default().fg(t::MUTED)));
+                spans.push(Span::styled(&route.target, Style::default().fg(prov_color)));
+            }
+            lines.push(Line::from(spans));
+        }
+    }
+
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
@@ -583,10 +656,19 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
     // Model Usage section — horizontal stacked bar chart
     lines.push(Line::from(""));
     lines.push(dash_line);
-    lines.push(Line::from(Span::styled(
-        "By Model",
-        Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD),
-    )));
+    {
+        let title = "By Model";
+        let legend = "░ input  █ output";
+        let gap = (inner.width as usize).saturating_sub(title.len() + legend.width());
+        lines.push(Line::from(vec![
+            Span::styled(
+                title,
+                Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" ".repeat(gap)),
+            Span::styled(legend, Style::default().fg(t::MUTED)),
+        ]));
+    }
     lines.push(Line::from(""));
 
     // Collect all known model names from test_results (fetched via /v1/models per provider).
@@ -628,12 +710,11 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(Span::styled("  No data yet", muted)));
     } else {
         // Cap label width at 30 chars to leave room for bars
-        let model_col_width = model_entries
-            .iter()
-            .map(|(k, _, _)| k.chars().count())
-            .max()
-            .unwrap_or(10)
-            .min(30);
+        let model_col_width = max_content_width(
+            model_entries.iter().map(|(k, _, _)| k.chars().count()),
+            10,
+            30,
+        );
         let value_width = 8usize; // "  1234.5K"
         let bar_area = (inner.width as usize).saturating_sub(model_col_width + 2 + value_width);
         let max_total = model_entries
@@ -641,11 +722,13 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
             .map(|(_, i, o)| i + o)
             .max()
             .unwrap_or(1);
+        let log_max = ((max_total + 1) as f64).ln();
 
         for (model, input, output) in &model_entries {
             let total = input + output;
-            let total_bar = if bar_area > 0 {
-                (total * bar_area as u64 / max_total) as usize
+            let total_bar = if bar_area > 0 && total > 0 {
+                let ratio = ((total + 1) as f64).ln() / log_max;
+                ((ratio * bar_area as f64) as usize).min(bar_area)
             } else {
                 0
             };
@@ -773,9 +856,18 @@ fn format_tokens(n: u64) -> String {
     }
 }
 
+/// Max content width with a fallback default and an upper cap.
+fn max_content_width(
+    content_lens: impl Iterator<Item = usize>,
+    default: usize,
+    cap: usize,
+) -> usize {
+    content_lens.max().unwrap_or(default).min(cap)
+}
+
 /// Column width = max(header length, max content length) + 4 gap.
 fn col_width(header: &str, content_lens: impl Iterator<Item = usize>) -> u16 {
-    (content_lens.max().unwrap_or(0).max(header.len()) + 4) as u16
+    (max_content_width(content_lens, 0, usize::MAX).max(header.len()) + 4) as u16
 }
 
 fn api_key_display_len(key: &str) -> usize {
@@ -925,16 +1017,7 @@ fn draw_help(f: &mut Frame, _app: &App) {
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-/// Filter `models` by case-insensitive contains of `filter`, return up to 8 matches.
-fn filter_suggestions<'a>(models: &'a [String], filter: &str) -> Vec<&'a str> {
-    let f = filter.to_lowercase();
-    models
-        .iter()
-        .filter(|m| f.is_empty() || m.to_lowercase().contains(&f))
-        .map(|s| s.as_str())
-        .take(8)
-        .collect()
-}
+use super::app::filter_suggestions;
 
 fn draw_form(f: &mut Frame, app: &App) {
     let Some(form) = &app.form else { return };
@@ -1377,7 +1460,7 @@ fn draw_form(f: &mut Frame, app: &App) {
                         Span::raw("   "),
                         Span::styled("Esc", Style::default().fg(t::WARNING)),
                         Span::styled("/", Style::default().fg(t::MUTED)),
-                        Span::styled("^S", Style::default().fg(t::WARNING)),
+                        Span::styled("Esc", Style::default().fg(t::WARNING)),
                         Span::styled(" Normal  ", Style::default().fg(t::MUTED)),
                         Span::styled("↓", Style::default().fg(t::PRIMARY)),
                         Span::styled("/", Style::default().fg(t::MUTED)),
@@ -1393,8 +1476,6 @@ fn draw_form(f: &mut Frame, app: &App) {
                     Line::from(vec![
                         Span::raw("   "),
                         Span::styled("Esc", Style::default().fg(t::WARNING)),
-                        Span::styled("/", Style::default().fg(t::MUTED)),
-                        Span::styled("^S", Style::default().fg(t::WARNING)),
                         Span::styled(" Normal  ", Style::default().fg(t::MUTED)),
                         Span::styled("Tab", Style::default().fg(t::PRIMARY)),
                         Span::styled(" Pat↔Tgt  ", Style::default().fg(t::MUTED)),
@@ -1406,8 +1487,8 @@ fn draw_form(f: &mut Frame, app: &App) {
                 // Route Normal mode.
                 Line::from(vec![
                     Span::raw("   "),
-                    Span::styled("n", Style::default().fg(t::SUCCESS)),
-                    Span::styled(" New  ", Style::default().fg(t::MUTED)),
+                    Span::styled("a", Style::default().fg(t::SUCCESS)),
+                    Span::styled(" Add  ", Style::default().fg(t::MUTED)),
                     Span::styled("Space", Style::default().fg(t::PRIMARY)),
                     Span::styled(" Toggle  ", Style::default().fg(t::MUTED)),
                     Span::styled("dd", Style::default().fg(t::WARNING)),
@@ -1416,8 +1497,6 @@ fn draw_form(f: &mut Frame, app: &App) {
                     Span::styled(" Pat  ", Style::default().fg(t::MUTED)),
                     Span::styled("t", Style::default().fg(t::PRIMARY)),
                     Span::styled(" Tgt  ", Style::default().fg(t::MUTED)),
-                    Span::styled("^S", Style::default().fg(t::SUCCESS)),
-                    Span::styled(" Save  ", Style::default().fg(t::MUTED)),
                     Span::styled("q", Style::default().fg(t::WARNING)),
                     Span::styled(" Quit", Style::default().fg(t::MUTED)),
                 ])
@@ -1429,20 +1508,14 @@ fn draw_form(f: &mut Frame, app: &App) {
                 Line::from(vec![
                     Span::raw("   "),
                     Span::styled("Esc", Style::default().fg(t::WARNING)),
-                    Span::styled("/", Style::default().fg(t::MUTED)),
-                    Span::styled("^S", Style::default().fg(t::WARNING)),
                     Span::styled(" Normal  ", Style::default().fg(t::MUTED)),
                     Span::styled("Enter", Style::default().fg(t::PRIMARY)),
-                    Span::styled(" Newline  ", Style::default().fg(t::MUTED)),
-                    Span::styled("^S", Style::default().fg(t::SUCCESS)),
-                    Span::styled("(N) Save", Style::default().fg(t::MUTED)),
+                    Span::styled(" Newline", Style::default().fg(t::MUTED)),
                 ])
             } else {
                 Line::from(vec![
                     Span::raw("   "),
                     Span::styled("Esc", Style::default().fg(t::WARNING)),
-                    Span::styled("/", Style::default().fg(t::MUTED)),
-                    Span::styled("^S", Style::default().fg(t::WARNING)),
                     Span::styled(" Normal  ", Style::default().fg(t::MUTED)),
                     Span::styled("Tab", Style::default().fg(t::PRIMARY)),
                     Span::styled(" Next field", Style::default().fg(t::MUTED)),
@@ -1456,8 +1529,6 @@ fn draw_form(f: &mut Frame, app: &App) {
                 Span::styled(" Insert  ", Style::default().fg(t::MUTED)),
                 Span::styled("j/k", Style::default().fg(t::PRIMARY)),
                 Span::styled(" Field  ", Style::default().fg(t::MUTED)),
-                Span::styled("^S", Style::default().fg(t::SUCCESS)),
-                Span::styled(" Save  ", Style::default().fg(t::MUTED)),
                 Span::styled("q", Style::default().fg(t::WARNING)),
                 Span::styled(" Quit", Style::default().fg(t::MUTED)),
             ])
