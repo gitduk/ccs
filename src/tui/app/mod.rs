@@ -20,7 +20,7 @@ mod navigation;
 mod proxy;
 
 pub use filter::filter_suggestions;
-pub use proxy::is_process_alive;
+pub use proxy::{is_process_alive, send_sighup};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Mode {

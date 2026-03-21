@@ -23,26 +23,15 @@ pub async fn forward_request(
     body: Bytes,
     incoming_headers: &HeaderMap,
 ) -> Result<reqwest::Response> {
-    let (url, auth_header_name, auth_header_value) = match provider.api_format {
-        ApiFormat::Anthropic => (
-            format!("{}/v1/messages", provider.base_url.trim_end_matches('/')),
-            "x-api-key",
-            api_key.to_string(),
-        ),
-        ApiFormat::OpenAI => (
-            format!(
-                "{}/chat/completions",
-                provider.base_url.trim_end_matches('/')
-            ),
-            "authorization",
-            format!("Bearer {api_key}"),
-        ),
+    let base = provider.base_url.trim_end_matches('/');
+    let url = match provider.api_format {
+        ApiFormat::Anthropic => format!("{base}/v1/messages"),
+        ApiFormat::OpenAI => format!("{base}/chat/completions"),
     };
+    let (auth_key, auth_val) = provider.auth_header(api_key);
 
     let mut request = client.post(&url);
-
-    // Set auth header
-    request = request.header(auth_header_name, auth_header_value);
+    request = request.header(auth_key, auth_val);
 
     // Forward anthropic-specific headers for Anthropic format
     if provider.api_format == ApiFormat::Anthropic {
@@ -54,10 +43,10 @@ pub async fn forward_request(
         }
     }
 
-    // Forward non-filtered headers
+    // Forward non-filtered headers (HeaderName is already lowercase)
     for (name, value) in incoming_headers.iter() {
-        let name_str = name.as_str().to_lowercase();
-        if !FILTERED_HEADERS.contains(&name_str.as_str()) && !name_str.starts_with("anthropic-") {
+        let n = name.as_str();
+        if !FILTERED_HEADERS.contains(&n) && !n.starts_with("anthropic-") {
             request = request.header(name, value);
         }
     }

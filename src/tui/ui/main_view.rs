@@ -243,18 +243,21 @@ pub(super) fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 ("  ", Style::default())
             };
-            // Current active provider: provider color. Others: TEXT name, MUTED details.
-            let name_style = if is_current {
+            let disabled = !provider.enabled;
+            // Disabled providers are fully muted; current is provider color; others normal.
+            let name_style = if disabled {
+                Style::default().fg(t::MUTED)
+            } else if is_current {
                 Style::default()
                     .fg(t::provider_color(name))
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(t::TEXT)
             };
-            let detail_style = if is_current {
-                Style::default().fg(t::provider_color(name))
-            } else {
+            let detail_style = if disabled || !is_current {
                 Style::default().fg(t::MUTED)
+            } else {
+                Style::default().fg(t::provider_color(name))
             };
             // Pad name to max_name_len so the cursor indicator stays in a fixed column.
             let padded_name = format!("{:<width$}", name.as_str(), width = max_name_len);
@@ -461,6 +464,7 @@ pub(super) fn draw_keybindings(f: &mut Frame, app: &App, area: Rect) {
         ("e", "Edit", t::PRIMARY, t::MUTED),
         ("dd", "Delete", t::WARNING, t::MUTED),
         ("s", "Switch", t::PRIMARY, t::MUTED),
+        ("p", "Toggle", t::PRIMARY, t::MUTED),
         ("f", "Fallback", t::PRIMARY, t::MUTED),
         ("S", bg_label, t::PRIMARY, t::MUTED),
         ("c", "Clear", t::WARNING, t::MUTED),

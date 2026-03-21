@@ -91,8 +91,16 @@ pub fn is_process_alive(pid: u32) -> bool {
     }
 }
 
-pub fn kill_process(pid: u32) {
+fn send_signal(pid: u32, signal: &str) {
     let _ = std::process::Command::new("kill")
-        .arg(pid.to_string())
+        .args([signal, &pid.to_string()])
         .status();
+}
+
+pub fn kill_process(pid: u32) {
+    send_signal(pid, "-TERM");
+}
+
+pub fn send_sighup(pid: u32) {
+    send_signal(pid, "-HUP");
 }

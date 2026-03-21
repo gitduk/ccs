@@ -3,6 +3,7 @@ mod form;
 mod format;
 mod layout;
 mod main_view;
+mod route_editor;
 mod stats_panel;
 
 use ratatui::layout::{Constraint, Direction, Layout};

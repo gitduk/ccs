@@ -6,9 +6,9 @@ use super::app::{self, MessageKind};
 use super::App;
 use super::ServerHandle;
 
-/// Write the current TUI config into the proxy's shared RwLock so changes take
-/// effect immediately. Has no effect when a detached background proxy is running
-/// (config changes take effect on its next restart).
+/// Sync config to the running proxy. For the in-process server, writes directly
+/// to the shared RwLock. For the background proxy, saves config to disk and
+/// sends SIGHUP to trigger a reload.
 pub(super) fn sync_proxy_config(app: &App, server: &Option<ServerHandle>) {
     if let Some(handle) = server {
         let config = app.config.clone();
@@ -18,6 +18,11 @@ pub(super) fn sync_proxy_config(app: &App, server: &Option<ServerHandle>) {
                 *proxy_config.write().await = config;
             });
         });
+    } else if let Some(pid) = app.bg_proxy_pid {
+        match crate::config::save_config(&app.config) {
+            Ok(()) => super::app::send_sighup(pid),
+            Err(e) => tracing::error!("Failed to save config before SIGHUP: {e}"),
+        }
     }
 }
 
@@ -67,7 +72,13 @@ pub(super) fn toggle_bg_proxy(app: &mut App, server: &mut Option<ServerHandle>) 
         app.server_status = app::ServerStatus::Stopped;
 
         tokio::task::block_in_place(|| {
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            let addr = &app.config.listen;
+            for _ in 0..40 {
+                if std::net::TcpListener::bind(addr).is_ok() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
         });
 
         match app.spawn_bg_proxy() {

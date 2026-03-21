@@ -7,6 +7,10 @@ use uuid::Uuid;
 
 use crate::error::{AppError, Result};
 
+fn default_true() -> bool {
+    true
+}
+
 // ─── Route Rules ─────────────────────────────────────────────────────────────
 
 /// A single model-routing rule attached to a provider.
@@ -24,12 +28,8 @@ pub struct RouteRule {
     #[serde(default)]
     pub target: String,
     /// When false this rule is skipped during routing.
-    #[serde(default = "route_enabled_default")]
+    #[serde(default = "default_true")]
     pub enabled: bool,
-}
-
-fn route_enabled_default() -> bool {
-    true
 }
 
 impl RouteRule {
@@ -125,6 +125,9 @@ pub struct Provider {
     /// incoming request model causes this provider to be selected.
     #[serde(default)]
     pub routes: Vec<RouteRule>,
+    /// When false, this provider is skipped during request forwarding.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -155,6 +158,14 @@ impl Provider {
         }
     }
 
+    /// Build the auth header (name, value) for this provider's API format.
+    pub fn auth_header(&self, api_key: &str) -> (&'static str, String) {
+        match self.api_format {
+            ApiFormat::Anthropic => ("x-api-key", api_key.to_string()),
+            ApiFormat::OpenAI => ("authorization", format!("Bearer {api_key}")),
+        }
+    }
+
     /// Map model name using model_map, or return original.
     pub fn map_model(&self, model: &str) -> String {
         self.model_map
@@ -173,21 +184,16 @@ impl AppConfig {
             .ok_or_else(|| AppError::ProviderNotFound(self.current.clone()))
     }
 
-    /// Find the first provider (in insertion order) that has an enabled route
-    /// rule matching `model`. Returns `(name, provider, target)` or `None`.
-    /// `target` is the model name to send upstream (empty = forward unchanged).
-    /// NOTE: matching is done against the raw request model before any model_map
-    /// translation; model_map is applied later in the forwarding layer.
-    pub fn resolve_route<'a>(&'a self, model: &str) -> Option<(&'a str, &'a Provider, &'a str)> {
-        if model.is_empty() {
-            return None;
+    /// Get the current provider, rejecting disabled ones.
+    pub fn current_enabled_provider(&self) -> Result<(&str, &Provider)> {
+        let (name, p) = self.current_provider()?;
+        if !p.enabled {
+            return Err(AppError::ProviderNotFound(format!(
+                "{} (disabled)",
+                self.current
+            )));
         }
-        for (name, provider) in &self.providers {
-            if let Some(rule) = provider.routes.iter().find(|r| r.matches(model)) {
-                return Some((name.as_str(), provider, rule.target.as_str()));
-            }
-        }
-        None
+        Ok((name, p))
     }
 
     /// Build a name → id map for all providers (used for DB migration).
@@ -244,12 +250,21 @@ pub fn save_config(config: &AppConfig) -> Result<()> {
     }
     let content = serde_json::to_string_pretty(config)?;
     let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, &content)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp_path)?;
+        f.write_all(content.as_bytes())?;
+        f.sync_all()?;
     }
+    #[cfg(not(unix))]
+    std::fs::write(&tmp_path, &content)?;
     std::fs::rename(&tmp_path, &path)?;
     Ok(())
 }

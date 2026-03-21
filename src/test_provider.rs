@@ -42,10 +42,7 @@ pub async fn test_connectivity(
     };
     let base = provider.base_url.trim_end_matches('/');
 
-    let auth_header = match provider.api_format {
-        ApiFormat::Anthropic => ("x-api-key".to_string(), api_key.clone()),
-        ApiFormat::OpenAI => ("authorization".to_string(), format!("Bearer {api_key}")),
-    };
+    let auth_header = provider.auth_header(&api_key);
 
     let model = test_model.as_deref().unwrap_or(FALLBACK_MODEL).to_string();
 
@@ -72,12 +69,16 @@ pub async fn test_connectivity(
     let t0 = Instant::now();
     let mut req = client
         .post(&msg_url)
-        .header(&auth_header.0, &auth_header.1)
+        .header(auth_header.0, &auth_header.1)
         .header("content-type", "application/json");
     if provider.api_format == ApiFormat::Anthropic {
         req = req.header("anthropic-version", "2023-06-01");
     }
-    let response = req.json(&body).timeout(Duration::from_secs(TEST_TIMEOUT_SECS)).send().await;
+    let response = req
+        .json(&body)
+        .timeout(Duration::from_secs(TEST_TIMEOUT_SECS))
+        .send()
+        .await;
     let latency_ms = t0.elapsed().as_millis() as u64;
 
     let status = match response {
@@ -117,12 +118,12 @@ pub async fn test_connectivity(
 async fn fetch_models(
     client: &reqwest::Client,
     base: &str,
-    auth_header: &(String, String),
+    auth_header: &(&str, String),
     api_format: &ApiFormat,
 ) -> (Option<usize>, Option<Vec<String>>) {
     let mut req = client
         .get(format!("{base}/v1/models"))
-        .header(&auth_header.0, &auth_header.1)
+        .header(auth_header.0, &auth_header.1)
         .timeout(Duration::from_secs(TEST_TIMEOUT_SECS));
     if *api_format == ApiFormat::Anthropic {
         req = req.header("anthropic-version", "2023-06-01");

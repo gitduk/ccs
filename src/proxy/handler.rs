@@ -15,6 +15,15 @@ struct ProviderKey {
     id: String,
     name: String,
 }
+
+/// Delta bag for a single DB upsert — avoids positional u64 parameter confusion.
+#[derive(Clone, Debug, Default)]
+struct StatsDelta {
+    input: u64,
+    output: u64,
+    requests: u64,
+    failures: u64,
+}
 use crate::proxy::{forwarder, metrics::SharedMetrics, transform};
 
 /// Health check endpoint.
@@ -39,7 +48,7 @@ pub async fn handle_models(
 ) -> Result<Response, AppError> {
     let (provider, api_key) = {
         let config = state.config.read().await;
-        let (_, p) = config.current_provider()?;
+        let (_, p) = config.current_enabled_provider()?;
         let key = p.resolve_api_key()?;
         (p.clone(), key)
     };
@@ -47,12 +56,9 @@ pub async fn handle_models(
     let base = provider.base_url.trim_end_matches('/');
     let url = format!("{base}/v1/models");
 
-    let (auth_key, auth_val) = match provider.api_format {
-        ApiFormat::Anthropic => ("x-api-key".to_string(), api_key),
-        ApiFormat::OpenAI => ("authorization".to_string(), format!("Bearer {api_key}")),
-    };
+    let (auth_key, auth_val) = provider.auth_header(&api_key);
 
-    let mut req = state.http_client.get(&url).header(&auth_key, &auth_val);
+    let mut req = state.http_client.get(&url).header(auth_key, &auth_val);
     if provider.api_format == ApiFormat::Anthropic {
         req = req.header("anthropic-version", "2023-06-01");
         if let Some(beta) = headers.get("anthropic-beta") {
@@ -84,97 +90,94 @@ pub async fn handle_models(
         .into_response())
 }
 
-/// Main handler for POST /v1/messages.
-pub async fn handle_messages(
-    State(state): State<SharedState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, AppError> {
-    // Parse body once to extract routing hints (model name + stream flag).
-    // `body` is `Bytes` (cheaply cloneable); we do not consume it here.
-    let req_json = serde_json::from_slice::<serde_json::Value>(&body).ok();
-    let is_stream = req_json
-        .as_ref()
-        .and_then(|v| v.get("stream").and_then(|s| s.as_bool()))
-        .unwrap_or(false);
-    let req_model = req_json
-        .as_ref()
-        .and_then(|v| v.get("model").and_then(|m| m.as_str()))
-        .unwrap_or("")
-        .to_string();
+/// Build the candidate provider list and resolve the current provider's route.
+/// Routes are per-provider model rewrites — they never change which provider is selected.
+/// Returns `(pool, should_cycle, optional_routed_target)`.
+async fn resolve_provider_pool(
+    state: &SharedState,
+    req_model: &str,
+) -> Result<(Vec<(String, crate::config::Provider)>, bool, Option<String>), AppError> {
+    let config = state.config.read().await;
 
-    // Build the candidate provider list, honouring per-provider route rules.
-    // If a route rule matches the requested model, that provider is used as the
-    // starting point (instead of `current`).  Fallback cycling still applies.
-    let (pool, do_cycle, routed_target) = {
-        let config = state.config.read().await;
-        let (routed, routed_target) = config
-            .resolve_route(&req_model)
-            .map(|(n, _, t)| {
-                (
-                    Some(n.to_string()),
-                    if t.is_empty() {
-                        None
-                    } else {
-                        Some(t.to_string())
-                    },
-                )
+    // Route lookup: only check the current provider's routes for model rewriting.
+    let (_, current_provider) = config.current_enabled_provider()?;
+    let routed_target = current_provider
+        .routes
+        .iter()
+        .find(|r| r.matches(req_model))
+        .map(|r| r.target.clone())
+        .filter(|t| !t.is_empty());
+
+    if config.fallback {
+        let start_idx = config.providers.get_index_of(&config.current).unwrap_or(0);
+        let len = config.providers.len();
+        let list: Vec<(String, crate::config::Provider)> = (0..len)
+            .map(|i| (start_idx + i) % len)
+            .filter_map(|i| {
+                config
+                    .providers
+                    .get_index(i)
+                    .filter(|(_, v)| v.enabled)
+                    .map(|(k, v)| (k.clone(), v.clone()))
             })
-            .unwrap_or((None, None));
-        if config.fallback {
-            let start_name = routed.as_deref().unwrap_or(&config.current);
-            let start_idx = config.providers.get_index_of(start_name).unwrap_or(0);
-            let len = config.providers.len();
-            let list: Vec<(String, crate::config::Provider)> = (0..len)
-                .map(|i| (start_idx + i) % len)
-                .filter_map(|i| {
-                    config
-                        .providers
-                        .get_index(i)
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                })
-                .collect();
-            (list, true, routed_target)
-        } else {
-            let provider_name = routed.as_deref().unwrap_or(&config.current);
-            let provider = config
-                .providers
-                .get(provider_name)
-                .ok_or_else(|| AppError::ProviderNotFound(provider_name.to_string()))?;
-            (
-                vec![(provider_name.to_string(), provider.clone())],
-                false,
-                routed_target,
-            )
-        }
-    };
-
-    // Patch body: rewrite `model` field with route target when applicable.
-    let body = if let Some(target) = &routed_target {
-        if let Some(mut json) = req_json.clone() {
-            json["model"] = serde_json::Value::String(target.clone());
-            Bytes::from(serde_json::to_vec(&json).unwrap_or_else(|_| body.to_vec()))
-        } else {
-            body
-        }
+            .collect();
+        Ok((list, true, routed_target))
     } else {
-        body
-    };
+        Ok((
+            vec![(config.current.clone(), current_provider.clone())],
+            false,
+            routed_target,
+        ))
+    }
+}
 
-    // Cycle infinitely; terminate when a full round of consecutive failures occurs
+/// Try each provider in the pool; cycle on retryable errors (5xx, 429, auth).
+/// Returns the first successful response or a final error response.
+async fn try_providers(
+    state: &SharedState,
+    pool: &[(String, crate::config::Provider)],
+    do_cycle: bool,
+    body: &Bytes,
+    req_json: Option<&serde_json::Value>,
+    headers: &HeaderMap,
+    is_stream: bool,
+) -> Result<Response, AppError> {
     let round_size = pool.len();
     let max_failures = round_size * 3;
     let mut consecutive_failures = 0usize;
     let mut last_status = None;
+
     for (provider_name, provider) in pool.iter().cycle() {
+        let pkey = ProviderKey {
+            id: provider.id.clone(),
+            name: provider_name.clone(),
+        };
+
+        // Helper: record failure in-memory + persist request+failure to DB in one call.
+        let record_failure = |state: &SharedState, pkey: &ProviderKey, also_request: bool| {
+            if let Ok(mut m) = state.metrics.lock() {
+                if also_request {
+                    m.record_request(&pkey.name);
+                }
+                m.record_failure(&pkey.name);
+            }
+            persist_stats(
+                &state.db,
+                pkey,
+                None,
+                StatsDelta {
+                    requests: u64::from(also_request),
+                    failures: 1,
+                    ..Default::default()
+                },
+            );
+        };
+
         let api_key = match provider.resolve_api_key() {
             Ok(k) => k,
             Err(e) => {
                 tracing::warn!("Skipping provider {}: {e}", provider.base_url);
-                if let Ok(mut m) = state.metrics.lock() {
-                    m.record_request(provider_name);
-                    m.record_failure(provider_name);
-                }
+                record_failure(state, &pkey, true);
                 consecutive_failures += 1;
                 if !do_cycle || consecutive_failures >= max_failures {
                     break;
@@ -183,15 +186,18 @@ pub async fn handle_messages(
             }
         };
 
-        // Record request count before forwarding (immediate feedback in TUI)
+        // Record request count in-memory for immediate TUI feedback.
+        // The DB write is deferred: batched into record_and_persist on success,
+        // or written via record_failure on error.
         if let Ok(mut m) = state.metrics.lock() {
             m.record_request(provider_name);
         }
 
         let is_openai = provider.api_format == ApiFormat::OpenAI;
         let upstream_body = if is_openai {
-            let request_json: serde_json::Value = serde_json::from_slice(&body)?;
-            let transformed = transform::anthropic_to_openai_request(&request_json, provider)?;
+            let request_json =
+                req_json.ok_or_else(|| AppError::Transform("Invalid JSON body".into()))?;
+            let transformed = transform::anthropic_to_openai_request(request_json, provider)?;
             Bytes::from(serde_json::to_vec(&transformed)?)
         } else {
             body.clone()
@@ -202,7 +208,7 @@ pub async fn handle_messages(
             provider,
             &api_key,
             upstream_body,
-            &headers,
+            headers,
         )
         .await
         {
@@ -212,9 +218,7 @@ pub async fn handle_messages(
                     "Provider {} network error: {e}, trying next",
                     provider.base_url
                 );
-                if let Ok(mut m) = state.metrics.lock() {
-                    m.record_failure(provider_name);
-                }
+                record_failure(state, &pkey, false);
                 consecutive_failures += 1;
                 if !do_cycle || consecutive_failures >= max_failures {
                     break;
@@ -231,9 +235,7 @@ pub async fn handle_messages(
                 "Provider {} returned {status}, trying next",
                 provider.base_url
             );
-            if let Ok(mut m) = state.metrics.lock() {
-                m.record_failure(provider_name);
-            }
+            record_failure(state, &pkey, false);
             last_status = Some(status);
             consecutive_failures += 1;
             if !do_cycle || consecutive_failures >= max_failures {
@@ -248,9 +250,7 @@ pub async fn handle_messages(
                 "Provider {} auth error {status}, trying next",
                 provider.base_url
             );
-            if let Ok(mut m) = state.metrics.lock() {
-                m.record_failure(provider_name);
-            }
+            record_failure(state, &pkey, false);
             last_status = Some(status);
             consecutive_failures += 1;
             if !do_cycle || consecutive_failures >= max_failures {
@@ -267,16 +267,9 @@ pub async fn handle_messages(
             let error_body = response.bytes().await?;
             let preview = String::from_utf8_lossy(&error_body[..error_body.len().min(200)]);
             tracing::warn!("Upstream returned {status}: {preview}");
-            if let Ok(mut m) = state.metrics.lock() {
-                m.record_failure(provider_name);
-            }
+            record_failure(state, &pkey, false);
             return Ok((status, [("content-type", "application/json")], error_body).into_response());
         }
-
-        let pkey = ProviderKey {
-            id: provider.id.clone(),
-            name: provider_name.clone(),
-        };
         return if is_stream {
             handle_streaming_response(
                 response,
@@ -306,6 +299,53 @@ pub async fn handle_messages(
         .into_response())
 }
 
+/// Main handler for POST /v1/messages.
+pub async fn handle_messages(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, AppError> {
+    // Parse body once to extract routing hints (model name + stream flag).
+    let req_json = serde_json::from_slice::<serde_json::Value>(&body).ok();
+    let is_stream = req_json
+        .as_ref()
+        .and_then(|v| v.get("stream").and_then(|s| s.as_bool()))
+        .unwrap_or(false);
+    let req_model = req_json
+        .as_ref()
+        .and_then(|v| v.get("model").and_then(|m| m.as_str()))
+        .unwrap_or("")
+        .to_string();
+
+    let (pool, do_cycle, routed_target) = resolve_provider_pool(&state, &req_model).await?;
+
+    // Patch body: rewrite `model` field with route target when applicable.
+    let (body, req_json) = if let Some(target) = &routed_target {
+        match req_json {
+            Some(mut json) => {
+                json["model"] = serde_json::Value::String(target.clone());
+                let bytes =
+                    Bytes::from(serde_json::to_vec(&json).unwrap_or_else(|_| body.to_vec()));
+                (bytes, Some(json))
+            }
+            None => (body, None),
+        }
+    } else {
+        (body, req_json)
+    };
+
+    try_providers(
+        &state,
+        &pool,
+        do_cycle,
+        &body,
+        req_json.as_ref(),
+        &headers,
+        is_stream,
+    )
+    .await
+}
+
 /// Handle non-streaming response.
 async fn handle_buffered_response(
     response: reqwest::Response,
@@ -320,27 +360,24 @@ async fn handle_buffered_response(
     } = pkey;
     let body = response.bytes().await?;
 
-    let response_body = if is_openai {
+    // Parse once; extract tokens from the in-memory Value before serializing.
+    let (response_body, usage_json) = if is_openai {
         let openai_json: serde_json::Value = serde_json::from_slice(&body)?;
         let anthropic_json = transform::openai_to_anthropic_response(&openai_json)?;
-        Bytes::from(serde_json::to_vec(&anthropic_json)?)
+        let bytes = Bytes::from(serde_json::to_vec(&anthropic_json)?);
+        (bytes, Some(anthropic_json))
     } else {
-        body
+        let parsed = serde_json::from_slice::<serde_json::Value>(&body).ok();
+        (body, parsed)
     };
 
-    // Parse token usage and model from the anthropic-format response body.
-    if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&response_body) {
+    if let Some(json) = usage_json {
         let input = json["usage"]["input_tokens"].as_u64().unwrap_or(0);
         let output = json["usage"]["output_tokens"].as_u64().unwrap_or(0);
         if input > 0 || output > 0 {
             let model = json["model"].as_str().map(|s| s.to_string());
-            if let Ok(mut m) = metrics.lock() {
-                m.record_tokens(input, output, &provider_name);
-                if let Some(ref model_name) = model {
-                    m.record_model_tokens(input, output, model_name);
-                }
-            }
-            persist_stats(
+            record_and_persist(
+                &metrics,
                 &db,
                 &ProviderKey {
                     id: provider_id,
@@ -361,35 +398,72 @@ async fn handle_buffered_response(
         .into_response())
 }
 
-/// Fire-and-forget: persist provider and model token deltas to DB outside hot path.
+/// Record token usage in-memory and persist all deltas (tokens + request count) to DB.
+fn record_and_persist(
+    metrics: &SharedMetrics,
+    db: &crate::db::SharedDb,
+    pkey: &ProviderKey,
+    model: Option<&str>,
+    input: u64,
+    output: u64,
+) {
+    if let Ok(mut m) = metrics.lock() {
+        m.record_tokens(input, output, &pkey.name);
+        if let Some(model_name) = model {
+            m.record_model_tokens(input, output, model_name);
+        }
+    }
+    // Batch the request count (already recorded in-memory earlier) with token deltas
+    // so that a successful request produces only one DB write instead of two.
+    persist_stats(
+        db,
+        pkey,
+        model,
+        StatsDelta {
+            input,
+            output,
+            requests: 1,
+            ..Default::default()
+        },
+    );
+}
+
+/// Fire-and-forget: persist provider and model deltas to DB outside the hot path.
 fn persist_stats(
     db: &crate::db::SharedDb,
     pkey: &ProviderKey,
     model_name: Option<&str>,
-    input_delta: u64,
-    output_delta: u64,
+    delta: StatsDelta,
 ) {
     let db = db.clone();
     let pkey = pkey.clone();
     let mid = model_name.map(|s| s.to_string());
     tokio::task::spawn_blocking(move || {
-        if let Ok(conn) = db.lock() {
-            let _ = crate::db::upsert_provider(
-                &conn,
-                &pkey.id,
-                &pkey.name,
-                input_delta,
-                output_delta,
-            );
-            if let Some(model) = mid {
-                let _ = crate::db::upsert_model(
-                    &conn,
+        if let Ok(mut conn) = db.lock() {
+            let result = conn.transaction().and_then(|tx| {
+                crate::db::upsert_provider(
+                    &tx,
                     &pkey.id,
                     &pkey.name,
-                    &model,
-                    input_delta,
-                    output_delta,
-                );
+                    delta.input,
+                    delta.output,
+                    delta.requests,
+                    delta.failures,
+                )?;
+                if let Some(ref model) = mid {
+                    crate::db::upsert_model(
+                        &tx,
+                        &pkey.id,
+                        &pkey.name,
+                        model,
+                        delta.input,
+                        delta.output,
+                    )?;
+                }
+                tx.commit()
+            });
+            if let Err(e) = result {
+                tracing::warn!("Failed to persist stats for {}: {e}", pkey.name);
             }
         }
     });
@@ -440,7 +514,7 @@ fn track_tokens_in_stream(
         const LINE_BUF_MAX: usize = 1024 * 1024; // 1 MB safety cap
         let mut input_tokens = 0u64;
         let mut output_tokens = 0u64;
-        let mut model = String::new();
+        let mut model: Option<String> = None;
         let mut line_buf = String::new();
 
         while let Some(chunk) = inner.next().await {
@@ -451,10 +525,11 @@ fn track_tokens_in_stream(
                     // Abnormally large line — skip parsing, drain buffer to free memory.
                     line_buf.clear();
                 }
-                // Process complete SSE lines to extract token counts and model.
-                while let Some(pos) = line_buf.find('\n') {
-                    let line = line_buf[..pos].trim_end_matches('\r').to_owned();
-                    line_buf.drain(..=pos);
+                // Process complete SSE lines; single drain at the end.
+                let mut start = 0;
+                while let Some(rel) = line_buf[start..].find('\n') {
+                    let pos = start + rel;
+                    let line = line_buf[start..pos].trim_end_matches('\r');
                     if let Some(data) = line.strip_prefix("data: ") {
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
                             match json["type"].as_str() {
@@ -463,10 +538,13 @@ fn track_tokens_in_stream(
                                         .as_u64()
                                         .unwrap_or(0);
                                     if let Some(m) = json["message"]["model"].as_str() {
-                                        model = m.to_string();
+                                        model = Some(m.to_string());
                                     }
                                 }
                                 Some("message_delta") => {
+                                    if let Some(it) = json["usage"]["input_tokens"].as_u64() {
+                                        input_tokens = it;
+                                    }
                                     output_tokens = json["usage"]["output_tokens"]
                                         .as_u64()
                                         .unwrap_or(0);
@@ -475,6 +553,10 @@ fn track_tokens_in_stream(
                             }
                         }
                     }
+                    start = pos + 1;
+                }
+                if start > 0 {
+                    line_buf.drain(..start);
                 }
             }
             yield chunk;
@@ -482,14 +564,14 @@ fn track_tokens_in_stream(
 
         // Stream ended: persist the token counts we collected.
         if input_tokens > 0 || output_tokens > 0 {
-            if let Ok(mut m) = metrics.lock() {
-                m.record_tokens(input_tokens, output_tokens, &provider_name);
-                if !model.is_empty() {
-                    m.record_model_tokens(input_tokens, output_tokens, &model);
-                }
-            }
-            let model_opt = if model.is_empty() { None } else { Some(model.as_str()) };
-            persist_stats(&db, &ProviderKey { id: provider_id, name: provider_name }, model_opt, input_tokens, output_tokens);
+            record_and_persist(
+                &metrics,
+                &db,
+                &ProviderKey { id: provider_id, name: provider_name },
+                model.as_deref(),
+                input_tokens,
+                output_tokens,
+            );
         }
     }
 }

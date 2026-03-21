@@ -377,6 +377,7 @@ impl StreamState {
                     "stop_sequence": null,
                 },
                 "usage": {
+                    "input_tokens": self.input_tokens,
                     "output_tokens": self.output_tokens,
                 }
             }),

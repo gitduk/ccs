@@ -92,6 +92,7 @@ impl App {
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let model_map = existing.map(|p| p.model_map.clone()).unwrap_or_default();
 
+        let enabled = existing.map(|p| p.enabled).unwrap_or(true);
         let provider = crate::config::Provider {
             id: provider_id.clone(),
             base_url,
@@ -100,6 +101,7 @@ impl App {
             model_map,
             notes: notes.clone(),
             routes,
+            enabled,
         };
 
         if is_rename {
@@ -244,8 +246,56 @@ impl App {
 
     pub fn switch_to_selected(&mut self) -> Result<()> {
         if let Some(name) = self.selected_name().map(|s| s.to_string()) {
+            let is_enabled = self
+                .config
+                .providers
+                .get(&name)
+                .map(|p| p.enabled)
+                .unwrap_or(false);
+            if !is_enabled {
+                self.set_message(
+                    format!("'{name}' is disabled — enable it first with 'p'"),
+                    MessageKind::Error,
+                );
+                return Ok(());
+            }
             self.config.current = name.clone();
             config::save_config(&self.config)?;
+        }
+        Ok(())
+    }
+
+    pub fn toggle_provider_enabled(&mut self) -> Result<()> {
+        if let Some(name) = self.selected_name().map(|s| s.to_string()) {
+            if let Some(provider) = self.config.providers.get_mut(&name) {
+                provider.enabled = !provider.enabled;
+                let now_enabled = provider.enabled;
+                let state = if now_enabled { "enabled" } else { "disabled" };
+
+                // If we just disabled the current provider, advance to the next enabled one.
+                if !now_enabled && self.config.current == name {
+                    let next = self
+                        .config
+                        .providers
+                        .iter()
+                        .find(|(k, v)| *k != &name && v.enabled)
+                        .map(|(k, _)| k.clone());
+                    match next {
+                        Some(next_name) => self.config.current = next_name,
+                        None => {
+                            config::save_config(&self.config)?;
+                            self.set_message(
+                                format!("'{name}' disabled — no enabled providers remain"),
+                                MessageKind::Error,
+                            );
+                            return Ok(());
+                        }
+                    }
+                }
+
+                config::save_config(&self.config)?;
+                self.set_message(format!("'{name}' {state}"), MessageKind::Info);
+            }
         }
         Ok(())
     }

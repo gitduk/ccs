@@ -65,13 +65,37 @@ pub async fn start_server(config: AppConfig) -> crate::error::Result<()> {
         let conn = db.lock().unwrap();
         crate::db::load_metrics(&conn)
     };
+    let shared_config = Arc::new(RwLock::new(config));
     let state = Arc::new(AppState {
-        config: Arc::new(RwLock::new(config)),
+        config: shared_config.clone(),
         http_client: build_http_client(),
         metrics: Arc::new(std::sync::Mutex::new(initial_metrics)),
         db,
     });
     let app = build_router(state);
+
+    // Reload config from disk on SIGHUP so the TUI can signal changes.
+    #[cfg(unix)]
+    {
+        let reload_config = shared_config;
+        tokio::spawn(async move {
+            let mut sig = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+                .expect("Failed to install SIGHUP handler");
+            while sig.recv().await.is_some() {
+                match crate::config::load_config() {
+                    Ok(new_cfg) => {
+                        let mut cfg = reload_config.write().await;
+                        if cfg.listen != new_cfg.listen {
+                            tracing::warn!("SIGHUP: listen address changed — restart required");
+                        }
+                        *cfg = new_cfg;
+                        tracing::info!("SIGHUP: config reloaded");
+                    }
+                    Err(e) => tracing::error!("SIGHUP: failed to reload config: {e}"),
+                }
+            }
+        });
+    }
 
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     tracing::info!("CCS proxy listening on {listen}");

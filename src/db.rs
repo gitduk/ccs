@@ -215,22 +215,33 @@ pub fn load_metrics(conn: &Connection) -> TokenMetrics {
     metrics
 }
 
-/// Accumulate token deltas for a provider (requests/failures are tracked in-memory only).
+/// Accumulate token/request/failure deltas for a provider.
 pub fn upsert_provider(
     conn: &Connection,
     provider_id: &str,
     provider_name: &str,
     input_delta: u64,
     output_delta: u64,
+    req_delta: u64,
+    fail_delta: u64,
 ) -> Result<()> {
     conn.execute(
         "INSERT INTO provider_stats (provider_id, provider_name, input, output, requests, failures)
-         VALUES (?1, ?2, ?3, ?4, 0, 0)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(provider_id) DO UPDATE SET
              provider_name = excluded.provider_name,
              input    = provider_stats.input    + excluded.input,
-             output   = provider_stats.output   + excluded.output",
-        params![provider_id, provider_name, input_delta, output_delta],
+             output   = provider_stats.output   + excluded.output,
+             requests = provider_stats.requests + excluded.requests,
+             failures = provider_stats.failures + excluded.failures",
+        params![
+            provider_id,
+            provider_name,
+            input_delta,
+            output_delta,
+            req_delta,
+            fail_delta
+        ],
     )?;
     Ok(())
 }
