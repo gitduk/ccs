@@ -184,6 +184,43 @@ fn exit_route_insert(form: &mut ProviderForm, provider_models: &[String]) {
     prune_current_rule(form, provider_models);
 }
 
+/// Dismiss the suggestion list.
+fn reset_suggest(form: &mut ProviderForm) {
+    form.route_suggest_active = false;
+    form.route_suggest_idx = 0;
+}
+
+/// Return the byte length of the character immediately before `cursor` in `text`.
+fn prev_char_byte_len(text: &str, cursor: usize) -> usize {
+    text[..cursor]
+        .chars()
+        .next_back()
+        .map(|c| c.len_utf8())
+        .unwrap_or(1)
+}
+
+/// Enter route Insert mode on either the pattern or target field.
+fn enter_route_insert_mode(form: &mut ProviderForm, edit_target: bool) {
+    if form.route_cursor < form.routes.len() {
+        form.route_editing = true;
+        form.route_edit_target = edit_target;
+        if edit_target {
+            form.route_tgt_cursor = form.routes[form.route_cursor].target.len();
+        } else {
+            form.route_pat_cursor = form.routes[form.route_cursor].pattern.len();
+        }
+    }
+}
+
+/// Switch focus to the pattern field, dismissing any active suggestion list.
+fn focus_pattern(form: &mut ProviderForm) {
+    form.route_edit_target = false;
+    reset_suggest(form);
+    if let Some(rule) = form.routes.get(form.route_cursor) {
+        form.route_pat_cursor = rule.pattern.len();
+    }
+}
+
 /// Handle a key press when the Routes section of the provider form has focus.
 /// Operates in either "route Insert mode" (editing a pattern) or "route Normal
 /// mode" (navigating / managing rules).
@@ -222,7 +259,7 @@ fn handle_routes_key(
                 }
                 exit_route_insert(form, provider_models);
             }
-            // Tab: switch pattern ↔ target; if already on target → exit Insert.
+            // Tab: cycle pattern → target → pattern.
             KeyCode::Tab => {
                 if !form.route_edit_target {
                     form.route_edit_target = true;
@@ -230,18 +267,13 @@ fn handle_routes_key(
                         form.route_tgt_cursor = rule.target.len();
                     }
                 } else {
-                    exit_route_insert(form, provider_models);
+                    focus_pattern(form);
                 }
             }
-            // BackTab: switch target → pattern; if on pattern → focus_prev.
+            // BackTab: switch target → pattern; if on pattern → exit Insert.
             KeyCode::BackTab => {
                 if form.route_edit_target {
-                    form.route_edit_target = false;
-                    form.route_suggest_active = false;
-                    form.route_suggest_idx = 0;
-                    if let Some(rule) = form.routes.get(form.route_cursor) {
-                        form.route_pat_cursor = rule.pattern.len();
-                    }
+                    focus_pattern(form);
                 } else {
                     exit_route_insert(form, provider_models);
                     form.focus_prev();
@@ -267,8 +299,7 @@ fn handle_routes_key(
                     if form.route_edit_target {
                         rule.target.insert(form.route_tgt_cursor, c);
                         form.route_tgt_cursor += c.len_utf8();
-                        form.route_suggest_active = false;
-                        form.route_suggest_idx = 0;
+                        reset_suggest(form);
                     } else {
                         rule.pattern.insert(form.route_pat_cursor, c);
                         form.route_pat_cursor += c.len_utf8();
@@ -279,22 +310,13 @@ fn handle_routes_key(
                 if let Some(rule) = form.routes.get_mut(form.route_cursor) {
                     if form.route_edit_target {
                         if form.route_tgt_cursor > 0 {
-                            let char_len = rule.target[..form.route_tgt_cursor]
-                                .chars()
-                                .next_back()
-                                .map(|c| c.len_utf8())
-                                .unwrap_or(1);
+                            let char_len = prev_char_byte_len(&rule.target, form.route_tgt_cursor);
                             form.route_tgt_cursor -= char_len;
                             rule.target.remove(form.route_tgt_cursor);
                         }
-                        form.route_suggest_active = false;
-                        form.route_suggest_idx = 0;
+                        reset_suggest(form);
                     } else if form.route_pat_cursor > 0 {
-                        let char_len = rule.pattern[..form.route_pat_cursor]
-                            .chars()
-                            .next_back()
-                            .map(|c| c.len_utf8())
-                            .unwrap_or(1);
+                        let char_len = prev_char_byte_len(&rule.pattern, form.route_pat_cursor);
                         form.route_pat_cursor -= char_len;
                         rule.pattern.remove(form.route_pat_cursor);
                     }
@@ -315,20 +337,12 @@ fn handle_routes_key(
                 if let Some(rule) = form.routes.get(form.route_cursor) {
                     if form.route_edit_target {
                         if form.route_tgt_cursor > 0 {
-                            let char_len = rule.target[..form.route_tgt_cursor]
-                                .chars()
-                                .next_back()
-                                .map(|c| c.len_utf8())
-                                .unwrap_or(1);
-                            form.route_tgt_cursor -= char_len;
+                            form.route_tgt_cursor -=
+                                prev_char_byte_len(&rule.target, form.route_tgt_cursor);
                         }
                     } else if form.route_pat_cursor > 0 {
-                        let char_len = rule.pattern[..form.route_pat_cursor]
-                            .chars()
-                            .next_back()
-                            .map(|c| c.len_utf8())
-                            .unwrap_or(1);
-                        form.route_pat_cursor -= char_len;
+                        form.route_pat_cursor -=
+                            prev_char_byte_len(&rule.pattern, form.route_pat_cursor);
                     }
                 }
             }
@@ -424,21 +438,13 @@ fn handle_routes_key(
             }
 
             // i / Enter → enter Insert mode for pattern.
-            KeyCode::Enter | KeyCode::Char('i') => {
-                if form.route_cursor < form.routes.len() {
-                    form.route_editing = true;
-                    form.route_edit_target = false;
-                    form.route_pat_cursor = form.routes[form.route_cursor].pattern.len();
-                }
+            KeyCode::Enter | KeyCode::Char('i') if !ctrl => {
+                enter_route_insert_mode(form, false);
             }
 
             // t → enter Insert mode for target.
             KeyCode::Char('t') if !ctrl => {
-                if form.route_cursor < form.routes.len() {
-                    form.route_editing = true;
-                    form.route_edit_target = true;
-                    form.route_tgt_cursor = form.routes[form.route_cursor].target.len();
-                }
+                enter_route_insert_mode(form, true);
             }
 
             // K / J → move rule up / down (reorder priority).
@@ -513,6 +519,8 @@ fn handle_editing_key(
         if !form.routes.is_empty() && form.route_cursor < form.routes.len() {
             form.routes.remove(form.route_cursor);
             form.clamp_route_cursor();
+            app.save_form_in_place()?;
+            sync_proxy_config(app, server);
         }
         return Ok(());
     }
