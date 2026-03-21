@@ -349,8 +349,12 @@ pub(super) fn draw_form(f: &mut Frame, app: &App) {
                 let pat_active = !form.route_edit_target;
                 let tgt_active = form.route_edit_target;
 
-                let pat_spans =
-                    render_field(&rule.pattern, form.route_pat_cursor, pat_active, prov_color);
+                let pat_spans = render_field(
+                    &rule.pattern,
+                    form.route_pat_field.cursor,
+                    pat_active,
+                    prov_color,
+                );
                 let tgt_text_owned;
                 let tgt_text = if rule.target.is_empty() && !tgt_active {
                     "target"
@@ -358,8 +362,12 @@ pub(super) fn draw_form(f: &mut Frame, app: &App) {
                     tgt_text_owned = rule.target.clone();
                     &tgt_text_owned
                 };
-                let tgt_spans =
-                    render_field(tgt_text, form.route_tgt_cursor, tgt_active, prov_color);
+                let tgt_spans = render_field(
+                    tgt_text,
+                    form.route_tgt_field.cursor,
+                    tgt_active,
+                    prov_color,
+                );
 
                 let mut spans = vec![
                     Span::raw("  "),

@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::config::RouteRule;
 
-use super::app::{filter_suggestions, ConfirmAction, Mode, ProviderForm, VimMode};
+use super::app::{filter_suggestions, ConfirmAction, FormField, Mode, ProviderForm, VimMode};
 use super::server::sync_proxy_config;
 use super::App;
 use super::ServerHandle;
@@ -190,25 +190,22 @@ fn reset_suggest(form: &mut ProviderForm) {
     form.route_suggest_idx = 0;
 }
 
-/// Return the byte length of the character immediately before `cursor` in `text`.
-fn prev_char_byte_len(text: &str, cursor: usize) -> usize {
-    text[..cursor]
-        .chars()
-        .next_back()
-        .map(|c| c.len_utf8())
-        .unwrap_or(1)
-}
-
 /// Enter route Insert mode on either the pattern or target field.
 fn enter_route_insert_mode(form: &mut ProviderForm, edit_target: bool) {
     if form.route_cursor < form.routes.len() {
+        let rule = &form.routes[form.route_cursor];
+        form.route_pat_field = FormField::text("", &rule.pattern);
+        form.route_tgt_field = FormField::text("", &rule.target);
         form.route_editing = true;
         form.route_edit_target = edit_target;
-        if edit_target {
-            form.route_tgt_cursor = form.routes[form.route_cursor].target.len();
-        } else {
-            form.route_pat_cursor = form.routes[form.route_cursor].pattern.len();
-        }
+    }
+}
+
+/// Sync FormField values back to the active RouteRule.
+fn sync_route_fields(form: &mut ProviderForm) {
+    if let Some(rule) = form.routes.get_mut(form.route_cursor) {
+        rule.pattern = form.route_pat_field.value.clone();
+        rule.target = form.route_tgt_field.value.clone();
     }
 }
 
@@ -217,7 +214,7 @@ fn focus_pattern(form: &mut ProviderForm) {
     form.route_edit_target = false;
     reset_suggest(form);
     if let Some(rule) = form.routes.get(form.route_cursor) {
-        form.route_pat_cursor = rule.pattern.len();
+        form.route_pat_field = FormField::text("", &rule.pattern);
     }
 }
 
@@ -251,10 +248,8 @@ fn handle_routes_key(
                         .unwrap_or("");
                     let suggestions = filter_suggestions(provider_models, filter);
                     if let Some(&model) = suggestions.get(form.route_suggest_idx) {
-                        if let Some(rule) = form.routes.get_mut(form.route_cursor) {
-                            rule.target = model.to_string();
-                            form.route_tgt_cursor = rule.target.len();
-                        }
+                        form.route_tgt_field = FormField::text("", model);
+                        sync_route_fields(form);
                     }
                 }
                 exit_route_insert(form, provider_models);
@@ -264,7 +259,7 @@ fn handle_routes_key(
                 if !form.route_edit_target {
                     form.route_edit_target = true;
                     if let Some(rule) = form.routes.get(form.route_cursor) {
-                        form.route_tgt_cursor = rule.target.len();
+                        form.route_tgt_field = FormField::text("", &rule.target);
                     }
                 } else {
                     focus_pattern(form);
@@ -295,120 +290,67 @@ fn handle_routes_key(
             }
             // Character input (no spaces: model names never contain spaces).
             KeyCode::Char(c) if !ctrl && c != ' ' => {
-                if let Some(rule) = form.routes.get_mut(form.route_cursor) {
-                    if form.route_edit_target {
-                        rule.target.insert(form.route_tgt_cursor, c);
-                        form.route_tgt_cursor += c.len_utf8();
-                        reset_suggest(form);
-                    } else {
-                        rule.pattern.insert(form.route_pat_cursor, c);
-                        form.route_pat_cursor += c.len_utf8();
-                    }
+                if form.route_edit_target {
+                    form.route_tgt_field.insert(c);
+                    reset_suggest(form);
+                } else {
+                    form.route_pat_field.insert(c);
                 }
+                sync_route_fields(form);
             }
-            KeyCode::Backspace => {
-                if let Some(rule) = form.routes.get_mut(form.route_cursor) {
-                    if form.route_edit_target {
-                        if form.route_tgt_cursor > 0 {
-                            let char_len = prev_char_byte_len(&rule.target, form.route_tgt_cursor);
-                            form.route_tgt_cursor -= char_len;
-                            rule.target.remove(form.route_tgt_cursor);
-                        }
-                        reset_suggest(form);
-                    } else if form.route_pat_cursor > 0 {
-                        let char_len = prev_char_byte_len(&rule.pattern, form.route_pat_cursor);
-                        form.route_pat_cursor -= char_len;
-                        rule.pattern.remove(form.route_pat_cursor);
-                    }
+            KeyCode::Backspace | KeyCode::Char('h') if ctrl => {
+                if form.route_edit_target {
+                    form.route_tgt_field.backspace();
+                    reset_suggest(form);
+                } else {
+                    form.route_pat_field.backspace();
                 }
+                sync_route_fields(form);
             }
             KeyCode::Delete => {
-                if let Some(rule) = form.routes.get_mut(form.route_cursor) {
-                    if form.route_edit_target {
-                        if form.route_tgt_cursor < rule.target.len() {
-                            rule.target.remove(form.route_tgt_cursor);
-                        }
-                    } else if form.route_pat_cursor < rule.pattern.len() {
-                        rule.pattern.remove(form.route_pat_cursor);
-                    }
+                if form.route_edit_target {
+                    form.route_tgt_field.delete();
+                } else {
+                    form.route_pat_field.delete();
                 }
+                sync_route_fields(form);
             }
             KeyCode::Left => {
-                if let Some(rule) = form.routes.get(form.route_cursor) {
-                    if form.route_edit_target {
-                        if form.route_tgt_cursor > 0 {
-                            form.route_tgt_cursor -=
-                                prev_char_byte_len(&rule.target, form.route_tgt_cursor);
-                        }
-                    } else if form.route_pat_cursor > 0 {
-                        form.route_pat_cursor -=
-                            prev_char_byte_len(&rule.pattern, form.route_pat_cursor);
-                    }
+                if form.route_edit_target {
+                    form.route_tgt_field.move_left();
+                } else {
+                    form.route_pat_field.move_left();
                 }
             }
             KeyCode::Right => {
-                if let Some(rule) = form.routes.get(form.route_cursor) {
-                    if form.route_edit_target {
-                        if form.route_tgt_cursor < rule.target.len() {
-                            let char_len = rule.target[form.route_tgt_cursor..]
-                                .chars()
-                                .next()
-                                .map(|c| c.len_utf8())
-                                .unwrap_or(1);
-                            form.route_tgt_cursor += char_len;
-                        }
-                    } else if form.route_pat_cursor < rule.pattern.len() {
-                        let char_len = rule.pattern[form.route_pat_cursor..]
-                            .chars()
-                            .next()
-                            .map(|c| c.len_utf8())
-                            .unwrap_or(1);
-                        form.route_pat_cursor += char_len;
-                    }
-                }
-            }
-            KeyCode::Home => {
                 if form.route_edit_target {
-                    form.route_tgt_cursor = 0;
+                    form.route_tgt_field.move_right();
                 } else {
-                    form.route_pat_cursor = 0;
+                    form.route_pat_field.move_right();
                 }
             }
-            KeyCode::End => {
-                if let Some(rule) = form.routes.get(form.route_cursor) {
-                    if form.route_edit_target {
-                        form.route_tgt_cursor = rule.target.len();
-                    } else {
-                        form.route_pat_cursor = rule.pattern.len();
-                    }
+            KeyCode::Home | KeyCode::Char('a') if ctrl => {
+                if form.route_edit_target {
+                    form.route_tgt_field.home();
+                } else {
+                    form.route_pat_field.home();
+                }
+            }
+            KeyCode::End | KeyCode::Char('e') if ctrl => {
+                if form.route_edit_target {
+                    form.route_tgt_field.end();
+                } else {
+                    form.route_pat_field.end();
                 }
             }
             KeyCode::Char('w') if ctrl => {
-                // Ctrl+W: delete word backwards in current field.
-                if let Some(rule) = form.routes.get_mut(form.route_cursor) {
-                    let (text, cursor) = if form.route_edit_target {
-                        (&mut rule.target, &mut form.route_tgt_cursor)
-                    } else {
-                        (&mut rule.pattern, &mut form.route_pat_cursor)
-                    };
-                    let mut pos = *cursor;
-                    while pos > 0 {
-                        let c = text[..pos].chars().next_back().unwrap();
-                        if c != '-' && c != '_' {
-                            break;
-                        }
-                        pos -= c.len_utf8();
-                    }
-                    while pos > 0 {
-                        let c = text[..pos].chars().next_back().unwrap();
-                        if c == '-' || c == '_' {
-                            break;
-                        }
-                        pos -= c.len_utf8();
-                    }
-                    text.drain(pos..*cursor);
-                    *cursor = pos;
+                if form.route_edit_target {
+                    form.route_tgt_field.delete_word_back();
+                    reset_suggest(form);
+                } else {
+                    form.route_pat_field.delete_word_back();
                 }
+                sync_route_fields(form);
             }
             _ => {}
         }
@@ -419,7 +361,8 @@ fn handle_routes_key(
             KeyCode::Char('a') if !ctrl => {
                 form.routes.push(RouteRule::new(""));
                 form.route_cursor = form.routes.len() - 1;
-                form.route_pat_cursor = 0;
+                form.route_pat_field = FormField::text("", "");
+                form.route_tgt_field = FormField::text("", "");
                 form.route_edit_target = false;
                 form.route_editing = true;
             }
