@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
 
+/// Index of the Notes field inside `ProviderForm::fields`.
+pub(super) const NOTES_FIELD_IDX: usize = 4;
+
 use ratatui::widgets::TableState;
 
 use crate::config::{AppConfig, Provider, RouteRule};

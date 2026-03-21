@@ -190,6 +190,15 @@ fn reset_suggest(form: &mut ProviderForm) {
     form.route_suggest_idx = 0;
 }
 
+/// Return a mutable reference to whichever route field is currently active.
+fn route_field(form: &mut ProviderForm) -> &mut FormField {
+    if form.route_edit_target {
+        &mut form.route_tgt_field
+    } else {
+        &mut form.route_pat_field
+    }
+}
+
 /// Enter route Insert mode on either the pattern or target field.
 fn enter_route_insert_mode(form: &mut ProviderForm, edit_target: bool) {
     if form.route_cursor < form.routes.len() {
@@ -290,65 +299,31 @@ fn handle_routes_key(
             }
             // Character input (no spaces: model names never contain spaces).
             KeyCode::Char(c) if !ctrl && c != ' ' => {
+                route_field(form).insert(c);
                 if form.route_edit_target {
-                    form.route_tgt_field.insert(c);
                     reset_suggest(form);
-                } else {
-                    form.route_pat_field.insert(c);
                 }
                 sync_route_fields(form);
             }
             KeyCode::Backspace | KeyCode::Char('h') if ctrl => {
+                route_field(form).backspace();
                 if form.route_edit_target {
-                    form.route_tgt_field.backspace();
                     reset_suggest(form);
-                } else {
-                    form.route_pat_field.backspace();
                 }
                 sync_route_fields(form);
             }
             KeyCode::Delete => {
-                if form.route_edit_target {
-                    form.route_tgt_field.delete();
-                } else {
-                    form.route_pat_field.delete();
-                }
+                route_field(form).delete();
                 sync_route_fields(form);
             }
-            KeyCode::Left => {
-                if form.route_edit_target {
-                    form.route_tgt_field.move_left();
-                } else {
-                    form.route_pat_field.move_left();
-                }
-            }
-            KeyCode::Right => {
-                if form.route_edit_target {
-                    form.route_tgt_field.move_right();
-                } else {
-                    form.route_pat_field.move_right();
-                }
-            }
-            KeyCode::Home | KeyCode::Char('a') if ctrl => {
-                if form.route_edit_target {
-                    form.route_tgt_field.home();
-                } else {
-                    form.route_pat_field.home();
-                }
-            }
-            KeyCode::End | KeyCode::Char('e') if ctrl => {
-                if form.route_edit_target {
-                    form.route_tgt_field.end();
-                } else {
-                    form.route_pat_field.end();
-                }
-            }
+            KeyCode::Left => route_field(form).move_left(),
+            KeyCode::Right => route_field(form).move_right(),
+            KeyCode::Home | KeyCode::Char('a') if ctrl => route_field(form).home(),
+            KeyCode::End | KeyCode::Char('e') if ctrl => route_field(form).end(),
             KeyCode::Char('w') if ctrl => {
+                route_field(form).delete_word_back();
                 if form.route_edit_target {
-                    form.route_tgt_field.delete_word_back();
                     reset_suggest(form);
-                } else {
-                    form.route_pat_field.delete_word_back();
                 }
                 sync_route_fields(form);
             }
@@ -583,11 +558,9 @@ fn handle_editing_key(
                     sync_proxy_config(app, server);
                 }
             }
-            // Enter on a regular field: enter Insert for multiline, no-op otherwise.
-            KeyCode::Enter => {
-                if form.fields[form.focused].is_multiline {
-                    form.vim_mode = VimMode::Insert;
-                }
+            // Enter on a text field → Insert mode (toggle fields don't have a text cursor).
+            KeyCode::Enter if !form.fields[form.focused].is_toggle => {
+                form.vim_mode = VimMode::Insert;
             }
             // Cursor jumps.
             KeyCode::Home | KeyCode::Char('0') => form.fields[form.focused].home(),

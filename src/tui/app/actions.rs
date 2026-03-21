@@ -1,7 +1,7 @@
 use crate::config::{self, ApiFormat};
 use crate::error::Result;
 
-use super::{App, ConfirmAction, MessageKind, Mode, ProviderForm};
+use super::{App, ConfirmAction, MessageKind, Mode, ProviderForm, NOTES_FIELD_IDX};
 
 impl App {
     pub fn start_add(&mut self) {
@@ -38,9 +38,10 @@ impl App {
             .to_string();
         let api_key = form.fields[2].value.trim().to_string();
         let format_str = form.fields[3].value.trim().to_string();
-        let notes = form.fields[4].value.trim_matches('\n').to_string();
-        // Keep a copy to sync back into the live form field after saving.
-        let notes_trimmed = notes.clone();
+        let notes = form.fields[NOTES_FIELD_IDX]
+            .value
+            .trim_matches('\n')
+            .to_string();
         let is_new = form.is_new;
         let original_name = form.original_name.clone();
         // Look up the known model list for this provider (used for route validation).
@@ -97,7 +98,7 @@ impl App {
             api_key,
             api_format,
             model_map,
-            notes,
+            notes: notes.clone(),
             routes,
         };
 
@@ -164,9 +165,9 @@ impl App {
                 f.is_new = false;
                 f.original_name = Some(new_name);
                 f.error = None;
-                // Reflect trimmed notes back so the form field matches what was saved.
-                f.fields[4].cursor = f.fields[4].cursor.min(notes_trimmed.len());
-                f.fields[4].value = notes_trimmed;
+                f.fields[NOTES_FIELD_IDX].cursor =
+                    f.fields[NOTES_FIELD_IDX].cursor.min(notes.len());
+                f.fields[NOTES_FIELD_IDX].value = notes;
             }
         }
 
