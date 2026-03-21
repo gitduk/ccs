@@ -103,7 +103,8 @@ pub async fn test_connectivity(
     };
 
     // Fetch model list (best-effort, does not affect status or latency).
-    let (model_count, model_names) = fetch_models(client, base, &auth_header).await;
+    let (model_count, model_names) =
+        fetch_models(client, base, &auth_header, &provider.api_format).await;
 
     TestResult {
         status: msg_status,
@@ -118,15 +119,16 @@ async fn fetch_models(
     client: &reqwest::Client,
     base: &str,
     auth_header: &(String, String),
+    api_format: &ApiFormat,
 ) -> (Option<usize>, Option<Vec<String>>) {
     let mut req = client
         .get(format!("{base}/v1/models"))
         .header(&auth_header.0, &auth_header.1)
         .header("anthropic-version", "2023-06-01")
         .timeout(Duration::from_secs(TEST_TIMEOUT_SECS));
-    // /v1/models is an OpenAI-compatible endpoint; some proxies require Bearer auth
-    // even when the messages endpoint accepts x-api-key. Send both to cover both cases.
-    if auth_header.0 == "x-api-key" {
+    // Some proxies require Bearer auth for /v1/models even when the messages
+    // endpoint accepts x-api-key. Send both headers to cover both cases.
+    if *api_format == ApiFormat::Anthropic {
         req = req.header("authorization", format!("Bearer {}", auth_header.1));
     }
     let Ok(r) = req.send().await else {

@@ -750,9 +750,27 @@ fn handle_editing_key(
                 form.vim_mode = VimMode::Insert;
                 form.fields[form.focused].end();
             }
-            // Navigation.
-            KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => form.focus_next(),
-            KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => form.focus_prev(),
+            // Navigation: j/k move within multiline fields, otherwise switch field.
+            KeyCode::Char('j') | KeyCode::Down => {
+                if form.fields[form.focused].is_multiline {
+                    if !form.fields[form.focused].move_down() {
+                        form.focus_next();
+                    }
+                } else {
+                    form.focus_next();
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if form.fields[form.focused].is_multiline {
+                    if !form.fields[form.focused].move_up() {
+                        form.focus_prev();
+                    }
+                } else {
+                    form.focus_prev();
+                }
+            }
+            KeyCode::Tab => form.focus_next(),
+            KeyCode::BackTab => form.focus_prev(),
             // h / l: move cursor in text fields, or toggle toggle-fields.
             KeyCode::Char('h') | KeyCode::Left => {
                 let f = &mut form.fields[form.focused];
@@ -791,6 +809,16 @@ fn handle_editing_key(
             // Cursor jumps.
             KeyCode::Home | KeyCode::Char('0') => form.fields[form.focused].home(),
             KeyCode::End | KeyCode::Char('$') => form.fields[form.focused].end(),
+            // dd → delete current line in multiline fields.
+            KeyCode::Char('d') if form.fields[form.focused].is_multiline => {
+                if prev == Some('d') {
+                    form.fields[form.focused].delete_current_line();
+                    app.save_form_in_place()?;
+                    sync_proxy_config(app, server);
+                } else {
+                    form.pending_key = Some(('d', std::time::Instant::now()));
+                }
+            }
             _ => {}
         }
         return Ok(());

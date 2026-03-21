@@ -231,20 +231,15 @@ fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
             .values()
             .map(|p| api_key_display_len(&p.api_key)),
     );
-    let has_notes = app
+    let notes_widths: Vec<usize> = app
         .config
         .providers
         .values()
-        .any(|p| !p.notes.trim().is_empty());
+        .map(|p| p.notes.lines().next().unwrap_or("").width())
+        .collect();
+    let has_notes = notes_widths.iter().any(|&w| w > 0);
     let notes_col = if has_notes {
-        col_width(
-            "Notes",
-            app.config
-                .providers
-                .values()
-                .map(|p| p.notes.lines().next().unwrap_or("").width()),
-        )
-        .min(30)
+        col_width("Notes", notes_widths.into_iter()).min(30)
     } else {
         0
     };
@@ -719,8 +714,11 @@ fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
         .into_iter()
         .filter(|(m, _)| !used_models.contains(m))
         .collect();
-    inactive_models
-        .sort_unstable_by(|(a, _), (b, _)| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
+    inactive_models.sort_unstable_by(|(a, _), (b, _)| {
+        a.bytes()
+            .map(|b| b.to_ascii_lowercase())
+            .cmp(b.bytes().map(|b| b.to_ascii_lowercase()))
+    });
 
     if model_entries.is_empty() && inactive_models.is_empty() {
         lines.push(Line::from(Span::styled("  No data yet", muted)));
@@ -1225,13 +1223,23 @@ fn draw_form(f: &mut Frame, app: &App) {
                 f.render_widget(Paragraph::new(all_lines), chunks[ci]);
                 continue;
             } else if is_focused {
-                // Normal mode, focused: show all lines without cursor highlight.
+                // Normal mode, focused: highlight the cursor line.
+                let cursor_pos = field.cursor.min(field.value.len());
+                let before_cursor = &field.value[..cursor_pos];
+                let cursor_row = before_cursor.chars().filter(|&c| c == '\n').count();
                 let label_line =
                     Line::from(Span::styled(format!("{:<10}", field.label), label_style));
                 let lines: Vec<Line> = field
                     .value
                     .split('\n')
-                    .map(|l| Line::from(Span::raw(l.to_string())))
+                    .enumerate()
+                    .map(|(row, l)| {
+                        if row == cursor_row {
+                            Line::from(Span::styled(l.to_string(), Style::default().fg(prov_color)))
+                        } else {
+                            Line::from(Span::raw(l.to_string()))
+                        }
+                    })
                     .collect();
                 let mut all_lines = vec![label_line];
                 all_lines.extend(lines);

@@ -163,6 +163,29 @@ impl FormField {
         self.cursor += 1;
     }
 
+    /// Delete the line the cursor is on. The adjacent newline is also removed.
+    pub fn delete_current_line(&mut self) {
+        if self.value.is_empty() {
+            return;
+        }
+        let before = &self.value[..self.cursor];
+        let line_start = before.rfind('\n').map(|p| p + 1).unwrap_or(0);
+        let line_end = self.value[self.cursor..]
+            .find('\n')
+            .map(|p| self.cursor + p)
+            .unwrap_or(self.value.len());
+        // Include the adjacent newline so we don't leave a blank line behind.
+        let (remove_start, remove_end) = if line_end < self.value.len() {
+            (line_start, line_end + 1) // consume trailing '\n'
+        } else if line_start > 0 {
+            (line_start - 1, line_end) // consume preceding '\n'
+        } else {
+            (line_start, line_end) // only line — clear entirely
+        };
+        self.value.drain(remove_start..remove_end);
+        self.cursor = remove_start.min(self.value.len());
+    }
+
     /// Move cursor up one line within a multiline field.
     /// Returns false if already on first line (caller should focus prev field).
     pub fn move_up(&mut self) -> bool {
