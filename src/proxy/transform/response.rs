@@ -71,7 +71,7 @@ pub fn openai_to_anthropic_response(resp: &Value) -> Result<Value> {
         "stop" => "end_turn",
         "length" => "max_tokens",
         "tool_calls" => "tool_use",
-        "content_filter" => "end_turn",
+        "content_filter" => "content_filter",
         other => other,
     };
 

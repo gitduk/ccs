@@ -70,15 +70,14 @@ pub async fn test_connectivity(
     };
 
     let t0 = Instant::now();
-    let response = client
+    let mut req = client
         .post(&msg_url)
         .header(&auth_header.0, &auth_header.1)
-        .header("content-type", "application/json")
-        .header("anthropic-version", "2023-06-01")
-        .json(&body)
-        .timeout(Duration::from_secs(TEST_TIMEOUT_SECS))
-        .send()
-        .await;
+        .header("content-type", "application/json");
+    if provider.api_format == ApiFormat::Anthropic {
+        req = req.header("anthropic-version", "2023-06-01");
+    }
+    let response = req.json(&body).timeout(Duration::from_secs(TEST_TIMEOUT_SECS)).send().await;
     let latency_ms = t0.elapsed().as_millis() as u64;
 
     let status = match response {
@@ -124,11 +123,11 @@ async fn fetch_models(
     let mut req = client
         .get(format!("{base}/v1/models"))
         .header(&auth_header.0, &auth_header.1)
-        .header("anthropic-version", "2023-06-01")
         .timeout(Duration::from_secs(TEST_TIMEOUT_SECS));
-    // Some proxies require Bearer auth for /v1/models even when the messages
-    // endpoint accepts x-api-key. Send both headers to cover both cases.
     if *api_format == ApiFormat::Anthropic {
+        req = req.header("anthropic-version", "2023-06-01");
+        // Some proxies require Bearer auth for /v1/models even when the messages
+        // endpoint accepts x-api-key. Send both headers to cover both cases.
         req = req.header("authorization", format!("Bearer {}", auth_header.1));
     }
     let Ok(r) = req.send().await else {

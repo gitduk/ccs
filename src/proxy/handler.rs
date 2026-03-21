@@ -32,35 +32,11 @@ pub async fn health_check(State(state): State<SharedState>) -> impl IntoResponse
     }))
 }
 
-/// Reload configuration from disk.
-pub async fn reload_config(State(state): State<SharedState>) -> impl IntoResponse {
-    // Read from disk before acquiring the write lock to minimise lock hold time.
-    match crate::config::load_config() {
-        Ok(fresh_config) => {
-            *state.config.write().await = fresh_config;
-            (
-                StatusCode::OK,
-                axum::Json(serde_json::json!({
-                    "status": "ok",
-                    "message": "Configuration reloaded"
-                })),
-            )
-        }
-        Err(e) => {
-            tracing::error!("Failed to reload config: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({
-                    "status": "error",
-                    "message": "Failed to reload configuration"
-                })),
-            )
-        }
-    }
-}
-
 /// Handler for GET /v1/models — proxies to current provider and normalises to Anthropic format.
-pub async fn handle_models(State(state): State<SharedState>) -> Result<Response, AppError> {
+pub async fn handle_models(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
     let (provider, api_key) = {
         let config = state.config.read().await;
         let (_, p) = config.current_provider()?;
@@ -76,13 +52,14 @@ pub async fn handle_models(State(state): State<SharedState>) -> Result<Response,
         ApiFormat::OpenAI => ("authorization".to_string(), format!("Bearer {api_key}")),
     };
 
-    let response = state
-        .http_client
-        .get(&url)
-        .header(&auth_key, &auth_val)
-        .header("anthropic-version", "2023-06-01")
-        .send()
-        .await?;
+    let mut req = state.http_client.get(&url).header(&auth_key, &auth_val);
+    if provider.api_format == ApiFormat::Anthropic {
+        req = req.header("anthropic-version", "2023-06-01");
+        if let Some(beta) = headers.get("anthropic-beta") {
+            req = req.header("anthropic-beta", beta);
+        }
+    }
+    let response = req.send().await?;
 
     let status = response.status();
     if !status.is_success() {
@@ -357,26 +334,18 @@ async fn handle_buffered_response(
         let output = json["usage"]["output_tokens"].as_u64().unwrap_or(0);
         if input > 0 || output > 0 {
             let model = json["model"].as_str().map(|s| s.to_string());
-            let (requests, failures) = {
-                if let Ok(mut m) = metrics.lock() {
-                    m.record_tokens(input, output, &provider_name);
-                    if let Some(ref model_name) = model {
-                        m.record_model_tokens(input, output, model_name);
-                    }
-                    let s = m.by_provider.get(&provider_name);
-                    (s.map_or(0, |s| s.requests), s.map_or(0, |s| s.failures))
-                } else {
-                    (0, 0)
+            if let Ok(mut m) = metrics.lock() {
+                m.record_tokens(input, output, &provider_name);
+                if let Some(ref model_name) = model {
+                    m.record_model_tokens(input, output, model_name);
                 }
-            };
+            }
             persist_stats(
                 &db,
                 &ProviderKey {
                     id: provider_id,
                     name: provider_name,
                 },
-                requests,
-                failures,
                 model.as_deref(),
                 input,
                 output,
@@ -392,12 +361,10 @@ async fn handle_buffered_response(
         .into_response())
 }
 
-/// Fire-and-forget: persist provider and model stats to DB outside hot path.
+/// Fire-and-forget: persist provider and model token deltas to DB outside hot path.
 fn persist_stats(
     db: &crate::db::SharedDb,
     pkey: &ProviderKey,
-    requests: u64,
-    failures: u64,
     model_name: Option<&str>,
     input_delta: u64,
     output_delta: u64,
@@ -413,8 +380,6 @@ fn persist_stats(
                 &pkey.name,
                 input_delta,
                 output_delta,
-                requests,
-                failures,
             );
             if let Some(model) = mid {
                 let _ = crate::db::upsert_model(
@@ -517,20 +482,14 @@ fn track_tokens_in_stream(
 
         // Stream ended: persist the token counts we collected.
         if input_tokens > 0 || output_tokens > 0 {
-            let (requests, failures) = {
-                if let Ok(mut m) = metrics.lock() {
-                    m.record_tokens(input_tokens, output_tokens, &provider_name);
-                    if !model.is_empty() {
-                        m.record_model_tokens(input_tokens, output_tokens, &model);
-                    }
-                    let s = m.by_provider.get(&provider_name);
-                    (s.map_or(0, |s| s.requests), s.map_or(0, |s| s.failures))
-                } else {
-                    (0, 0)
+            if let Ok(mut m) = metrics.lock() {
+                m.record_tokens(input_tokens, output_tokens, &provider_name);
+                if !model.is_empty() {
+                    m.record_model_tokens(input_tokens, output_tokens, &model);
                 }
-            };
+            }
             let model_opt = if model.is_empty() { None } else { Some(model.as_str()) };
-            persist_stats(&db, &ProviderKey { id: provider_id, name: provider_name }, requests, failures, model_opt, input_tokens, output_tokens);
+            persist_stats(&db, &ProviderKey { id: provider_id, name: provider_name }, model_opt, input_tokens, output_tokens);
         }
     }
 }

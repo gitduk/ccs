@@ -57,6 +57,7 @@ impl RouteRule {
 }
 
 /// Glob pattern matching where `*` matches any sequence of characters.
+/// `**` is treated the same as `*` — there is no directory-separator semantics.
 ///
 /// Examples:
 /// - `"claude-sonnet*"` matches `"claude-sonnet-4-20250514"`
@@ -105,7 +106,7 @@ pub struct AppConfig {
 }
 
 fn default_listen() -> String {
-    "0.0.0.0:7896".to_string()
+    "127.0.0.1:7896".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,6 +176,8 @@ impl AppConfig {
     /// Find the first provider (in insertion order) that has an enabled route
     /// rule matching `model`. Returns `(name, provider, target)` or `None`.
     /// `target` is the model name to send upstream (empty = forward unchanged).
+    /// NOTE: matching is done against the raw request model before any model_map
+    /// translation; model_map is applied later in the forwarding layer.
     pub fn resolve_route<'a>(&'a self, model: &str) -> Option<(&'a str, &'a Provider, &'a str)> {
         if model.is_empty() {
             return None;
@@ -233,19 +236,21 @@ pub fn load_config() -> Result<AppConfig> {
     Ok(config)
 }
 
-/// Save config to file, creating parent directory if needed.
+/// Save config to file atomically (write to temp file, then rename).
 pub fn save_config(config: &AppConfig) -> Result<()> {
     let path = config_path()?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let content = serde_json::to_string_pretty(config)?;
-    std::fs::write(&path, &content)?;
+    let tmp_path = path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, &content)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
     }
+    std::fs::rename(&tmp_path, &path)?;
     Ok(())
 }
 

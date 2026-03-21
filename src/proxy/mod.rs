@@ -32,7 +32,6 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/v1/messages", post(handler::handle_messages))
         .route("/v1/models", get(handler::handle_models))
         .route("/health", get(handler::health_check))
-        .route("/reload", post(handler::reload_config))
         .layer(
             CorsLayer::new()
                 .allow_origin(AllowOrigin::list([

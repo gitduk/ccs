@@ -14,6 +14,8 @@ pub fn openai_stream_to_anthropic(
         let mut byte_stream = response.bytes_stream();
         use futures::StreamExt;
 
+        const BUFFER_MAX: usize = 1024 * 1024; // 1 MB safety cap
+
         while let Some(chunk_result) = byte_stream.next().await {
             let chunk = match chunk_result {
                 Ok(c) => c,
@@ -29,6 +31,11 @@ pub fn openai_stream_to_anthropic(
                 }
             };
 
+            if buffer.len() + chunk.len() > BUFFER_MAX {
+                tracing::warn!("SSE buffer exceeded 1 MB, dropping chunk");
+                buffer.clear();
+                continue;
+            }
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
             // Process complete SSE lines
@@ -104,6 +111,8 @@ struct ToolCallState {
     #[allow(dead_code)]
     name: String,
     arguments_buffer: String,
+    /// content_index assigned to this tool call's content block.
+    content_index: usize,
 }
 
 impl StreamState {
@@ -279,6 +288,7 @@ impl StreamState {
                                 id: id.clone(),
                                 name: name.to_string(),
                                 arguments_buffer: String::new(),
+                                content_index: self.content_index,
                             },
                         );
 
@@ -300,14 +310,17 @@ impl StreamState {
                     // Accumulate arguments
                     if let Some(args) = func.get("arguments").and_then(|a| a.as_str()) {
                         if !args.is_empty() {
-                            if let Some(tc_state) = self.tool_calls.get_mut(&tc_index) {
+                            let tc_ci = if let Some(tc_state) = self.tool_calls.get_mut(&tc_index) {
                                 tc_state.arguments_buffer.push_str(args);
-                            }
+                                tc_state.content_index
+                            } else {
+                                self.content_index
+                            };
                             events.push(self.format_event(
                                 "content_block_delta",
                                 &json!({
                                     "type": "content_block_delta",
-                                    "index": self.content_index,
+                                    "index": tc_ci,
                                     "delta": {
                                         "type": "input_json_delta",
                                         "partial_json": args,
