@@ -178,7 +178,14 @@ pub(super) fn handle_routes_key(
                 }
                 sync_route_fields(form);
             }
-            KeyCode::Backspace | KeyCode::Char('h') if ctrl => {
+            KeyCode::Backspace => {
+                route_field(form).backspace();
+                if form.route_edit_target {
+                    reset_suggest(form);
+                }
+                sync_route_fields(form);
+            }
+            KeyCode::Char('h') if ctrl => {
                 route_field(form).backspace();
                 if form.route_edit_target {
                     reset_suggest(form);
