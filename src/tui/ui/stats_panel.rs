@@ -63,7 +63,7 @@ pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
     let id_col_width = app
         .provider_names
         .iter()
-        .map(|s| s.len())
+        .map(|s| s.width())
         .max()
         .unwrap_or(8)
         .max(8);
@@ -86,7 +86,11 @@ pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
         let color = t::provider_color(name);
         Line::from(vec![
             Span::styled(
-                format!("{:<width$}", name, width = id_col_width),
+                format!(
+                    "{}{}",
+                    name,
+                    " ".repeat(id_col_width.saturating_sub(name.width()))
+                ),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
             Span::styled("  In ", muted),
