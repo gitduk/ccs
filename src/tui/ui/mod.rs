@@ -9,7 +9,7 @@ mod stats_panel;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::Frame;
 
-use super::app::{App, Mode};
+use super::state::{App, Mode};
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()

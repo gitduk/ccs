@@ -36,7 +36,7 @@ impl App {
             )
         };
 
-        let bg_proxy_pid = super::proxy::load_bg_proxy_pid();
+        let bg_proxy_pid = super::bg_proxy::load_bg_proxy_pid();
         let (test_tx, test_rx) = mpsc::channel();
         Ok(Self {
             config,

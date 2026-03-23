@@ -5,7 +5,7 @@ mod routes;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
-use super::app::Mode;
+use super::state::Mode;
 use super::App;
 use super::ServerHandle;
 

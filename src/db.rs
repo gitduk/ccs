@@ -164,7 +164,7 @@ fn do_migrate(conn: &Connection, name_to_id: &HashMap<String, String>) -> Result
 }
 
 pub fn load_metrics(conn: &Connection) -> TokenMetrics {
-    let mut metrics = TokenMetrics::new();
+    let mut metrics = TokenMetrics::default();
 
     if let Ok(mut stmt) =
         conn.prepare("SELECT provider_name, input, output, requests, failures FROM provider_stats")
@@ -267,17 +267,6 @@ pub fn upsert_model(
     Ok(())
 }
 
-pub fn delete_provider(conn: &Connection, provider_id: &str) -> Result<()> {
-    conn.execute(
-        "DELETE FROM provider_stats WHERE provider_id = ?1",
-        [provider_id],
-    )?;
-    conn.execute(
-        "DELETE FROM model_stats    WHERE provider_id = ?1",
-        [provider_id],
-    )?;
-    Ok(())
-}
 
 /// Rename a provider: updates provider_name in all rows with the given provider_id.
 pub fn rename_provider(conn: &Connection, provider_id: &str, new_name: &str) -> Result<()> {
@@ -328,3 +317,17 @@ pub fn upsert_provider_models(
 pub fn clear_all(conn: &Connection) -> Result<()> {
     conn.execute_batch("BEGIN; DELETE FROM provider_stats; DELETE FROM model_stats; COMMIT;")
 }
+
+pub fn clear_provider(conn: &Connection, provider_id: &str) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM provider_stats WHERE provider_id = ?1",
+        [provider_id],
+    )?;
+    tx.execute(
+        "DELETE FROM model_stats WHERE provider_id = ?1",
+        [provider_id],
+    )?;
+    tx.commit()
+}
+

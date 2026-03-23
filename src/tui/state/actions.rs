@@ -125,12 +125,6 @@ impl App {
                 let _ = crate::db::rename_provider(&conn, &provider_id, &new_name);
             }
 
-            if let Ok(mut m) = self.metrics.lock() {
-                if let Some(stats) = m.by_provider.remove(old_name) {
-                    m.by_provider.insert(new_name.clone(), stats);
-                }
-            }
-
             if let Some(models) = self.provider_models.remove(old_name) {
                 self.provider_models.insert(new_name.clone(), models);
             }
@@ -182,23 +176,46 @@ impl App {
     }
 
     pub fn clear_metrics(&mut self) {
-        use crate::proxy::metrics::TokenMetrics;
-        let Ok(conn) = self.db.lock() else { return };
-        let Ok(mut m) = self.metrics.lock() else {
+        if let Ok(conn) = self.db.lock() {
+            let _ = crate::db::clear_all(&conn);
+        }
+        if let Ok(mut m) = self.metrics.lock() {
+            m.last_error.clear();
+        }
+        // Reload immediately so the TUI reflects the cleared state right away
+        // instead of waiting up to ~1s for the next periodic reload.
+        crate::tui::event_loop::reload_metrics_from_db(self);
+        self.set_message("Usage data cleared", MessageKind::Success);
+    }
+
+    pub fn clear_current_provider_metrics(&mut self) {
+        let Some(name) = self.selected_name().map(|s| s.to_string()) else {
             return;
         };
-        let _ = crate::db::clear_all(&conn);
-        *m = TokenMetrics::new();
-        drop(conn);
-        drop(m);
-        self.provider_models.clear();
-        self.set_message("Usage data cleared", MessageKind::Success);
+        let Some(provider_id) = self.config.providers.get(&name).map(|p| p.id.clone()) else {
+            return;
+        };
+
+        if let Ok(conn) = self.db.lock() {
+            let _ = crate::db::clear_provider(&conn, &provider_id);
+        }
+        if let Ok(mut m) = self.metrics.lock() {
+            m.clear_error(&name);
+        }
+        crate::tui::event_loop::reload_metrics_from_db(self);
+        self.set_message(
+            format!("Usage data cleared for '{name}'"),
+            MessageKind::Success,
+        );
     }
 
     pub fn confirm_action_execute(&mut self) -> Result<()> {
         match self.confirm_action.take() {
             Some(ConfirmAction::Clear) => {
                 self.clear_metrics();
+            }
+            Some(ConfirmAction::ClearCurrent) => {
+                self.clear_current_provider_metrics();
             }
             Some(ConfirmAction::Quit) => {
                 self.should_quit = true;
@@ -216,10 +233,10 @@ impl App {
         let removed = self.config.providers.shift_remove(name);
         if let Ok(conn) = self.db.lock() {
             let id = removed.as_ref().map(|p| p.id.as_str()).unwrap_or(name);
-            let _ = crate::db::delete_provider(&conn, id);
+            let _ = crate::db::clear_provider(&conn, id);
         }
         if let Ok(mut m) = self.metrics.lock() {
-            m.by_provider.remove(name);
+            m.clear_error(name);
         }
         self.provider_models.remove(name);
         if self.config.current == name {

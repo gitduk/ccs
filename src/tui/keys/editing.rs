@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 
-use crate::tui::app::{Mode, VimMode};
+use crate::tui::state::{Mode, VimMode};
 use crate::tui::server::sync_proxy_config;
 use crate::tui::{App, ServerHandle};
 

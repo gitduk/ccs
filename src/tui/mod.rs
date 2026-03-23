@@ -1,4 +1,4 @@
-mod app;
+mod state;
 pub mod theme;
 mod ui;
 
@@ -22,7 +22,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::error::Result;
-use app::App;
+use state::App;
 
 use event_loop::{
     check_bg_proxy_status, check_server_status, reload_metrics_from_db, start_db_watcher,
@@ -72,20 +72,28 @@ fn run_loop(
     db_change_rx: Option<std::sync::mpsc::Receiver<()>>,
 ) -> Result<()> {
     let mut proc_tick: u8 = 0;
+    let mut metrics_tick: u8 = 0;
     loop {
         check_server_status(app, server);
         if proc_tick == 0 {
             check_bg_proxy_status(app);
         }
         proc_tick = proc_tick.wrapping_add(1) % 8;
-        if app.bg_proxy_pid.is_some() {
-            if let Some(rx) = &db_change_rx {
-                if rx.try_recv().is_ok() {
-                    while rx.try_recv().is_ok() {}
-                    reload_metrics_from_db(app);
-                }
+
+        let mut db_changed = false;
+        if let Some(rx) = db_change_rx.as_ref() {
+            while rx.try_recv().is_ok() {
+                db_changed = true;
             }
         }
+
+        // Reload metrics every 4 frames (~1s) in all modes; also reload immediately
+        // when the DB watcher fires (bg_proxy mode only).
+        if db_changed || metrics_tick == 0 {
+            reload_metrics_from_db(app);
+        }
+        metrics_tick = metrics_tick.wrapping_add(1) % 4;
+
         app.drain_test_results();
         app.tick_message();
 

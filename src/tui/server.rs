@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 
-use super::app::{self, MessageKind};
+use super::state::{MessageKind, ServerStatus};
 use super::App;
 use super::ServerHandle;
 
@@ -20,7 +20,7 @@ pub(super) fn sync_proxy_config(app: &App, server: &Option<ServerHandle>) {
         });
     } else if let Some(pid) = app.bg_proxy_pid {
         match crate::config::save_config(&app.config) {
-            Ok(()) => super::app::send_sighup(pid),
+            Ok(()) => super::state::send_sighup(pid),
             Err(e) => tracing::error!("Failed to save config before SIGHUP: {e}"),
         }
     }
@@ -36,7 +36,7 @@ pub(super) fn start_server_background(app: &mut App, server: &mut Option<ServerH
     let proxy_config = Arc::new(tokio::sync::RwLock::new(app.config.clone()));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    app.server_status = app::ServerStatus::Starting;
+    app.server_status = ServerStatus::Starting;
 
     let metrics = app.metrics.clone();
     let db = app.db.clone();
@@ -55,7 +55,7 @@ pub(super) fn start_server_background(app: &mut App, server: &mut Option<ServerH
         shutdown_tx,
         proxy_config,
     });
-    app.server_status = app::ServerStatus::Running;
+    app.server_status = ServerStatus::Running;
     app.set_message(format!("Proxy started on {listen}"), MessageKind::Success);
 }
 
@@ -69,7 +69,7 @@ pub(super) fn toggle_bg_proxy(app: &mut App, server: &mut Option<ServerHandle>) 
         if let Some(handle) = server.take() {
             let _ = handle.shutdown_tx.send(true);
         }
-        app.server_status = app::ServerStatus::Stopped;
+        app.server_status = ServerStatus::Stopped;
 
         tokio::task::block_in_place(|| {
             let addr = &app.config.listen;

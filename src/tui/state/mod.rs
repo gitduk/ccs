@@ -17,10 +17,10 @@ pub(super) const MESSAGE_TIMEOUT_SECS: u64 = 3;
 mod actions;
 mod filter;
 mod navigation;
-mod proxy;
+mod bg_proxy;
 
+pub use bg_proxy::{is_process_alive, send_sighup};
 pub use filter::filter_suggestions;
-pub use proxy::{is_process_alive, send_sighup};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Mode {
@@ -58,6 +58,7 @@ pub enum ServerStatus {
 pub enum ConfirmAction {
     Delete(String),
     Clear,
+    ClearCurrent,
     Quit,
 }
 

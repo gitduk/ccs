@@ -5,7 +5,7 @@ use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
-use super::super::app::{App, VimMode};
+use super::super::state::{App, VimMode};
 use super::super::theme::{self as t};
 use super::format::mask_api_key_str;
 use super::layout::centered_fixed;

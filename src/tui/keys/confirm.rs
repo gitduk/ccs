@@ -1,6 +1,6 @@
 use crossterm::event::KeyCode;
 
-use crate::tui::app::Mode;
+use crate::tui::state::Mode;
 use crate::tui::server::sync_proxy_config;
 use crate::tui::{App, ServerHandle};
 

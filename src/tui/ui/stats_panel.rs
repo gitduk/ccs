@@ -5,7 +5,7 @@ use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
-use super::super::app::App;
+use super::super::state::App;
 use super::super::theme::{self as t};
 use super::format::{format_tokens, max_content_width};
 

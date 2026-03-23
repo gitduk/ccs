@@ -58,18 +58,11 @@ pub async fn start_server(config: AppConfig) -> crate::error::Result<()> {
     let listen = config.listen.clone();
     let db = crate::db::open_with_fallback(&config.resolve_db_path());
     crate::db::migrate_schema(&db, &config.name_to_id_map());
-    // Load persisted metrics so the in-memory counters continue from wherever
-    // the previous session left off.  Without this, the first upsert would
-    // overwrite the DB with counts starting from zero.
-    let initial_metrics = {
-        let conn = db.lock().unwrap();
-        crate::db::load_metrics(&conn)
-    };
     let shared_config = Arc::new(RwLock::new(config));
     let state = Arc::new(AppState {
         config: shared_config.clone(),
         http_client: build_http_client(),
-        metrics: Arc::new(std::sync::Mutex::new(initial_metrics)),
+        metrics: Arc::new(std::sync::Mutex::new(metrics::TokenMetrics::default())),
         db,
     });
     let app = build_router(state);

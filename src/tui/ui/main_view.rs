@@ -5,7 +5,7 @@ use ratatui::widgets::{Block, Borders, Cell, Padding, Paragraph, Row, Table};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
-use super::super::app::{App, MessageKind, Mode};
+use super::super::state::{App, MessageKind, Mode};
 use super::super::theme::{self as t};
 use super::format::fmt_latency;
 use super::format::truncate_error;
@@ -202,10 +202,10 @@ pub(super) fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
     let max_name_len = app
         .provider_names
         .iter()
-        .map(|name| name.len())
+        .map(|name| name.width())
         .max()
         .unwrap_or(0)
-        .max("Name".len());
+        .max("Name".width());
     let name_col = (max_name_len + 2 + 4) as u16;
 
     let mut header_cells = vec![
@@ -259,8 +259,12 @@ pub(super) fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 Style::default().fg(t::provider_color(name))
             };
-            // Pad name to max_name_len so the cursor indicator stays in a fixed column.
-            let padded_name = format!("{:<width$}", name.as_str(), width = max_name_len);
+            // Pad name to max_name_len display columns so the cursor indicator stays
+            // in a fixed column. format! pads by char count, not display width, so we
+            // compute the visual width and append spaces manually.
+            let name_display_width = name.width();
+            let padding = max_name_len.saturating_sub(name_display_width);
+            let padded_name = format!("{}{}", name.as_str(), " ".repeat(padding));
             let name_cell = Cell::from(Line::from(vec![
                 Span::styled(padded_name, name_style),
                 Span::styled(indicator, indicator_style),
@@ -419,6 +423,32 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
             ),
             Span::styled(" to test connectivity", Style::default().fg(t::MUTED)),
         ]));
+    }
+
+    // Last request error for the selected provider (cleared on next success).
+    if let Ok(m) = app.metrics.lock() {
+        if let Some(err) = m.last_error.get(name.as_str()) {
+            let status_str = if err.status == 0 {
+                "Network error".to_string()
+            } else {
+                format!("HTTP {}", err.status)
+            };
+            let model_part = if err.model.is_empty() {
+                String::new()
+            } else {
+                format!("{}  ", err.model)
+            };
+            lines.push(Line::from(vec![
+                Span::styled("Error ", Style::default().fg(t::MUTED)),
+                Span::styled(
+                    status_str,
+                    Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(model_part, Style::default().fg(t::WARNING)),
+                Span::styled(truncate_error(&err.message), Style::default().fg(t::ERROR)),
+            ]));
+        }
     }
 
     // Enabled routes for the selected provider.

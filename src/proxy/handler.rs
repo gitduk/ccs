@@ -8,6 +8,7 @@ use futures::StreamExt;
 use super::SharedState;
 use crate::config::ApiFormat;
 use crate::error::AppError;
+use crate::proxy::{forwarder, transform};
 
 /// Bundles a provider's stable UUID and display name for passing through the request pipeline.
 #[derive(Clone)]
@@ -24,7 +25,6 @@ struct StatsDelta {
     requests: u64,
     failures: u64,
 }
-use crate::proxy::{forwarder, metrics::SharedMetrics, transform};
 
 /// Health check endpoint.
 pub async fn health_check(State(state): State<SharedState>) -> impl IntoResponse {
@@ -146,6 +146,29 @@ async fn try_providers(
     let max_failures = round_size * 3;
     let mut consecutive_failures = 0usize;
     let mut last_status = None;
+    let req_model_hint = req_json
+        .and_then(|v| v.get("model").and_then(|m| m.as_str()))
+        .unwrap_or("")
+        .to_string();
+
+    let record_failure = |state: &SharedState, pkey: &ProviderKey| {
+        persist_stats(
+            &state.db,
+            pkey,
+            None,
+            StatsDelta {
+                requests: 1,
+                failures: 1,
+                ..Default::default()
+            },
+        );
+    };
+
+    let record_error_metric = |state: &SharedState, name: &str, status: u16, msg: &str| {
+        if let Ok(mut m) = state.metrics.lock() {
+            m.record_error(name, status, &req_model_hint, msg);
+        }
+    };
 
     for (provider_name, provider) in pool.iter().cycle() {
         let pkey = ProviderKey {
@@ -153,31 +176,12 @@ async fn try_providers(
             name: provider_name.clone(),
         };
 
-        // Helper: record failure in-memory + persist request+failure to DB in one call.
-        let record_failure = |state: &SharedState, pkey: &ProviderKey, also_request: bool| {
-            if let Ok(mut m) = state.metrics.lock() {
-                if also_request {
-                    m.record_request(&pkey.name);
-                }
-                m.record_failure(&pkey.name);
-            }
-            persist_stats(
-                &state.db,
-                pkey,
-                None,
-                StatsDelta {
-                    requests: u64::from(also_request),
-                    failures: 1,
-                    ..Default::default()
-                },
-            );
-        };
-
         let api_key = match provider.resolve_api_key() {
             Ok(k) => k,
             Err(e) => {
                 tracing::warn!("Skipping provider {}: {e}", provider.base_url);
-                record_failure(state, &pkey, true);
+                record_failure(state, &pkey);
+                record_error_metric(state, provider_name, 0, &e.to_string());
                 consecutive_failures += 1;
                 if !do_cycle || consecutive_failures >= max_failures {
                     break;
@@ -185,13 +189,6 @@ async fn try_providers(
                 continue;
             }
         };
-
-        // Record request count in-memory for immediate TUI feedback.
-        // The DB write is deferred: batched into record_and_persist on success,
-        // or written via record_failure on error.
-        if let Ok(mut m) = state.metrics.lock() {
-            m.record_request(provider_name);
-        }
 
         let is_openai = provider.api_format == ApiFormat::OpenAI;
         let upstream_body = if is_openai {
@@ -218,7 +215,8 @@ async fn try_providers(
                     "Provider {} network error: {e}, trying next",
                     provider.base_url
                 );
-                record_failure(state, &pkey, false);
+                record_failure(state, &pkey);
+                record_error_metric(state, provider_name, 0, &e.to_string());
                 consecutive_failures += 1;
                 if !do_cycle || consecutive_failures >= max_failures {
                     break;
@@ -228,14 +226,18 @@ async fn try_providers(
         };
 
         let status = response.status();
+        let status_u16 = status.as_u16();
 
         // 5xx or 429: try next provider
-        if status.as_u16() >= 500 || status.as_u16() == 429 {
+        if status_u16 >= 500 || status_u16 == 429 {
+            let error_body = response.bytes().await.unwrap_or_default();
+            let preview = extract_error_message(&error_body);
             tracing::warn!(
                 "Provider {} returned {status}, trying next",
                 provider.base_url
             );
-            record_failure(state, &pkey, false);
+            record_failure(state, &pkey);
+            record_error_metric(state, provider_name, status_u16, &preview);
             last_status = Some(status);
             consecutive_failures += 1;
             if !do_cycle || consecutive_failures >= max_failures {
@@ -245,16 +247,18 @@ async fn try_providers(
         }
 
         // 401/403: auth error — try next provider in fallback mode
-        if status.as_u16() == 401 || status.as_u16() == 403 {
+        if status_u16 == 401 || status_u16 == 403 {
+            let error_body = response.bytes().await.unwrap_or_default();
+            let preview = extract_error_message(&error_body);
             tracing::warn!(
                 "Provider {} auth error {status}, trying next",
                 provider.base_url
             );
-            record_failure(state, &pkey, false);
+            record_failure(state, &pkey);
+            record_error_metric(state, provider_name, status_u16, &preview);
             last_status = Some(status);
             consecutive_failures += 1;
             if !do_cycle || consecutive_failures >= max_failures {
-                let error_body = response.bytes().await.unwrap_or_default();
                 return Ok(
                     (status, [("content-type", "application/json")], error_body).into_response()
                 );
@@ -264,30 +268,21 @@ async fn try_providers(
 
         // Other 4xx: client error (bad request format etc.), return immediately
         if !status.is_success() {
-            let error_body = response.bytes().await?;
-            let preview = String::from_utf8_lossy(&error_body[..error_body.len().min(200)]);
+            let error_body = response.bytes().await.unwrap_or_default();
+            let preview = extract_error_message(&error_body);
             tracing::warn!("Upstream returned {status}: {preview}");
-            record_failure(state, &pkey, false);
+            record_failure(state, &pkey);
+            record_error_metric(state, provider_name, status_u16, &preview);
             return Ok((status, [("content-type", "application/json")], error_body).into_response());
         }
+
+        if let Ok(mut m) = state.metrics.lock() {
+            m.clear_error(provider_name);
+        }
         return if is_stream {
-            handle_streaming_response(
-                response,
-                is_openai,
-                state.metrics.clone(),
-                state.db.clone(),
-                pkey,
-            )
-            .await
+            handle_streaming_response(response, is_openai, state.db.clone(), pkey).await
         } else {
-            handle_buffered_response(
-                response,
-                is_openai,
-                state.metrics.clone(),
-                state.db.clone(),
-                pkey,
-            )
-            .await
+            handle_buffered_response(response, is_openai, state.db.clone(), pkey).await
         };
     }
 
@@ -350,7 +345,6 @@ pub async fn handle_messages(
 async fn handle_buffered_response(
     response: reqwest::Response,
     is_openai: bool,
-    metrics: SharedMetrics,
     db: crate::db::SharedDb,
     pkey: ProviderKey,
 ) -> Result<Response, AppError> {
@@ -377,7 +371,6 @@ async fn handle_buffered_response(
         if input > 0 || output > 0 {
             let model = json["model"].as_str().map(|s| s.to_string());
             record_and_persist(
-                &metrics,
                 &db,
                 &ProviderKey {
                     id: provider_id,
@@ -398,23 +391,14 @@ async fn handle_buffered_response(
         .into_response())
 }
 
-/// Record token usage in-memory and persist all deltas (tokens + request count) to DB.
+/// Persist token usage and request count to DB. TUI will reload from DB on next tick.
 fn record_and_persist(
-    metrics: &SharedMetrics,
     db: &crate::db::SharedDb,
     pkey: &ProviderKey,
     model: Option<&str>,
     input: u64,
     output: u64,
 ) {
-    if let Ok(mut m) = metrics.lock() {
-        m.record_tokens(input, output, &pkey.name);
-        if let Some(model_name) = model {
-            m.record_model_tokens(input, output, model_name);
-        }
-    }
-    // Batch the request count (already recorded in-memory earlier) with token deltas
-    // so that a successful request produces only one DB write instead of two.
     persist_stats(
         db,
         pkey,
@@ -473,7 +457,6 @@ fn persist_stats(
 async fn handle_streaming_response(
     response: reqwest::Response,
     is_openai: bool,
-    metrics: SharedMetrics,
     db: crate::db::SharedDb,
     pkey: ProviderKey,
 ) -> Result<Response, AppError> {
@@ -489,7 +472,7 @@ async fn handle_streaming_response(
             Box::pin(transform::openai_stream_to_anthropic(response))
         };
 
-    let tracked = track_tokens_in_stream(raw_stream, metrics, db, pkey);
+    let tracked = track_tokens_in_stream(raw_stream, db, pkey);
     let body = Body::from_stream(tracked);
 
     Response::builder()
@@ -504,7 +487,6 @@ async fn handle_streaming_response(
 /// Passes all bytes through unchanged; records metrics when the stream ends.
 fn track_tokens_in_stream(
     mut inner: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>>,
-    metrics: SharedMetrics,
     db: crate::db::SharedDb,
     pkey: ProviderKey,
 ) -> impl futures::Stream<Item = std::io::Result<Bytes>> + Send {
@@ -565,7 +547,6 @@ fn track_tokens_in_stream(
         // Stream ended: persist the token counts we collected.
         if input_tokens > 0 || output_tokens > 0 {
             record_and_persist(
-                &metrics,
                 &db,
                 &ProviderKey { id: provider_id, name: provider_name },
                 model.as_deref(),
@@ -574,4 +555,24 @@ fn track_tokens_in_stream(
             );
         }
     }
+}
+
+/// Extract a short human-readable error summary from an upstream error body.
+/// Tries to parse `error.message` from JSON; falls back to raw text preview.
+fn extract_error_message(body: &[u8]) -> String {
+    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
+        if let Some(msg) = v
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+        {
+            return msg.chars().take(120).collect();
+        }
+        if let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
+            return msg.chars().take(120).collect();
+        }
+    }
+    String::from_utf8_lossy(&body[..body.len().min(120)])
+        .trim()
+        .to_string()
 }

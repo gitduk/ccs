@@ -1,4 +1,4 @@
-use super::app::MessageKind;
+use super::state::MessageKind;
 use super::App;
 
 pub(super) fn test_selected(app: &mut App) {

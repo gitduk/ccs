@@ -1,12 +1,12 @@
 use std::sync::mpsc::Receiver;
 
-use super::app::{self, MessageKind};
+use super::state::{is_process_alive, MessageKind, ServerStatus};
 use super::App;
 use super::ServerHandle;
 
 pub(super) fn check_bg_proxy_status(app: &mut App) {
     if let Some(pid) = app.bg_proxy_pid {
-        if !app::is_process_alive(pid) {
+        if !is_process_alive(pid) {
             app.on_bg_proxy_died();
             app.set_message("Background proxy exited", MessageKind::Info);
         }
@@ -34,9 +34,7 @@ pub(super) fn start_db_watcher(app: &App) -> Option<(Receiver<()>, notify::Recom
                 return;
             }
             let relevant = event.paths.iter().any(|p| {
-                p.file_name()
-                    .map(|n| n.to_string_lossy().starts_with(&*db_name.to_string_lossy()))
-                    .unwrap_or(false)
+                p.file_name().map(|n| n == db_name).unwrap_or(false)
             });
             if relevant {
                 let _ = event_tx.send(());
@@ -52,9 +50,17 @@ pub(super) fn start_db_watcher(app: &App) -> Option<(Receiver<()>, notify::Recom
     Some((event_rx, watcher))
 }
 
-pub(super) fn reload_metrics_from_db(app: &mut App) {
-    if let (Ok(conn), Ok(mut m)) = (app.db.lock(), app.metrics.lock()) {
-        *m = crate::db::load_metrics(&conn);
+pub(crate) fn reload_metrics_from_db(app: &mut App) {
+    if let Ok(conn) = app.db.lock() {
+        let fresh = crate::db::load_metrics(&conn);
+        let fresh_models = crate::db::load_provider_models(&conn);
+        if let Ok(mut m) = app.metrics.lock() {
+            // Preserve last_error — it's ephemeral session state, not stored in DB.
+            let saved_errors = std::mem::take(&mut m.last_error);
+            *m = fresh;
+            m.last_error = saved_errors;
+        }
+        app.provider_models = fresh_models;
     }
 }
 
@@ -67,12 +73,12 @@ pub(super) fn check_server_status(app: &mut App, server: &mut Option<ServerHandl
             });
             match result {
                 Ok(()) => {
-                    app.server_status = app::ServerStatus::Stopped;
+                    app.server_status = ServerStatus::Stopped;
                     app.set_message("Proxy stopped", MessageKind::Info);
                 }
                 Err(e) => {
                     let msg = format!("Proxy crashed: {e}");
-                    app.server_status = app::ServerStatus::Error(msg.clone());
+                    app.server_status = ServerStatus::Error(msg.clone());
                     app.set_message(msg, MessageKind::Error);
                 }
             }

@@ -1,6 +1,6 @@
 use crossterm::event::KeyCode;
 
-use crate::tui::app::{ConfirmAction, Mode};
+use crate::tui::state::{ConfirmAction, Mode};
 use crate::tui::server::sync_proxy_config;
 use crate::tui::{App, ServerHandle};
 
@@ -106,7 +106,8 @@ pub(super) fn handle_normal_key(
         KeyCode::Char('S') => {
             super::super::server::toggle_bg_proxy(app, server);
         }
-        KeyCode::Char('c') => app.confirm(ConfirmAction::Clear),
+        KeyCode::Char('c') => app.confirm(ConfirmAction::ClearCurrent),
+        KeyCode::Char('C') => app.confirm(ConfirmAction::Clear),
         KeyCode::Char('h') | KeyCode::Char('?') => {
             app.mode = Mode::Help;
         }

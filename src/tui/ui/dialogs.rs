@@ -3,7 +3,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::super::app::{App, ConfirmAction};
+use super::super::state::{App, ConfirmAction};
 use super::super::theme::{self as t};
 use super::layout::{centered_fixed, centered_rect};
 
@@ -25,8 +25,9 @@ pub(super) fn draw_help(f: &mut Frame, _app: &App) {
                 ("f", "Toggle fallback mode"),
                 ("r", "Reload config from disk"),
                 ("S", "Toggle background proxy"),
-                ("c", "Clear usage data"),
-                ("q / Esc", "Quit"),
+                ("c", "Clear current provider usage data"),
+                ("C", "Clear all providers' usage data"),
+                ("q / Esc", "Quit (direct exit if bg proxy running)"),
                 ("h / ?", "Show this help"),
             ],
         ),
@@ -133,9 +134,27 @@ pub(super) fn draw_confirm(f: &mut Frame, app: &App) {
         ]),
         Some(ConfirmAction::Clear) => Line::from(vec![
             Span::raw("  "),
-            Span::styled("Clear all usage data", Style::default().fg(t::ERROR)),
+            Span::styled(
+                "Clear all providers' usage data",
+                Style::default().fg(t::ERROR),
+            ),
             Span::raw(" ?"),
         ]),
+        Some(ConfirmAction::ClearCurrent) => {
+            // Borrow app to get the selected provider name for the prompt.
+            let name = app
+                .selected_name()
+                .unwrap_or("current provider")
+                .to_string();
+            Line::from(vec![
+                Span::raw("  Clear usage data for "),
+                Span::styled(
+                    name,
+                    Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" ?"),
+            ])
+        }
         Some(ConfirmAction::Quit) => Line::from(vec![
             Span::raw("  "),
             Span::styled("Quit", Style::default().fg(t::ERROR)),

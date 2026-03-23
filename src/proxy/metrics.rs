@@ -1,6 +1,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+#[derive(Debug, Clone)]
+pub struct LastRequestError {
+    pub status: u16,
+    pub model: String,
+    pub message: String,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ProviderStats {
     pub input: u64,
@@ -19,37 +26,24 @@ pub struct ModelStats {
 pub struct TokenMetrics {
     pub by_provider: HashMap<String, ProviderStats>,
     pub by_model: HashMap<String, ModelStats>,
+    /// Last request error per provider name; cleared on next successful request.
+    pub last_error: HashMap<String, LastRequestError>,
 }
 
 impl TokenMetrics {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn record_error(&mut self, name: &str, status: u16, model: &str, message: &str) {
+        self.last_error.insert(
+            name.to_string(),
+            LastRequestError {
+                status,
+                model: model.to_string(),
+                message: message.to_string(),
+            },
+        );
     }
 
-    pub fn record_failure(&mut self, name: &str) {
-        self.by_provider
-            .entry(name.to_string())
-            .or_default()
-            .failures += 1;
-    }
-
-    pub fn record_request(&mut self, name: &str) {
-        self.by_provider
-            .entry(name.to_string())
-            .or_default()
-            .requests += 1;
-    }
-
-    pub fn record_tokens(&mut self, input: u64, output: u64, name: &str) {
-        let s = self.by_provider.entry(name.to_string()).or_default();
-        s.input += input;
-        s.output += output;
-    }
-
-    pub fn record_model_tokens(&mut self, input: u64, output: u64, model: &str) {
-        let s = self.by_model.entry(model.to_string()).or_default();
-        s.input += input;
-        s.output += output;
+    pub fn clear_error(&mut self, name: &str) {
+        self.last_error.remove(name);
     }
 }
 
