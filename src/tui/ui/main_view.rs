@@ -55,6 +55,60 @@ pub(super) fn draw_title_bar(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(line), area);
 }
 
+/// Compute the height (in lines) needed by the detail panel.
+///
+/// This mirrors the line-building logic in [`draw_detail_panel`] so that
+/// `draw_main` can allocate an exact `Constraint::Length`.  When adding new
+/// lines to the detail panel, update this function as well.
+fn detail_panel_height(app: &App, route_avail: usize) -> u16 {
+    // Error-toast early-return path: blank + "Error" title + message = 3
+    if app.mode == Mode::Normal {
+        if let Some((_, MessageKind::Error, _)) = &app.message {
+            return 3;
+        }
+    }
+
+    // No provider selected: blank + "Info" title = 2
+    if app.provider_names.is_empty() {
+        return 2;
+    }
+
+    // Base lines present for every provider:
+    //   1  blank line
+    //   1  "Info" title
+    //   1  Status / "Press [t]" line
+    let base: u16 = 3;
+
+    // Variable lines that differ per provider — take the max so the panel
+    // height stays stable when the user navigates between providers.
+    let max_extra: u16 = app
+        .config
+        .providers
+        .iter()
+        .map(|(name, p)| {
+            // Route lines
+            let enabled: Vec<_> = p.routes.iter().filter(|r| r.enabled).collect();
+            let route_lines = if enabled.is_empty() {
+                0u16
+            } else {
+                pack_routes(&enabled, route_avail).len() as u16
+            };
+
+            // Error line (1 if this provider has a last_error)
+            let error_line = app
+                .metrics
+                .lock()
+                .map(|m| u16::from(m.last_error.contains_key(name)))
+                .unwrap_or(0);
+
+            route_lines + error_line
+        })
+        .max()
+        .unwrap_or(0);
+
+    base + max_extra
+}
+
 pub(super) fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
     let table_height = (app.provider_names.len() as u16 + 2)
         .max(3)
@@ -62,21 +116,7 @@ pub(super) fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
     // detail panel: LEFT+RIGHT border (2) + horizontal padding (2) = 4 overhead
     let detail_inner_width = (area.width as usize).saturating_sub(4);
     let route_avail = detail_inner_width.saturating_sub(ROUTE_LABEL_WIDTH);
-    let max_route_lines = app
-        .config
-        .providers
-        .values()
-        .map(|p| {
-            let enabled: Vec<_> = p.routes.iter().filter(|r| r.enabled).collect();
-            if enabled.is_empty() {
-                0
-            } else {
-                pack_routes(&enabled, route_avail).len()
-            }
-        })
-        .max()
-        .unwrap_or(0);
-    let detail_height = 3u16 + max_route_lines as u16;
+    let detail_height = detail_panel_height(app, route_avail);
     // stats: blank + title + N provider rows + bottom border
     let n_providers = app.provider_names.len() as u16;
     let stats_min_height = 3 + n_providers;
@@ -425,32 +465,6 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
-    // Last request error for the selected provider (cleared on next success).
-    if let Ok(m) = app.metrics.lock() {
-        if let Some(err) = m.last_error.get(name.as_str()) {
-            let status_str = if err.status == 0 {
-                "Network error".to_string()
-            } else {
-                format!("HTTP {}", err.status)
-            };
-            let model_part = if err.model.is_empty() {
-                String::new()
-            } else {
-                format!("{}  ", err.model)
-            };
-            lines.push(Line::from(vec![
-                Span::styled("Error ", Style::default().fg(t::MUTED)),
-                Span::styled(
-                    status_str,
-                    Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  "),
-                Span::styled(model_part, Style::default().fg(t::WARNING)),
-                Span::styled(truncate_error(&err.message), Style::default().fg(t::ERROR)),
-            ]));
-        }
-    }
-
     // Enabled routes for the selected provider.
     let provider = app.config.providers.get(name.as_str());
     let enabled_routes: Vec<_> = provider
@@ -476,6 +490,32 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
                 spans.push(Span::styled(&route.target, Style::default().fg(prov_color)));
             }
             lines.push(Line::from(spans));
+        }
+    }
+
+    // Last request error — shown after Routes so it doesn't obscure the route list.
+    if let Ok(m) = app.metrics.lock() {
+        if let Some(err) = m.last_error.get(name.as_str()) {
+            let status_str = if err.status == 0 {
+                "Network error".to_string()
+            } else {
+                format!("HTTP {}", err.status)
+            };
+            let model_part = if err.model.is_empty() {
+                String::new()
+            } else {
+                format!("{}  ", err.model)
+            };
+            lines.push(Line::from(vec![
+                Span::styled("Error ", Style::default().fg(t::MUTED)),
+                Span::styled(
+                    status_str,
+                    Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(model_part, Style::default().fg(t::WARNING)),
+                Span::styled(truncate_error(&err.message), Style::default().fg(t::ERROR)),
+            ]));
         }
     }
 

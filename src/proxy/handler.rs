@@ -96,17 +96,37 @@ pub async fn handle_models(
 async fn resolve_provider_pool(
     state: &SharedState,
     req_model: &str,
-) -> Result<(Vec<(String, crate::config::Provider)>, bool, Option<String>), AppError> {
+) -> Result<
+    (
+        Vec<(String, crate::config::Provider)>,
+        bool,
+        Option<String>,
+        String,
+    ),
+    AppError,
+> {
     let config = state.config.read().await;
 
     // Route lookup: only check the current provider's routes for model rewriting.
     let (_, current_provider) = config.current_enabled_provider()?;
-    let routed_target = current_provider
+    let (routed_target, route_pattern) = current_provider
         .routes
         .iter()
         .find(|r| r.matches(req_model))
-        .map(|r| r.target.clone())
-        .filter(|t| !t.is_empty());
+        .map(|r| {
+            let target = if r.target.is_empty() {
+                None
+            } else {
+                Some(r.target.clone())
+            };
+            let pattern = if target.is_some() {
+                r.pattern.clone()
+            } else {
+                String::new()
+            };
+            (target, pattern)
+        })
+        .unwrap_or((None, String::new()));
 
     if config.fallback {
         let start_idx = config.providers.get_index_of(&config.current).unwrap_or(0);
@@ -121,14 +141,24 @@ async fn resolve_provider_pool(
                     .map(|(k, v)| (k.clone(), v.clone()))
             })
             .collect();
-        Ok((list, true, routed_target))
+        Ok((list, true, routed_target, route_pattern))
     } else {
         Ok((
             vec![(config.current.clone(), current_provider.clone())],
             false,
             routed_target,
+            route_pattern,
         ))
     }
+}
+
+/// Request context bundled to keep [`try_providers`] argument count in check.
+struct RequestCtx<'a> {
+    body: &'a Bytes,
+    req_json: Option<&'a serde_json::Value>,
+    headers: &'a HeaderMap,
+    is_stream: bool,
+    route_pattern: &'a str,
 }
 
 /// Try each provider in the pool; cycle on retryable errors (5xx, 429, auth).
@@ -137,16 +167,14 @@ async fn try_providers(
     state: &SharedState,
     pool: &[(String, crate::config::Provider)],
     do_cycle: bool,
-    body: &Bytes,
-    req_json: Option<&serde_json::Value>,
-    headers: &HeaderMap,
-    is_stream: bool,
+    ctx: &RequestCtx<'_>,
 ) -> Result<Response, AppError> {
     let round_size = pool.len();
     let max_failures = round_size * 3;
     let mut consecutive_failures = 0usize;
     let mut last_status = None;
-    let req_model_hint = req_json
+    let req_model_hint = ctx
+        .req_json
         .and_then(|v| v.get("model").and_then(|m| m.as_str()))
         .unwrap_or("")
         .to_string();
@@ -166,7 +194,7 @@ async fn try_providers(
 
     let record_error_metric = |state: &SharedState, name: &str, status: u16, msg: &str| {
         if let Ok(mut m) = state.metrics.lock() {
-            m.record_error(name, status, &req_model_hint, msg);
+            m.record_error(name, status, &req_model_hint, ctx.route_pattern, msg);
         }
     };
 
@@ -192,12 +220,13 @@ async fn try_providers(
 
         let is_openai = provider.api_format == ApiFormat::OpenAI;
         let upstream_body = if is_openai {
-            let request_json =
-                req_json.ok_or_else(|| AppError::Transform("Invalid JSON body".into()))?;
+            let request_json = ctx
+                .req_json
+                .ok_or_else(|| AppError::Transform("Invalid JSON body".into()))?;
             let transformed = transform::anthropic_to_openai_request(request_json, provider)?;
             Bytes::from(serde_json::to_vec(&transformed)?)
         } else {
-            body.clone()
+            ctx.body.clone()
         };
 
         let response = match forwarder::forward_request(
@@ -205,7 +234,7 @@ async fn try_providers(
             provider,
             &api_key,
             upstream_body,
-            headers,
+            ctx.headers,
         )
         .await
         {
@@ -280,7 +309,7 @@ async fn try_providers(
         if let Ok(mut m) = state.metrics.lock() {
             m.clear_error(provider_name);
         }
-        return if is_stream {
+        return if ctx.is_stream {
             handle_streaming_response(response, is_openai, state.db.clone(), pkey).await
         } else {
             handle_buffered_response(response, is_openai, state.db.clone(), pkey).await
@@ -313,7 +342,8 @@ pub async fn handle_messages(
         .unwrap_or("")
         .to_string();
 
-    let (pool, do_cycle, routed_target) = resolve_provider_pool(&state, &req_model).await?;
+    let (pool, do_cycle, routed_target, route_pattern) =
+        resolve_provider_pool(&state, &req_model).await?;
 
     // Patch body: rewrite `model` field with route target when applicable.
     let (body, req_json) = if let Some(target) = &routed_target {
@@ -330,16 +360,14 @@ pub async fn handle_messages(
         (body, req_json)
     };
 
-    try_providers(
-        &state,
-        &pool,
-        do_cycle,
-        &body,
-        req_json.as_ref(),
-        &headers,
+    let ctx = RequestCtx {
+        body: &body,
+        req_json: req_json.as_ref(),
+        headers: &headers,
         is_stream,
-    )
-    .await
+        route_pattern: &route_pattern,
+    };
+    try_providers(&state, &pool, do_cycle, &ctx).await
 }
 
 /// Handle non-streaming response.

@@ -15,9 +15,9 @@ use crate::test_provider::TestResult;
 pub(super) const MESSAGE_TIMEOUT_SECS: u64 = 3;
 
 mod actions;
+mod bg_proxy;
 mod filter;
 mod navigation;
-mod bg_proxy;
 
 pub use bg_proxy::{is_process_alive, send_sighup};
 pub use filter::filter_suggestions;

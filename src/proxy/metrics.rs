@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex};
 pub struct LastRequestError {
     pub status: u16,
     pub model: String,
+    /// Route pattern that matched (e.g. `claude-*`), empty if no routing.
+    pub pattern: String,
     pub message: String,
 }
 
@@ -31,12 +33,20 @@ pub struct TokenMetrics {
 }
 
 impl TokenMetrics {
-    pub fn record_error(&mut self, name: &str, status: u16, model: &str, message: &str) {
+    pub fn record_error(
+        &mut self,
+        name: &str,
+        status: u16,
+        model: &str,
+        pattern: &str,
+        message: &str,
+    ) {
         self.last_error.insert(
             name.to_string(),
             LastRequestError {
                 status,
                 model: model.to_string(),
+                pattern: pattern.to_string(),
                 message: message.to_string(),
             },
         );

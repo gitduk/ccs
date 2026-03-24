@@ -57,7 +57,7 @@ pub async fn test_connectivity(
             }),
         ),
         ApiFormat::OpenAI => (
-            format!("{base}/chat/completions"),
+            format!("{base}/v1/chat/completions"),
             json!({
                 "model": model,
                 "max_tokens": 1,

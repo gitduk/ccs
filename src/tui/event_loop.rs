@@ -33,9 +33,10 @@ pub(super) fn start_db_watcher(app: &App) -> Option<(Receiver<()>, notify::Recom
             if !is_modify {
                 return;
             }
-            let relevant = event.paths.iter().any(|p| {
-                p.file_name().map(|n| n == db_name).unwrap_or(false)
-            });
+            let relevant = event
+                .paths
+                .iter()
+                .any(|p| p.file_name().map(|n| n == db_name).unwrap_or(false));
             if relevant {
                 let _ = event_tx.send(());
             }
