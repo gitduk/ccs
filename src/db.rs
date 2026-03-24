@@ -318,6 +318,103 @@ pub fn clear_all(conn: &Connection) -> Result<()> {
     conn.execute_batch("BEGIN; DELETE FROM provider_stats; DELETE FROM model_stats; COMMIT;")
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_upsert_provider_failure_counting() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        let id = "test-id";
+        let name = "test-provider";
+
+        // Simulate 5 record_failure calls: each should write requests=1, failures=1
+        for _ in 0..5 {
+            upsert_provider(&conn, id, name, 0, 0, 1, 1).unwrap();
+        }
+
+        let (req, fail): (u64, u64) = conn
+            .query_row(
+                "SELECT requests, failures FROM provider_stats WHERE provider_id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(req, 5, "requests should be 5 after 5 failure writes");
+        assert_eq!(fail, 5, "failures should be 5 after 5 failure writes");
+    }
+
+    #[test]
+    fn test_upsert_provider_mixed() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        let id = "test-id";
+        let name = "test-provider";
+
+        // 3 failures (requests=1, failures=1 each)
+        for _ in 0..3 {
+            upsert_provider(&conn, id, name, 0, 0, 1, 1).unwrap();
+        }
+        // 2 successes (requests=1, failures=0 each)
+        for _ in 0..2 {
+            upsert_provider(&conn, id, name, 100, 50, 1, 0).unwrap();
+        }
+
+        let (req, fail, input, output): (u64, u64, u64, u64) = conn
+            .query_row(
+                "SELECT requests, failures, input, output FROM provider_stats WHERE provider_id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+
+        assert_eq!(req, 5, "requests should be 3 failures + 2 successes = 5");
+        assert_eq!(fail, 3, "failures should be 3");
+        assert_eq!(input, 200, "input should be 2 * 100 = 200");
+        assert_eq!(output, 100, "output should be 2 * 50 = 100");
+    }
+
+    #[test]
+    fn test_upsert_after_clear() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        let id = "test-id";
+        let name = "test-provider";
+
+        // Accumulate some data
+        upsert_provider(&conn, id, name, 100, 50, 1, 0).unwrap();
+        // Clear
+        clear_provider(&conn, id).unwrap();
+
+        // Now simulate 5 failures on fresh state
+        for _ in 0..5 {
+            upsert_provider(&conn, id, name, 0, 0, 1, 1).unwrap();
+        }
+
+        let (req, fail): (u64, u64) = conn
+            .query_row(
+                "SELECT requests, failures FROM provider_stats WHERE provider_id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(
+            req, 5,
+            "requests should be 5 after clear + 5 failure writes"
+        );
+        assert_eq!(
+            fail, 5,
+            "failures should be 5 after clear + 5 failure writes"
+        );
+    }
+}
+
 pub fn clear_provider(conn: &Connection, provider_id: &str) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     tx.execute(

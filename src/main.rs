@@ -14,8 +14,9 @@ async fn main() {
         Some(Commands::Serve { listen }) => {
             tracing_subscriber::fmt()
                 .with_env_filter(
-                    tracing_subscriber::EnvFilter::from_default_env()
-                        .add_directive("ccs=info".parse().unwrap()),
+                    tracing_subscriber::EnvFilter::builder()
+                        .with_default_directive("ccs=info".parse().unwrap())
+                        .from_env_lossy(),
                 )
                 .with_target(false)
                 .init();

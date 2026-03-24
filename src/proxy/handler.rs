@@ -246,13 +246,14 @@ async fn try_providers(
             continue;
         }
 
-        // 401/403: auth error — try next provider in fallback mode
-        if status_u16 == 401 || status_u16 == 403 {
+        // 401/403/404: auth error or model not found — try next provider in fallback mode
+        if status_u16 == 401 || status_u16 == 403 || status_u16 == 404 {
             let error_body = response.bytes().await.unwrap_or_default();
             let preview = extract_error_message(&error_body);
             tracing::warn!(
-                "Provider {} auth error {status}, trying next",
-                provider.base_url
+                "Provider {} returned {status} ({}), trying next",
+                provider.base_url,
+                preview
             );
             record_failure(state, &pkey);
             record_error_metric(state, provider_name, status_u16, &preview);
