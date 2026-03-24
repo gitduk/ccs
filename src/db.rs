@@ -45,7 +45,8 @@ fn init_schema(conn: &Connection) -> Result<()> {
             output        INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (provider_id, model_name)
         );",
-    )
+    )?;
+    Ok(())
 }
 
 /// Migrate old schema (provider_name as PK, no provider_id column) to new schema.
@@ -183,8 +184,8 @@ pub fn load_metrics(conn: &Connection) -> TokenMetrics {
                     let s = metrics.by_provider.entry(row.0).or_default();
                     s.input = row.1;
                     s.output = row.2;
-                    s.requests = row.3;
                     s.failures = row.4;
+                    s.requests = row.3;
                 }
             }
             Err(e) => tracing::warn!("Failed to load provider stats: {e}"),
@@ -232,8 +233,8 @@ pub fn upsert_provider(
              provider_name = excluded.provider_name,
              input    = provider_stats.input    + excluded.input,
              output   = provider_stats.output   + excluded.output,
-             requests = provider_stats.requests + excluded.requests,
-             failures = provider_stats.failures + excluded.failures",
+             failures = provider_stats.failures + excluded.failures,
+             requests = provider_stats.requests + excluded.requests",
         params![
             provider_id,
             provider_name,
@@ -266,7 +267,6 @@ pub fn upsert_model(
     )?;
     Ok(())
 }
-
 
 /// Rename a provider: updates provider_name in all rows with the given provider_id.
 pub fn rename_provider(conn: &Connection, provider_id: &str, new_name: &str) -> Result<()> {
@@ -330,4 +330,3 @@ pub fn clear_provider(conn: &Connection, provider_id: &str) -> Result<()> {
     )?;
     tx.commit()
 }
-

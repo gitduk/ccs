@@ -47,10 +47,14 @@ pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
     // Providers with no requests sort to the bottom (rate treated as 1.0).
     provider_rows.sort_by(|(_, a), (_, b)| {
         let rate = |s: &crate::proxy::metrics::ProviderStats| {
-            if s.requests == 0 {
+            if s.failures == 0 && s.requests == 0 {
+                // Never used — sort to bottom.
                 f64::MAX
-            } else {
+            } else if s.requests > 0 {
                 s.failures as f64 / s.requests as f64
+            } else {
+                // failures > 0 but requests == 0: corrupted data, treat as 100%.
+                1.0
             }
         };
         rate(a)
@@ -110,10 +114,13 @@ pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
             ),
             Span::styled("  Fail ", muted),
             {
-                let rate = if s.requests > 0 {
+                let rate = if s.failures == 0 {
+                    0.0
+                } else if s.requests > 0 {
                     s.failures as f64 / s.requests as f64
                 } else {
-                    0.0
+                    // failures > 0 but requests == 0: corrupted data.
+                    1.0
                 };
                 let high = rate > 0.5;
                 let style = if high {

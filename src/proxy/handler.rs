@@ -365,23 +365,24 @@ async fn handle_buffered_response(
         (body, parsed)
     };
 
-    if let Some(json) = usage_json {
+    let (input, output, model) = if let Some(ref json) = usage_json {
         let input = json["usage"]["input_tokens"].as_u64().unwrap_or(0);
         let output = json["usage"]["output_tokens"].as_u64().unwrap_or(0);
-        if input > 0 || output > 0 {
-            let model = json["model"].as_str().map(|s| s.to_string());
-            record_and_persist(
-                &db,
-                &ProviderKey {
-                    id: provider_id,
-                    name: provider_name,
-                },
-                model.as_deref(),
-                input,
-                output,
-            );
-        }
-    }
+        let model = json["model"].as_str().map(|s| s.to_string());
+        (input, output, model)
+    } else {
+        (0, 0, None)
+    };
+    record_and_persist(
+        &db,
+        &ProviderKey {
+            id: provider_id,
+            name: provider_name,
+        },
+        model.as_deref(),
+        input,
+        output,
+    );
 
     Ok((
         StatusCode::OK,
@@ -404,9 +405,9 @@ fn record_and_persist(
         pkey,
         model,
         StatsDelta {
+            requests: 1,
             input,
             output,
-            requests: 1,
             ..Default::default()
         },
     );
@@ -544,16 +545,14 @@ fn track_tokens_in_stream(
             yield chunk;
         }
 
-        // Stream ended: persist the token counts we collected.
-        if input_tokens > 0 || output_tokens > 0 {
-            record_and_persist(
-                &db,
-                &ProviderKey { id: provider_id, name: provider_name },
-                model.as_deref(),
-                input_tokens,
-                output_tokens,
-            );
-        }
+        // Stream ended: persist request count and token usage atomically.
+        record_and_persist(
+            &db,
+            &ProviderKey { id: provider_id, name: provider_name },
+            model.as_deref(),
+            input_tokens,
+            output_tokens,
+        );
     }
 }
 
