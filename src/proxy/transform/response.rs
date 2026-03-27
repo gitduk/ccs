@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::error::{AppError, Result};
@@ -18,24 +18,22 @@ pub fn openai_to_anthropic_response(resp: &Value) -> Result<Value> {
     let mut content_blocks: Vec<Value> = Vec::new();
 
     // Handle reasoning/thinking content
-    if let Some(reasoning) = message.get("reasoning_content").and_then(|r| r.as_str()) {
-        if !reasoning.is_empty() {
+    if let Some(reasoning) = message.get("reasoning_content").and_then(|r| r.as_str())
+        && !reasoning.is_empty() {
             content_blocks.push(json!({
                 "type": "thinking",
                 "thinking": reasoning,
             }));
         }
-    }
 
     // Handle text content
-    if let Some(text) = message.get("content").and_then(|c| c.as_str()) {
-        if !text.is_empty() {
+    if let Some(text) = message.get("content").and_then(|c| c.as_str())
+        && !text.is_empty() {
             content_blocks.push(json!({
                 "type": "text",
                 "text": text,
             }));
         }
-    }
 
     // Handle tool calls
     if let Some(tool_calls) = message.get("tool_calls").and_then(|t| t.as_array()) {

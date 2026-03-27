@@ -1,5 +1,5 @@
-use super::state::MessageKind;
 use super::App;
+use super::state::MessageKind;
 
 pub(super) fn test_selected(app: &mut App) {
     let Some(name) = app.selected_name().map(|s| s.to_string()) else {
@@ -55,7 +55,7 @@ pub(super) fn test_provider_by_name(app: &mut App, name: &str) {
 
     let client = app.test_client.clone();
     tokio::spawn(async move {
-        let result = crate::test_provider::test_connectivity(&client, &provider, best_model).await;
+        let result = crate::tester::test_connectivity(&client, &provider, best_model).await;
         let _ = tx.send((name_owned, result));
     });
 }

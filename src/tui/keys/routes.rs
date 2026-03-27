@@ -1,7 +1,7 @@
 use crossterm::event::KeyCode;
 
 use crate::config::RouteRule;
-use crate::tui::state::{filter_suggestions, FormField, ProviderForm};
+use crate::tui::state::{FormField, ProviderForm, filter_suggestions};
 
 /// Remove the rule at `route_cursor` if it is invalid.
 fn prune_current_rule(form: &mut ProviderForm, provider_models: &[String]) {

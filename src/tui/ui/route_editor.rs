@@ -1,10 +1,10 @@
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 
-use super::super::state::{filter_suggestions, App, ProviderForm};
+use super::super::state::{App, ProviderForm, filter_suggestions};
 use super::super::theme::{self as t};
 
 /// Compute how many suggestion items to display (used for layout height calculation).

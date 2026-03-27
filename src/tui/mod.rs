@@ -14,10 +14,10 @@ use std::time::Duration;
 use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -99,14 +99,13 @@ fn run_loop(
 
         terminal.draw(|f| ui::draw(f, app))?;
 
-        if event::poll(Duration::from_millis(250))? {
-            if let Event::Key(key) = event::read()? {
+        if event::poll(Duration::from_millis(250))?
+            && let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
                 keys::handle_key(app, key.code, key.modifiers, server)?;
             }
-        }
 
         if app.should_quit {
             break;

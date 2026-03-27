@@ -6,8 +6,8 @@ mod main_view;
 mod route_editor;
 mod stats_panel;
 
-use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::Frame;
+use ratatui::layout::{Constraint, Direction, Layout};
 
 use super::state::{App, Mode};
 

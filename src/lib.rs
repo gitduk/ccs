@@ -3,5 +3,5 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod proxy;
-pub mod test_provider;
+pub mod tester;
 pub mod tui;

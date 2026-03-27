@@ -1,7 +1,7 @@
 use crate::config::{self, ApiFormat};
 use crate::error::Result;
 
-use super::{App, ConfirmAction, MessageKind, Mode, ProviderForm, NOTES_FIELD_IDX};
+use super::{App, ConfirmAction, MessageKind, Mode, NOTES_FIELD_IDX, ProviderForm};
 
 impl App {
     pub fn start_add(&mut self) {
@@ -285,8 +285,8 @@ impl App {
     }
 
     pub fn toggle_provider_enabled(&mut self) -> Result<()> {
-        if let Some(name) = self.selected_name().map(|s| s.to_string()) {
-            if let Some(provider) = self.config.providers.get_mut(&name) {
+        if let Some(name) = self.selected_name().map(|s| s.to_string())
+            && let Some(provider) = self.config.providers.get_mut(&name) {
                 provider.enabled = !provider.enabled;
                 let now_enabled = provider.enabled;
                 let state = if now_enabled { "enabled" } else { "disabled" };
@@ -315,7 +315,6 @@ impl App {
                 config::save_config(&self.config)?;
                 self.set_message(format!("'{name}' {state}"), MessageKind::Info);
             }
-        }
         Ok(())
     }
 }

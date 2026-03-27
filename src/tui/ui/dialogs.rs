@@ -1,7 +1,7 @@
+use ratatui::Frame;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
-use ratatui::Frame;
 
 use super::super::state::{App, ConfirmAction};
 use super::super::theme::{self as t};

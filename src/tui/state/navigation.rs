@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use crate::config;
 use crate::error::Result;
 
-use super::{App, MessageKind, MESSAGE_TIMEOUT_SECS};
+use super::{App, MESSAGE_TIMEOUT_SECS, MessageKind};
 
 impl App {
     pub fn new() -> Result<Self> {
@@ -142,11 +142,10 @@ impl App {
 
     /// Clear message if it has expired (after MESSAGE_TIMEOUT_SECS seconds).
     pub fn tick_message(&mut self) {
-        if let Some((_, _, created)) = &self.message {
-            if created.elapsed() > std::time::Duration::from_secs(MESSAGE_TIMEOUT_SECS) {
+        if let Some((_, _, created)) = &self.message
+            && created.elapsed() > std::time::Duration::from_secs(MESSAGE_TIMEOUT_SECS) {
                 self.message = None;
             }
-        }
     }
 
     /// Drain completed background test results into test_results.

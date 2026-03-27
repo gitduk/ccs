@@ -5,9 +5,9 @@ mod routes;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
-use super::state::Mode;
 use super::App;
 use super::ServerHandle;
+use super::state::Mode;
 
 pub(super) fn handle_key(
     app: &mut App,

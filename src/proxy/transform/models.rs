@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Convert an OpenAI GET /v1/models response to Anthropic format.
 pub fn openai_to_anthropic_models(openai: &Value) -> Value {

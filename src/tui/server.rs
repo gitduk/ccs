@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 
-use super::state::{MessageKind, ServerStatus};
 use super::App;
 use super::ServerHandle;
+use super::state::{MessageKind, ServerStatus};
 
 /// Sync config to the running proxy. For the in-process server, writes directly
 /// to the shared RwLock. For the background proxy, saves config to disk and

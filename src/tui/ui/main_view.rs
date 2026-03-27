@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Padding, Paragraph, Row, Table};
-use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use super::super::state::{App, MessageKind, Mode};
@@ -10,9 +10,9 @@ use super::super::theme::{self as t};
 use super::format::fmt_latency;
 use super::format::truncate_error;
 use super::format::{api_key_display_len, col_width, config_path_display, masked_api_key};
-use super::layout::{pack_routes, ROUTE_LABEL_WIDTH};
+use super::layout::{ROUTE_LABEL_WIDTH, pack_routes};
 use super::stats_panel::draw_stats_panel;
-use crate::test_provider::TestStatus;
+use crate::tester::TestStatus;
 
 pub(super) fn draw_title_bar(f: &mut Frame, app: &App, area: Rect) {
     let fallback_label = if app.config.fallback {
@@ -62,11 +62,10 @@ pub(super) fn draw_title_bar(f: &mut Frame, app: &App, area: Rect) {
 /// lines to the detail panel, update this function as well.
 fn detail_panel_height(app: &App, route_avail: usize) -> u16 {
     // Error-toast early-return path: blank + "Error" title + message = 3
-    if app.mode == Mode::Normal {
-        if let Some((_, MessageKind::Error, _)) = &app.message {
+    if app.mode == Mode::Normal
+        && let Some((_, MessageKind::Error, _)) = &app.message {
             return 3;
         }
-    }
 
     // No provider selected: blank + "Info" title = 2
     if app.provider_names.is_empty() {
@@ -366,8 +365,8 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
         .padding(Padding::horizontal(1));
 
     // Show error toast only when not in editing mode (errors in form are shown inline)
-    if app.mode == Mode::Normal {
-        if let Some((msg, MessageKind::Error, _)) = &app.message {
+    if app.mode == Mode::Normal
+        && let Some((msg, MessageKind::Error, _)) = &app.message {
             let error_block = Block::default()
                 .borders(Borders::LEFT | Borders::RIGHT)
                 .border_style(Style::default().fg(t::ERROR))
@@ -389,7 +388,6 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
             f.render_widget(Paragraph::new(lines).block(error_block), area);
             return;
         }
-    }
 
     let label = Style::default().fg(t::MUTED);
     let title_line = Line::from(Span::styled(
@@ -494,8 +492,8 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Last request error — shown after Routes so it doesn't obscure the route list.
-    if let Ok(m) = app.metrics.lock() {
-        if let Some(err) = m.last_error.get(name.as_str()) {
+    if let Ok(m) = app.metrics.lock()
+        && let Some(err) = m.last_error.get(name.as_str()) {
             let status_str = if err.status == 0 {
                 "Network error".to_string()
             } else {
@@ -517,7 +515,6 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled(truncate_error(&err.message), Style::default().fg(t::ERROR)),
             ]));
         }
-    }
 
     f.render_widget(Paragraph::new(lines).block(block), area);
 }

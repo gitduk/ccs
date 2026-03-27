@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use rusqlite::{params, Connection, Result};
+use rusqlite::{Connection, Result, params};
 
 use crate::proxy::metrics::TokenMetrics;
 
@@ -79,7 +79,8 @@ fn do_migrate(conn: &Connection, name_to_id: &HashMap<String, String>) -> Result
         let mut stmt = conn.prepare(
             "SELECT provider_name, input, output, requests, failures FROM provider_stats",
         )?;
-        let rows = stmt
+        
+        stmt
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -90,14 +91,14 @@ fn do_migrate(conn: &Connection, name_to_id: &HashMap<String, String>) -> Result
                 ))
             })?
             .filter_map(|r| r.ok())
-            .collect();
-        rows
+            .collect()
     };
 
     let model_rows: Vec<(String, String, u64, u64)> = {
         let mut stmt =
             conn.prepare("SELECT provider_name, model_name, input, output FROM model_stats")?;
-        let rows = stmt
+        
+        stmt
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -107,8 +108,7 @@ fn do_migrate(conn: &Connection, name_to_id: &HashMap<String, String>) -> Result
                 ))
             })?
             .filter_map(|r| r.ok())
-            .collect();
-        rows
+            .collect()
     };
 
     // Recreate tables with new schema.
@@ -285,15 +285,14 @@ pub fn load_provider_models(conn: &Connection) -> HashMap<String, Vec<String>> {
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
     if let Ok(mut stmt) = conn.prepare(
         "SELECT provider_name, model_name FROM model_stats ORDER BY provider_name, model_name",
-    ) {
-        if let Ok(rows) = stmt.query_map([], |row| {
+    )
+        && let Ok(rows) = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         }) {
             for (provider, model) in rows.flatten() {
                 map.entry(provider).or_default().push(model);
             }
         }
-    }
     map
 }
 

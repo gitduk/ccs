@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::config::Provider;
 use crate::error::{AppError, Result};
@@ -80,16 +80,14 @@ pub fn anthropic_to_openai_responses_request(req: &Value, provider: &Provider) -
     }
 
     // thinking/extended thinking → reasoning (Responses API 特有)
-    if let Some(thinking) = req.get("thinking") {
-        if let Some(enabled) = thinking.get("enabled").and_then(|e| e.as_bool()) {
-            if enabled {
+    if let Some(thinking) = req.get("thinking")
+        && let Some(enabled) = thinking.get("enabled").and_then(|e| e.as_bool())
+            && enabled {
                 result["reasoning_effort"] = json!("high");
                 if let Some(budget) = thinking.get("budget_tokens") {
                     result["max_completion_tokens"] = budget.clone();
                 }
             }
-        }
-    }
 
     Ok(result)
 }
@@ -145,16 +143,13 @@ pub fn anthropic_to_openai_chat_completions_request(
     }
 
     // thinking/extended thinking → reasoning (Chat Completions 兼容)
-    if let Some(thinking) = req.get("thinking") {
-        if let Some(enabled) = thinking.get("enabled").and_then(|e| e.as_bool()) {
-            if enabled {
-                if let Some(budget) = thinking.get("budget_tokens") {
+    if let Some(thinking) = req.get("thinking")
+        && let Some(enabled) = thinking.get("enabled").and_then(|e| e.as_bool())
+            && enabled
+                && let Some(budget) = thinking.get("budget_tokens") {
                     result["reasoning_effort"] = json!("high");
                     result["max_completion_tokens"] = budget.clone();
                 }
-            }
-        }
-    }
 
     // Stream options for OpenAI Chat Completions
     if req.get("stream").and_then(|s| s.as_bool()).unwrap_or(false) {
@@ -451,13 +446,12 @@ pub fn clean_schema(schema: &mut Value) {
         if obj.get("format").and_then(|f| f.as_str()) == Some("uri") {
             obj.remove("format");
         }
-        if let Some(props) = obj.get_mut("properties") {
-            if let Some(props_obj) = props.as_object_mut() {
+        if let Some(props) = obj.get_mut("properties")
+            && let Some(props_obj) = props.as_object_mut() {
                 for (_key, prop) in props_obj.iter_mut() {
                     clean_schema(prop);
                 }
             }
-        }
         if let Some(items) = obj.get_mut("items") {
             clean_schema(items);
         }

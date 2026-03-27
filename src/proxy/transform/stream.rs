@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use futures::Stream;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 /// Convert an OpenAI SSE stream to Anthropic SSE stream.
@@ -135,11 +135,10 @@ impl StreamState {
         let mut events = Vec::new();
 
         // Extract model info
-        if let Some(model) = chunk.get("model").and_then(|m| m.as_str()) {
-            if self.model.is_empty() {
+        if let Some(model) = chunk.get("model").and_then(|m| m.as_str())
+            && self.model.is_empty() {
                 self.model = model.to_string();
             }
-        }
 
         // Extract usage from chunk
         if let Some(usage) = chunk.get("usage") {
@@ -200,8 +199,8 @@ impl StreamState {
         }
 
         // Handle reasoning_content (thinking)
-        if let Some(reasoning) = delta.get("reasoning_content").and_then(|r| r.as_str()) {
-            if !reasoning.is_empty() {
+        if let Some(reasoning) = delta.get("reasoning_content").and_then(|r| r.as_str())
+            && !reasoning.is_empty() {
                 if self.current_block_type.as_ref() != Some(&BlockType::Thinking) {
                     // Close previous block if any
                     events.extend(self.close_current_block());
@@ -230,11 +229,10 @@ impl StreamState {
                     }),
                 ));
             }
-        }
 
         // Handle text content
-        if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
-            if !content.is_empty() {
+        if let Some(content) = delta.get("content").and_then(|c| c.as_str())
+            && !content.is_empty() {
                 if self.current_block_type.as_ref() != Some(&BlockType::Text) {
                     events.extend(self.close_current_block());
                     self.current_block_type = Some(BlockType::Text);
@@ -262,7 +260,6 @@ impl StreamState {
                     }),
                 ));
             }
-        }
 
         // Handle tool calls
         if let Some(tool_calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
@@ -308,8 +305,8 @@ impl StreamState {
                     }
 
                     // Accumulate arguments
-                    if let Some(args) = func.get("arguments").and_then(|a| a.as_str()) {
-                        if !args.is_empty() {
+                    if let Some(args) = func.get("arguments").and_then(|a| a.as_str())
+                        && !args.is_empty() {
                             let tc_ci = if let Some(tc_state) = self.tool_calls.get_mut(&tc_index) {
                                 tc_state.arguments_buffer.push_str(args);
                                 tc_state.content_index
@@ -328,7 +325,6 @@ impl StreamState {
                                 }),
                             ));
                         }
-                    }
                 }
             }
         }

@@ -9,7 +9,7 @@ use ratatui::widgets::TableState;
 use crate::config::{AppConfig, Provider, RouteRule};
 use crate::db::SharedDb;
 use crate::proxy::metrics::SharedMetrics;
-use crate::test_provider::TestResult;
+use crate::tester::TestResult;
 
 // UI constants
 pub(super) const MESSAGE_TIMEOUT_SECS: u64 = 3;

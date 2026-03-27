@@ -1,21 +1,20 @@
 use std::sync::mpsc::Receiver;
 
-use super::state::{is_process_alive, MessageKind, ServerStatus};
 use super::App;
 use super::ServerHandle;
+use super::state::{MessageKind, ServerStatus, is_process_alive};
 
 pub(super) fn check_bg_proxy_status(app: &mut App) {
-    if let Some(pid) = app.bg_proxy_pid {
-        if !is_process_alive(pid) {
+    if let Some(pid) = app.bg_proxy_pid
+        && !is_process_alive(pid) {
             app.on_bg_proxy_died();
             app.set_message("Background proxy exited", MessageKind::Info);
         }
-    }
 }
 
 pub(super) fn start_db_watcher(app: &App) -> Option<(Receiver<()>, notify::RecommendedWatcher)> {
     use notify::event::ModifyKind;
-    use notify::{recommended_watcher, EventKind, RecursiveMode, Watcher};
+    use notify::{EventKind, RecursiveMode, Watcher, recommended_watcher};
 
     let db_path = app.config.resolve_db_path();
     let db_file = std::path::PathBuf::from(&db_path);
@@ -66,8 +65,8 @@ pub(crate) fn reload_metrics_from_db(app: &mut App) {
 }
 
 pub(super) fn check_server_status(app: &mut App, server: &mut Option<ServerHandle>) {
-    if let Some(handle) = server.as_ref() {
-        if handle.task.is_finished() {
+    if let Some(handle) = server.as_ref()
+        && handle.task.is_finished() {
             let handle = server.take().unwrap();
             let result = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(handle.task)
@@ -84,5 +83,4 @@ pub(super) fn check_server_status(app: &mut App, server: &mut Option<ServerHandl
                 }
             }
         }
-    }
 }

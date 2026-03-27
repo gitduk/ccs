@@ -542,8 +542,8 @@ fn track_tokens_in_stream(
                 while let Some(rel) = line_buf[start..].find('\n') {
                     let pos = start + rel;
                     let line = line_buf[start..pos].trim_end_matches('\r');
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(data) = line.strip_prefix("data: ")
+                        && let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
                             match json["type"].as_str() {
                                 Some("message_start") => {
                                     input_tokens = json["message"]["usage"]["input_tokens"]
@@ -564,7 +564,6 @@ fn track_tokens_in_stream(
                                 _ => {}
                             }
                         }
-                    }
                     start = pos + 1;
                 }
                 if start > 0 {
