@@ -1,13 +1,104 @@
 use serde_json::{json, Value};
 
 use crate::config::Provider;
-use crate::error::Result;
+use crate::error::{AppError, Result};
 
 // Default model names
 const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
 
-/// Convert an Anthropic Messages API request to OpenAI Chat Completions format.
+/// Convert an Anthropic Messages API request to OpenAI format.
+/// Automatically detects and uses the appropriate format based on provider configuration.
 pub fn anthropic_to_openai_request(req: &Value, provider: &Provider) -> Result<Value> {
+    if provider.uses_responses_api() {
+        anthropic_to_openai_responses_request(req, provider)
+    } else {
+        anthropic_to_openai_chat_completions_request(req, provider)
+    }
+}
+
+/// Extract system text from Anthropic request
+fn extract_system_text(req: &Value) -> String {
+    req.get("system")
+        .map(|system| match system {
+            Value::String(s) => s.clone(),
+            Value::Array(blocks) => blocks
+                .iter()
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => String::new(),
+        })
+        .unwrap_or_default()
+}
+
+/// Convert an Anthropic Messages API request to OpenAI Responses API format.
+pub fn anthropic_to_openai_responses_request(req: &Value, provider: &Provider) -> Result<Value> {
+    let model = req
+        .get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or(DEFAULT_MODEL);
+    let mapped_model = provider.map_model(model);
+
+    // For Responses API, we need to build input array instead of messages
+    let mut input: Vec<Value> = Vec::new();
+
+    // Convert system message using extracted helper
+    let system_text = extract_system_text(req);
+    if !system_text.is_empty() {
+        input.push(json!({"role": "system", "content": system_text}));
+    }
+
+    // Convert messages for Responses API (same structure as Chat Completions)
+    if let Some(msgs) = req.get("messages").and_then(|m| m.as_array()) {
+        for msg in msgs {
+            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+            let converted = convert_message_to_openai_responses(role, msg)?;
+            input.extend(converted);
+        }
+    }
+
+    let mut result = json!({
+        "model": mapped_model,
+        "input": input,  // 使用 input 而不是 messages
+        "stream": req.get("stream").and_then(|s| s.as_bool()).unwrap_or(false),
+    });
+
+    // 复制其他参数
+    copy_common_parameters(req, &mut result);
+
+    // tools → OpenAI tools format (Responses API 使用相同的工具格式)
+    if let Some(tools) = req.get("tools").and_then(|t| t.as_array()) {
+        let openai_tools = convert_tools_to_openai(tools);
+        if !openai_tools.is_empty() {
+            result["tools"] = json!(openai_tools);
+        }
+    }
+
+    // tool_choice (Responses API 使用相同的格式)
+    if let Some(tool_choice) = req.get("tool_choice") {
+        result["tool_choice"] = convert_tool_choice_to_openai(tool_choice);
+    }
+
+    // thinking/extended thinking → reasoning (Responses API 特有)
+    if let Some(thinking) = req.get("thinking") {
+        if let Some(enabled) = thinking.get("enabled").and_then(|e| e.as_bool()) {
+            if enabled {
+                result["reasoning_effort"] = json!("high");
+                if let Some(budget) = thinking.get("budget_tokens") {
+                    result["max_completion_tokens"] = budget.clone();
+                }
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+/// Convert an Anthropic Messages API request to OpenAI Chat Completions format.
+pub fn anthropic_to_openai_chat_completions_request(
+    req: &Value,
+    provider: &Provider,
+) -> Result<Value> {
     let model = req
         .get("model")
         .and_then(|m| m.as_str())
@@ -16,20 +107,10 @@ pub fn anthropic_to_openai_request(req: &Value, provider: &Provider) -> Result<V
 
     let mut messages: Vec<Value> = Vec::new();
 
-    // Convert system message
-    if let Some(system) = req.get("system") {
-        let system_text = match system {
-            Value::String(s) => s.clone(),
-            Value::Array(blocks) => blocks
-                .iter()
-                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            _ => String::new(),
-        };
-        if !system_text.is_empty() {
-            messages.push(json!({"role": "system", "content": system_text}));
-        }
+    // Convert system message using extracted helper
+    let system_text = extract_system_text(req);
+    if !system_text.is_empty() {
+        messages.push(json!({"role": "system", "content": system_text}));
     }
 
     // Convert messages
@@ -43,10 +124,48 @@ pub fn anthropic_to_openai_request(req: &Value, provider: &Provider) -> Result<V
 
     let mut result = json!({
         "model": mapped_model,
-        "messages": messages,
+        "messages": messages,  // Chat Completions 使用 messages
         "stream": req.get("stream").and_then(|s| s.as_bool()).unwrap_or(false),
     });
 
+    // 复制其他参数
+    copy_common_parameters(req, &mut result);
+
+    // tools → OpenAI tools format
+    if let Some(tools) = req.get("tools").and_then(|t| t.as_array()) {
+        let openai_tools = convert_tools_to_openai(tools);
+        if !openai_tools.is_empty() {
+            result["tools"] = json!(openai_tools);
+        }
+    }
+
+    // tool_choice
+    if let Some(tool_choice) = req.get("tool_choice") {
+        result["tool_choice"] = convert_tool_choice_to_openai(tool_choice);
+    }
+
+    // thinking/extended thinking → reasoning (Chat Completions 兼容)
+    if let Some(thinking) = req.get("thinking") {
+        if let Some(enabled) = thinking.get("enabled").and_then(|e| e.as_bool()) {
+            if enabled {
+                if let Some(budget) = thinking.get("budget_tokens") {
+                    result["reasoning_effort"] = json!("high");
+                    result["max_completion_tokens"] = budget.clone();
+                }
+            }
+        }
+    }
+
+    // Stream options for OpenAI Chat Completions
+    if req.get("stream").and_then(|s| s.as_bool()).unwrap_or(false) {
+        result["stream_options"] = json!({"include_usage": true});
+    }
+
+    Ok(result)
+}
+
+/// Copy common parameters (max_tokens, temperature, top_p, stop) to result
+fn copy_common_parameters(req: &Value, result: &mut Value) {
     // max_tokens
     if let Some(max_tokens) = req.get("max_tokens") {
         result["max_tokens"] = max_tokens.clone();
@@ -66,77 +185,95 @@ pub fn anthropic_to_openai_request(req: &Value, provider: &Provider) -> Result<V
     if let Some(stop) = req.get("stop_sequences") {
         result["stop"] = stop.clone();
     }
+}
 
-    // tools → OpenAI tools format
-    if let Some(tools) = req.get("tools").and_then(|t| t.as_array()) {
-        let openai_tools: Vec<Value> = tools
-            .iter()
-            .filter_map(|tool| {
-                let name = tool.get("name")?.as_str()?;
-                let description = tool
-                    .get("description")
-                    .and_then(|d| d.as_str())
-                    .unwrap_or("");
-                let mut input_schema = tool
-                    .get("input_schema")
-                    .cloned()
-                    .unwrap_or(json!({"type": "object"}));
-                clean_schema(&mut input_schema);
-                Some(json!({
-                    "type": "function",
-                    "function": {
-                        "name": name,
-                        "description": description,
-                        "parameters": input_schema,
-                    }
-                }))
-            })
-            .collect();
-        if !openai_tools.is_empty() {
-            result["tools"] = json!(openai_tools);
-        }
-    }
-
-    // tool_choice
-    if let Some(tool_choice) = req.get("tool_choice") {
-        if let Some(tc_type) = tool_choice.get("type").and_then(|t| t.as_str()) {
-            match tc_type {
-                "any" => result["tool_choice"] = json!("required"),
-                "auto" => result["tool_choice"] = json!("auto"),
-                "none" => result["tool_choice"] = json!("none"),
-                "tool" => {
-                    if let Some(name) = tool_choice.get("name").and_then(|n| n.as_str()) {
-                        result["tool_choice"] = json!({
-                            "type": "function",
-                            "function": { "name": name }
-                        });
-                    }
+/// Convert tool definitions to OpenAI format
+fn convert_tools_to_openai(tools: &[Value]) -> Vec<Value> {
+    tools
+        .iter()
+        .filter_map(|tool| {
+            let name = tool.get("name")?.as_str()?;
+            let description = tool
+                .get("description")
+                .and_then(|d| d.as_str())
+                .unwrap_or("");
+            let mut input_schema = tool
+                .get("input_schema")
+                .cloned()
+                .unwrap_or(json!({"type": "object"}));
+            clean_schema(&mut input_schema);
+            Some(json!({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": description,
+                    "parameters": input_schema,
                 }
-                _ => {}
-            }
-        }
-    }
+            }))
+        })
+        .collect()
+}
 
-    // thinking/extended thinking → reasoning
-    if let Some(thinking) = req.get("thinking") {
-        if let Some(enabled) = thinking.get("enabled").and_then(|e| e.as_bool()) {
-            if enabled {
-                // OpenAI-compatible providers use different reasoning params
-                // Some use "reasoning_effort", some just pass through
-                if let Some(budget) = thinking.get("budget_tokens") {
-                    result["reasoning_effort"] = json!("high");
-                    result["max_completion_tokens"] = budget.clone();
+/// Convert tool choice to OpenAI format
+fn convert_tool_choice_to_openai(tool_choice: &Value) -> Value {
+    if let Some(tc_type) = tool_choice.get("type").and_then(|t| t.as_str()) {
+        match tc_type {
+            "any" => json!("required"),
+            "auto" => json!("auto"),
+            "none" => json!("none"),
+            "tool" => {
+                if let Some(name) = tool_choice.get("name").and_then(|n| n.as_str()) {
+                    json!({
+                        "type": "function",
+                        "function": { "name": name }
+                    })
+                } else {
+                    json!("auto")
                 }
             }
+            _ => json!("auto"),
         }
+    } else {
+        json!("auto")
     }
+}
 
-    // Stream options for OpenAI
-    if req.get("stream").and_then(|s| s.as_bool()).unwrap_or(false) {
-        result["stream_options"] = json!({"include_usage": true});
+/// Convert a single Anthropic message to OpenAI Responses API message(s).
+/// Key difference: uses "call_id" instead of "tool_call_id" for tool results.
+fn convert_message_to_openai_responses(role: &str, msg: &Value) -> Result<Vec<Value>> {
+    let content = msg.get("content");
+
+    match content {
+        Some(Value::String(text)) => {
+            let openai_role = match role {
+                "assistant" => "assistant",
+                _ => "user",
+            };
+            Ok(vec![json!({"role": openai_role, "content": text})])
+        }
+        Some(Value::Array(blocks)) => convert_content_blocks_to_openai_responses(role, blocks),
+        _ => Ok(vec![json!({"role": role, "content": ""})]),
     }
+}
 
-    Ok(result)
+/// Convert Anthropic content blocks to OpenAI messages.
+/// Uses "call_id" vs "tool_call_id" based on API version.
+fn convert_content_blocks_to_openai(
+    role: &str,
+    blocks: &[Value],
+    use_call_id: bool,
+) -> Result<Vec<Value>> {
+    match role {
+        "user" => convert_user_blocks_to_openai(blocks, use_call_id),
+        "assistant" => convert_assistant_blocks_to_openai(blocks), // Assistant blocks are the same for both APIs
+        _ => Ok(vec![json!({"role": role, "content": ""})]),
+    }
+}
+
+/// Convert Anthropic content blocks to OpenAI Responses API messages.
+/// Uses "call_id" instead of "tool_call_id" for tool results.
+fn convert_content_blocks_to_openai_responses(role: &str, blocks: &[Value]) -> Result<Vec<Value>> {
+    convert_content_blocks_to_openai(role, blocks, true) // use call_id
 }
 
 /// Convert a single Anthropic message to OpenAI message(s).
@@ -151,21 +288,17 @@ fn convert_message_to_openai(role: &str, msg: &Value) -> Result<Vec<Value>> {
             };
             Ok(vec![json!({"role": openai_role, "content": text})])
         }
-        Some(Value::Array(blocks)) => convert_content_blocks_to_openai(role, blocks),
+        Some(Value::Array(blocks)) => convert_content_blocks_to_openai_original(role, blocks),
         _ => Ok(vec![json!({"role": role, "content": ""})]),
     }
 }
 
 /// Convert Anthropic content blocks to OpenAI messages.
-fn convert_content_blocks_to_openai(role: &str, blocks: &[Value]) -> Result<Vec<Value>> {
-    match role {
-        "user" => convert_user_blocks_to_openai(blocks),
-        "assistant" => convert_assistant_blocks_to_openai(blocks),
-        _ => Ok(vec![json!({"role": role, "content": ""})]),
-    }
+fn convert_content_blocks_to_openai_original(role: &str, blocks: &[Value]) -> Result<Vec<Value>> {
+    convert_content_blocks_to_openai(role, blocks, false) // use tool_call_id
 }
 
-fn convert_user_blocks_to_openai(blocks: &[Value]) -> Result<Vec<Value>> {
+fn convert_user_blocks_to_openai(blocks: &[Value], use_call_id: bool) -> Result<Vec<Value>> {
     let mut messages = Vec::new();
     let mut content_parts: Vec<Value> = Vec::new();
     let mut tool_results: Vec<Value> = Vec::new();
@@ -198,9 +331,15 @@ fn convert_user_blocks_to_openai(blocks: &[Value]) -> Result<Vec<Value>> {
                     .and_then(|t| t.as_str())
                     .unwrap_or("");
                 let content_text = extract_tool_result_content(block);
+                // Use call_id for Responses API, tool_call_id for Chat Completions API
+                let id_field = if use_call_id {
+                    "call_id"
+                } else {
+                    "tool_call_id"
+                };
                 tool_results.push(json!({
                     "role": "tool",
-                    "tool_call_id": tool_use_id,
+                    id_field: tool_use_id,
                     "content": content_text,
                 }));
             }
@@ -254,7 +393,9 @@ fn convert_assistant_blocks_to_openai(blocks: &[Value]) -> Result<Vec<Value>> {
                     "type": "function",
                     "function": {
                         "name": name,
-                        "arguments": serde_json::to_string(&input).unwrap_or_default(),
+                        "arguments": serde_json::to_string(&input).map_err(|e| {
+                            AppError::Transform(format!("Failed to serialize tool arguments: {}", e))
+                        })?,
                     }
                 }));
             }

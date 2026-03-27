@@ -26,7 +26,13 @@ pub async fn forward_request(
     let base = provider.base_url.trim_end_matches('/');
     let url = match provider.api_format {
         ApiFormat::Anthropic => format!("{base}/v1/messages"),
-        ApiFormat::OpenAI => format!("{base}/v1/chat/completions"),
+        ApiFormat::OpenAI => {
+            // Prefer new Responses API by default
+            match provider.openai_api_version() {
+                "chat_completions" => format!("{base}/v1/chat/completions"),
+                _ => format!("{base}/v1/responses"), // Default to Responses API
+            }
+        }
     };
     let (auth_key, auth_val) = provider.auth_header(api_key);
 

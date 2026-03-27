@@ -93,6 +93,7 @@ impl App {
         let model_map = existing.map(|p| p.model_map.clone()).unwrap_or_default();
 
         let enabled = existing.map(|p| p.enabled).unwrap_or(true);
+        let api_version = existing.and_then(|p| p.api_version.clone());
         let provider = crate::config::Provider {
             id: provider_id.clone(),
             base_url,
@@ -102,6 +103,7 @@ impl App {
             notes: notes.clone(),
             routes,
             enabled,
+            api_version,
         };
 
         if is_rename {
