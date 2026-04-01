@@ -138,39 +138,30 @@ pub(super) fn handle_editing_key(
             // h / l: move cursor in text fields, or toggle toggle-fields.
             KeyCode::Char('h') | KeyCode::Left => {
                 let focused = form.focused;
-                let is_toggle = form.fields[focused].is_toggle;
-                if is_toggle {
+                if form.fields[focused].is_toggle {
                     form.fields[focused].toggle_value();
-                }
-                if !is_toggle {
-                    form.fields[focused].move_left();
-                }
-                if is_toggle {
                     app.save_form_in_place()?;
                     sync_proxy_config(app, server);
                     return Ok(());
+                } else {
+                    form.fields[focused].move_left();
                 }
             }
             KeyCode::Char('l') | KeyCode::Right => {
                 let focused = form.focused;
-                let is_toggle = form.fields[focused].is_toggle;
-                if is_toggle {
+                if form.fields[focused].is_toggle {
                     form.fields[focused].toggle_value();
-                }
-                if !is_toggle {
-                    form.fields[focused].move_right();
-                }
-                if is_toggle {
                     app.save_form_in_place()?;
                     sync_proxy_config(app, server);
                     return Ok(());
+                } else {
+                    form.fields[focused].move_right();
                 }
             }
             // Space: toggle toggle-type fields.
             KeyCode::Char(' ') => {
                 let focused = form.focused;
-                let is_toggle = form.fields[focused].is_toggle;
-                if is_toggle {
+                if form.fields[focused].is_toggle {
                     form.fields[focused].toggle_value();
                     app.save_form_in_place()?;
                     sync_proxy_config(app, server);
