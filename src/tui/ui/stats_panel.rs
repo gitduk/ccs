@@ -158,46 +158,7 @@ pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
     }
     lines.push(Line::from(""));
 
-    // Collect all known model names from test_results (fetched via /v1/models per provider).
-    // inactive_models: (model_name, in_selected_provider)
-    // Use the cursor-selected provider (not the active one) to determine support.
-    let selected_provider: &str = app
-        .table_state
-        .selected()
-        .and_then(|i| app.provider_names.get(i))
-        .map(|s| s.as_str())
-        .unwrap_or(app.config.current.as_str());
-    let used_models: std::collections::HashSet<&str> =
-        model_entries.iter().map(|(k, _, _)| k.as_str()).collect();
-
-    // Build known model set from persisted provider_models
-    let current_provider_models: std::collections::HashSet<&str> = app
-        .provider_models
-        .get(selected_provider)
-        .map(|names| names.iter().map(|s| s.as_str()).collect())
-        .unwrap_or_default();
-
-    let mut all_known: std::collections::HashMap<&str, bool> = std::collections::HashMap::new();
-    for (provider_name, names) in &app.provider_models {
-        let is_selected = provider_name.as_str() == selected_provider;
-        for name in names {
-            let entry = all_known.entry(name.as_str()).or_insert(false);
-            if is_selected {
-                *entry = true;
-            }
-        }
-    }
-    let mut inactive_models: Vec<(&str, bool)> = all_known
-        .into_iter()
-        .filter(|(m, _)| !used_models.contains(m))
-        .collect();
-    inactive_models.sort_unstable_by(|(a, _), (b, _)| {
-        a.bytes()
-            .map(|b| b.to_ascii_lowercase())
-            .cmp(b.bytes().map(|b| b.to_ascii_lowercase()))
-    });
-
-    if model_entries.is_empty() && inactive_models.is_empty() {
+    if model_entries.is_empty() {
         lines.push(Line::from(Span::styled("  No data yet", muted)));
     } else {
         // Cap label width at 30 chars to leave room for bars
@@ -247,66 +208,18 @@ pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
                 format!("{:<width$}", model, width = model_col_width)
             };
 
-            // White if model is supported by cursor-selected provider, muted otherwise
-            let in_current = current_provider_models.contains(model.as_str());
-            let bar_color = if in_current { t::TEXT } else { t::MUTED };
-
-            let label_color = if in_current { t::TEXT } else { t::MUTED };
+            let label_color = t::TEXT;
             lines.push(Line::from(vec![
                 Span::styled(label, Style::default().fg(label_color)),
                 Span::raw("  "),
-                Span::styled("░".repeat(input_bar), Style::default().fg(bar_color)),
-                Span::styled("█".repeat(output_bar), Style::default().fg(bar_color)),
+                Span::styled("░".repeat(input_bar), Style::default().fg(t::TEXT)),
+                Span::styled("█".repeat(output_bar), Style::default().fg(t::TEXT)),
                 Span::raw(" ".repeat(empty)),
                 Span::styled(
                     format!("  {:>6}", format_tokens(total)),
                     Style::default().fg(label_color),
                 ),
             ]));
-        }
-
-        // Inactive models: wrap into rows, provider color if in current provider, muted otherwise
-        if !inactive_models.is_empty() {
-            if !model_entries.is_empty() {
-                lines.push(Line::from(""));
-            }
-            // Grid layout: determine cols from max display width, then compute per-column widths.
-            // Use Unicode display width (handles CJK wide chars) rather than byte length.
-            let max_name = inactive_models
-                .iter()
-                .map(|(m, _)| m.width())
-                .max()
-                .unwrap_or(1);
-            let available_width = inner.width as usize;
-            let cols = (available_width / (max_name + 2)).max(1);
-            // Per-column width = max display width in that column + 2-space gap
-            let col_widths: Vec<usize> = (0..cols)
-                .map(|c| {
-                    inactive_models
-                        .iter()
-                        .skip(c)
-                        .step_by(cols)
-                        .map(|(m, _)| m.width())
-                        .max()
-                        .unwrap_or(0)
-                        + 2
-                })
-                .collect();
-            for chunk in inactive_models.chunks(cols) {
-                let spans: Vec<Span> = chunk
-                    .iter()
-                    .enumerate()
-                    .map(|(i, (model, in_current))| {
-                        let color = if *in_current { t::TEXT } else { t::MUTED };
-                        let w = col_widths[i];
-                        Span::styled(
-                            format!("{:<width$}", model, width = w),
-                            Style::default().fg(color),
-                        )
-                    })
-                    .collect();
-                lines.push(Line::from(spans));
-            }
         }
     }
 

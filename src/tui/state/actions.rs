@@ -286,35 +286,36 @@ impl App {
 
     pub fn toggle_provider_enabled(&mut self) -> Result<()> {
         if let Some(name) = self.selected_name().map(|s| s.to_string())
-            && let Some(provider) = self.config.providers.get_mut(&name) {
-                provider.enabled = !provider.enabled;
-                let now_enabled = provider.enabled;
-                let state = if now_enabled { "enabled" } else { "disabled" };
+            && let Some(provider) = self.config.providers.get_mut(&name)
+        {
+            provider.enabled = !provider.enabled;
+            let now_enabled = provider.enabled;
+            let state = if now_enabled { "enabled" } else { "disabled" };
 
-                // If we just disabled the current provider, advance to the next enabled one.
-                if !now_enabled && self.config.current == name {
-                    let next = self
-                        .config
-                        .providers
-                        .iter()
-                        .find(|(k, v)| *k != &name && v.enabled)
-                        .map(|(k, _)| k.clone());
-                    match next {
-                        Some(next_name) => self.config.current = next_name,
-                        None => {
-                            config::save_config(&self.config)?;
-                            self.set_message(
-                                format!("'{name}' disabled — no enabled providers remain"),
-                                MessageKind::Error,
-                            );
-                            return Ok(());
-                        }
+            // If we just disabled the current provider, advance to the next enabled one.
+            if !now_enabled && self.config.current == name {
+                let next = self
+                    .config
+                    .providers
+                    .iter()
+                    .find(|(k, v)| *k != &name && v.enabled)
+                    .map(|(k, _)| k.clone());
+                match next {
+                    Some(next_name) => self.config.current = next_name,
+                    None => {
+                        config::save_config(&self.config)?;
+                        self.set_message(
+                            format!("'{name}' disabled — no enabled providers remain"),
+                            MessageKind::Error,
+                        );
+                        return Ok(());
                     }
                 }
-
-                config::save_config(&self.config)?;
-                self.set_message(format!("'{name}' {state}"), MessageKind::Info);
             }
+
+            config::save_config(&self.config)?;
+            self.set_message(format!("'{name}' {state}"), MessageKind::Info);
+        }
         Ok(())
     }
 }

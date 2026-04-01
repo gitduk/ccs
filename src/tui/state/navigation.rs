@@ -58,6 +58,10 @@ impl App {
             provider_models,
             test_client: reqwest::Client::new(),
             pending_key: None,
+            models_search_field: super::FormField::text("", ""),
+            models_insert: true,
+            models_selected: 0,
+            models_scroll: 0,
         })
     }
 
@@ -143,9 +147,10 @@ impl App {
     /// Clear message if it has expired (after MESSAGE_TIMEOUT_SECS seconds).
     pub fn tick_message(&mut self) {
         if let Some((_, _, created)) = &self.message
-            && created.elapsed() > std::time::Duration::from_secs(MESSAGE_TIMEOUT_SECS) {
-                self.message = None;
-            }
+            && created.elapsed() > std::time::Duration::from_secs(MESSAGE_TIMEOUT_SECS)
+        {
+            self.message = None;
+        }
     }
 
     /// Drain completed background test results into test_results.

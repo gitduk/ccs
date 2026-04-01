@@ -312,3 +312,299 @@ fn default_config() -> AppConfig {
         db_path: None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── glob_match ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn glob_exact_match() {
+        assert!(glob_match("claude-opus-4", "claude-opus-4"));
+        assert!(!glob_match("claude-opus-4", "claude-opus-4-20250514"));
+    }
+
+    #[test]
+    fn glob_suffix_wildcard() {
+        assert!(glob_match("claude-sonnet*", "claude-sonnet-4-20250514"));
+        assert!(glob_match("claude-sonnet*", "claude-sonnet"));
+        assert!(!glob_match("claude-sonnet*", "claude-haiku-4"));
+    }
+
+    #[test]
+    fn glob_prefix_wildcard() {
+        assert!(glob_match("*opus*", "anthropic/claude-opus-4"));
+        assert!(glob_match("*opus*", "opus"));
+        assert!(!glob_match("*opus*", "haiku"));
+    }
+
+    #[test]
+    fn glob_middle_wildcard() {
+        assert!(glob_match("claude*4", "claude-sonnet-4"));
+        assert!(glob_match("claude*4", "claude-opus-4"));
+        assert!(!glob_match("claude*4", "claude-sonnet-3"));
+    }
+
+    #[test]
+    fn glob_multiple_wildcards() {
+        assert!(glob_match(
+            "*claude*sonnet*",
+            "anthropic/claude-sonnet-4-20250514"
+        ));
+        assert!(!glob_match("*claude*sonnet*", "anthropic/claude-opus-4"));
+    }
+
+    #[test]
+    fn glob_star_only_matches_anything() {
+        assert!(glob_match("*", "anything"));
+        assert!(glob_match("*", ""));
+    }
+
+    #[test]
+    fn glob_double_star_same_as_single() {
+        assert!(glob_match("**", "anything"));
+        assert!(glob_match("claude**sonnet", "claude-sonnet"));
+    }
+
+    // ─── RouteRule ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn route_rule_matches_when_enabled() {
+        let rule = RouteRule {
+            id: "id".into(),
+            pattern: "claude-sonnet*".into(),
+            target: "mapped-model".into(),
+            enabled: true,
+        };
+        assert!(rule.matches("claude-sonnet-4-20250514"));
+        assert!(!rule.matches("claude-haiku-4"));
+    }
+
+    #[test]
+    fn route_rule_disabled_never_matches() {
+        let rule = RouteRule {
+            id: "id".into(),
+            pattern: "*".into(),
+            target: "mapped-model".into(),
+            enabled: false,
+        };
+        assert!(!rule.matches("anything"));
+    }
+
+    #[test]
+    fn route_rule_is_valid_basic() {
+        let rule = RouteRule {
+            id: "id".into(),
+            pattern: "claude-sonnet*".into(),
+            target: "mapped-model".into(),
+            enabled: true,
+        };
+        // No known_models constraint → valid if pattern and target are non-empty.
+        assert!(rule.is_valid(&[]));
+    }
+
+    #[test]
+    fn route_rule_is_invalid_empty_pattern() {
+        let rule = RouteRule {
+            id: "id".into(),
+            pattern: "   ".into(),
+            target: "mapped-model".into(),
+            enabled: true,
+        };
+        assert!(!rule.is_valid(&[]));
+    }
+
+    #[test]
+    fn route_rule_is_invalid_empty_target() {
+        let rule = RouteRule {
+            id: "id".into(),
+            pattern: "claude-sonnet*".into(),
+            target: String::new(),
+            enabled: true,
+        };
+        assert!(!rule.is_valid(&[]));
+    }
+
+    #[test]
+    fn route_rule_is_invalid_when_target_not_in_known_models() {
+        let rule = RouteRule {
+            id: "id".into(),
+            pattern: "claude-sonnet*".into(),
+            target: "unknown-model".into(),
+            enabled: true,
+        };
+        let known = vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()];
+        assert!(!rule.is_valid(&known));
+    }
+
+    #[test]
+    fn route_rule_is_valid_when_target_in_known_models() {
+        let rule = RouteRule {
+            id: "id".into(),
+            pattern: "claude-sonnet*".into(),
+            target: "gpt-4o".into(),
+            enabled: true,
+        };
+        let known = vec!["gpt-4o".to_string()];
+        assert!(rule.is_valid(&known));
+    }
+
+    // ─── Provider helpers ────────────────────────────────────────────────────
+
+    fn make_provider(api_key: &str, api_format: ApiFormat) -> Provider {
+        Provider {
+            id: "test-id".into(),
+            base_url: "https://api.example.com".into(),
+            api_key: api_key.to_string(),
+            api_format,
+            model_map: HashMap::new(),
+            notes: String::new(),
+            routes: Vec::new(),
+            enabled: true,
+            api_version: None,
+        }
+    }
+
+    #[test]
+    fn resolve_api_key_plain_text() {
+        let p = make_provider("sk-my-key", ApiFormat::Anthropic);
+        assert_eq!(p.resolve_api_key().unwrap(), "sk-my-key");
+    }
+
+    #[test]
+    fn resolve_api_key_from_env() {
+        // SAFETY: single-threaded test, no concurrent env access.
+        unsafe { std::env::set_var("TEST_CCS_API_KEY", "env-value-123") };
+        let p = make_provider("$TEST_CCS_API_KEY", ApiFormat::Anthropic);
+        assert_eq!(p.resolve_api_key().unwrap(), "env-value-123");
+        unsafe { std::env::remove_var("TEST_CCS_API_KEY") };
+    }
+
+    #[test]
+    fn resolve_api_key_missing_env_errors() {
+        // SAFETY: single-threaded test, no concurrent env access.
+        unsafe { std::env::remove_var("TEST_CCS_MISSING_KEY") };
+        let p = make_provider("$TEST_CCS_MISSING_KEY", ApiFormat::Anthropic);
+        assert!(p.resolve_api_key().is_err());
+    }
+
+    #[test]
+    fn auth_header_anthropic_format() {
+        let p = make_provider("key", ApiFormat::Anthropic);
+        let (name, value) = p.auth_header("my-api-key");
+        assert_eq!(name, "x-api-key");
+        assert_eq!(value, "my-api-key");
+    }
+
+    #[test]
+    fn auth_header_openai_format() {
+        let p = make_provider("key", ApiFormat::OpenAI);
+        let (name, value) = p.auth_header("my-api-key");
+        assert_eq!(name, "authorization");
+        assert_eq!(value, "Bearer my-api-key");
+    }
+
+    #[test]
+    fn map_model_with_mapping() {
+        let mut p = make_provider("key", ApiFormat::OpenAI);
+        p.model_map.insert(
+            "claude-sonnet-4-20250514".into(),
+            "anthropic/claude-sonnet-4-20250514".into(),
+        );
+        assert_eq!(
+            p.map_model("claude-sonnet-4-20250514"),
+            "anthropic/claude-sonnet-4-20250514"
+        );
+    }
+
+    #[test]
+    fn map_model_passthrough_when_no_mapping() {
+        let p = make_provider("key", ApiFormat::OpenAI);
+        assert_eq!(p.map_model("claude-opus-4"), "claude-opus-4");
+    }
+
+    #[test]
+    fn openai_api_version_defaults_to_responses() {
+        let p = make_provider("key", ApiFormat::OpenAI);
+        assert_eq!(p.openai_api_version(), "responses");
+    }
+
+    #[test]
+    fn openai_api_version_chat_completions() {
+        let mut p = make_provider("key", ApiFormat::OpenAI);
+        p.api_version = Some("chat_completions".into());
+        assert_eq!(p.openai_api_version(), "chat_completions");
+    }
+
+    #[test]
+    fn uses_responses_api_true_for_openai_with_responses_version() {
+        let p = make_provider("key", ApiFormat::OpenAI);
+        assert!(p.uses_responses_api());
+    }
+
+    #[test]
+    fn uses_responses_api_false_for_anthropic() {
+        let p = make_provider("key", ApiFormat::Anthropic);
+        assert!(!p.uses_responses_api());
+    }
+
+    #[test]
+    fn uses_responses_api_false_for_chat_completions() {
+        let mut p = make_provider("key", ApiFormat::OpenAI);
+        p.api_version = Some("chat_completions".into());
+        assert!(!p.uses_responses_api());
+    }
+
+    // ─── AppConfig helpers ───────────────────────────────────────────────────
+
+    fn make_config(current: &str, providers: &[(&str, bool)]) -> AppConfig {
+        let mut map = IndexMap::new();
+        for (name, enabled) in providers {
+            let mut p = make_provider("key", ApiFormat::Anthropic);
+            p.id = format!("id-{name}");
+            p.enabled = *enabled;
+            map.insert(name.to_string(), p);
+        }
+        AppConfig {
+            current: current.to_string(),
+            listen: "127.0.0.1:7896".into(),
+            providers: map,
+            fallback: false,
+            db_path: None,
+        }
+    }
+
+    #[test]
+    fn current_provider_ok() {
+        let cfg = make_config("prov-a", &[("prov-a", true)]);
+        let (name, _) = cfg.current_provider().unwrap();
+        assert_eq!(name, "prov-a");
+    }
+
+    #[test]
+    fn current_provider_not_found() {
+        let cfg = make_config("missing", &[("prov-a", true)]);
+        assert!(cfg.current_provider().is_err());
+    }
+
+    #[test]
+    fn current_enabled_provider_ok() {
+        let cfg = make_config("prov-a", &[("prov-a", true)]);
+        assert!(cfg.current_enabled_provider().is_ok());
+    }
+
+    #[test]
+    fn current_enabled_provider_disabled_errors() {
+        let cfg = make_config("prov-a", &[("prov-a", false)]);
+        assert!(cfg.current_enabled_provider().is_err());
+    }
+
+    #[test]
+    fn name_to_id_map_correct() {
+        let cfg = make_config("prov-a", &[("prov-a", true), ("prov-b", true)]);
+        let map = cfg.name_to_id_map();
+        assert_eq!(map.get("prov-a").unwrap(), "id-prov-a");
+        assert_eq!(map.get("prov-b").unwrap(), "id-prov-b");
+    }
+}

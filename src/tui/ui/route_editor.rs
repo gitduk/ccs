@@ -7,8 +7,8 @@ use ratatui::widgets::Paragraph;
 use super::super::state::{App, ProviderForm, filter_suggestions};
 use super::super::theme::{self as t};
 
-/// Compute how many suggestion items to display (used for layout height calculation).
-pub(super) fn suggest_count(form: &ProviderForm, app: &App) -> u16 {
+/// Return all suggestion models matching the current target filter, or empty if not applicable.
+fn get_suggestions<'a>(form: &ProviderForm, app: &'a App) -> Vec<&'a str> {
     if form.route_editing && form.route_edit_target && form.in_routes() {
         let prov_key = form
             .original_name
@@ -24,10 +24,16 @@ pub(super) fn suggest_count(form: &ProviderForm, app: &App) -> u16 {
             .get(form.route_cursor)
             .map(|r| r.target.as_str())
             .unwrap_or("");
-        filter_suggestions(models, tgt_filter).len() as u16
+        filter_suggestions(models, tgt_filter)
     } else {
-        0
+        vec![]
     }
+}
+
+/// Number of rows the suggestion viewport occupies (0 when hidden, capped at 8).
+/// Used by the layout engine to allocate vertical space.
+pub(super) fn suggest_panel_height(form: &ProviderForm, app: &App) -> u16 {
+    get_suggestions(form, app).len().min(8) as u16
 }
 
 /// Render the Routes section (rules list + suggestion panel) into the given area.
@@ -165,30 +171,28 @@ pub(super) fn draw_routes_section(
     }
 
     // ── Suggestion panel ───────────────────────────────────────────────────
-    let suggest_items = suggest_count(form, app);
-    if suggest_items > 0 {
-        let prov_key = form
-            .original_name
-            .as_deref()
-            .unwrap_or_else(|| form.fields[0].value.trim());
-        let models = app
-            .provider_models
-            .get(prov_key)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
-        let tgt_filter = form
-            .routes
-            .get(form.route_cursor)
-            .map(|r| r.target.as_str())
-            .unwrap_or("");
-        let suggestions = filter_suggestions(models, tgt_filter);
+    let suggestions = get_suggestions(form, app);
+    if !suggestions.is_empty() {
+        let scroll = form.route_suggest_scroll;
+        let total = suggestions.len();
+        let window = &suggestions[scroll..total.min(scroll + 8)];
 
+        let scroll_hint = if total > 8 {
+            format!(
+                "  ── Suggestions ({}/{}) ─────────────────",
+                scroll + window.len(),
+                total
+            )
+        } else {
+            "  ── Suggestions ────────────────────────".to_string()
+        };
         lines.push(Line::from(Span::styled(
-            "  ── Suggestions ────────────────────────",
+            scroll_hint,
             Style::default().fg(t::MUTED),
         )));
-        for (si, model) in suggestions.iter().enumerate() {
-            let is_hi = form.route_suggest_active && si == form.route_suggest_idx;
+        for (wi, model) in window.iter().enumerate() {
+            let global_idx = scroll + wi;
+            let is_hi = form.route_suggest_active && global_idx == form.route_suggest_idx;
             if is_hi {
                 lines.push(Line::from(vec![
                     Span::styled("  ▶ ", Style::default().fg(prov_color)),

@@ -1,8 +1,10 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::tui::server::sync_proxy_config;
-use crate::tui::state::{Mode, VimMode};
+use crate::tui::state::{MessageKind, Mode, VimMode};
 use crate::tui::{App, ServerHandle};
+
+use super::insert::{InsertKeyResult, handle_field_insert_key};
 
 use super::routes::handle_routes_key;
 
@@ -12,7 +14,7 @@ pub(super) fn handle_editing_key(
     modifiers: KeyModifiers,
     server: &Option<ServerHandle>,
 ) -> crate::error::Result<()> {
-    let Some(form) = &mut app.form else {
+    let Some(form) = app.form.as_mut() else {
         app.mode = Mode::Normal;
         return Ok(());
     };
@@ -21,10 +23,15 @@ pub(super) fn handle_editing_key(
     let in_routes = form.in_routes();
 
     // ── Consume pending key (500 ms timeout) ─────────────────────────────────
-    let prev = form
-        .pending_key
-        .take()
-        .and_then(|(k, t)| (t.elapsed() < std::time::Duration::from_millis(500)).then_some(k));
+    // Note: in Insert mode, pending_key is managed by handle_field_insert_key
+    // for the "jk" escape sequence. Only consume it here for Normal mode sequences.
+    let prev = if form.vim_mode == VimMode::Normal {
+        form.pending_key
+            .take()
+            .and_then(|(k, t)| (t.elapsed() < super::insert::PENDING_KEY_TIMEOUT).then_some(k))
+    } else {
+        None
+    };
 
     // ── dd in route Normal nav mode ───────────────────────────────────────────
     if in_routes
@@ -130,31 +137,44 @@ pub(super) fn handle_editing_key(
             KeyCode::BackTab => form.focus_prev(),
             // h / l: move cursor in text fields, or toggle toggle-fields.
             KeyCode::Char('h') | KeyCode::Left => {
-                let f = &mut form.fields[form.focused];
-                if f.is_toggle {
-                    f.toggle_value();
+                let focused = form.focused;
+                let is_toggle = form.fields[focused].is_toggle;
+                if is_toggle {
+                    form.fields[focused].toggle_value();
+                }
+                if !is_toggle {
+                    form.fields[focused].move_left();
+                }
+                if is_toggle {
                     app.save_form_in_place()?;
                     sync_proxy_config(app, server);
-                } else {
-                    f.move_left();
+                    return Ok(());
                 }
             }
             KeyCode::Char('l') | KeyCode::Right => {
-                let f = &mut form.fields[form.focused];
-                if f.is_toggle {
-                    f.toggle_value();
+                let focused = form.focused;
+                let is_toggle = form.fields[focused].is_toggle;
+                if is_toggle {
+                    form.fields[focused].toggle_value();
+                }
+                if !is_toggle {
+                    form.fields[focused].move_right();
+                }
+                if is_toggle {
                     app.save_form_in_place()?;
                     sync_proxy_config(app, server);
-                } else {
-                    f.move_right();
+                    return Ok(());
                 }
             }
             // Space: toggle toggle-type fields.
             KeyCode::Char(' ') => {
-                if form.fields[form.focused].is_toggle {
-                    form.fields[form.focused].toggle_value();
+                let focused = form.focused;
+                let is_toggle = form.fields[focused].is_toggle;
+                if is_toggle {
+                    form.fields[focused].toggle_value();
                     app.save_form_in_place()?;
                     sync_proxy_config(app, server);
+                    return Ok(());
                 }
             }
             // Enter on a text field → Insert mode (toggle fields don't have a text cursor).
@@ -181,53 +201,69 @@ pub(super) fn handle_editing_key(
             // dd → delete current line in multiline fields.
             KeyCode::Char('d') if form.fields[form.focused].is_multiline => {
                 if prev == Some('d') {
-                    form.fields[form.focused].delete_current_line();
+                    let focused = form.focused;
+                    form.fields[focused].delete_current_line();
+                    // Borrow on `form` ends here; safe to call app methods below.
                     app.save_form_in_place()?;
                     sync_proxy_config(app, server);
+                    return Ok(());
                 } else {
                     form.pending_key = Some(('d', std::time::Instant::now()));
                 }
             }
+            // yy → copy current field value to clipboard.
+            KeyCode::Char('y') => {
+                if prev == Some('y') {
+                    let value = form.fields[form.focused].value.clone();
+                    // Borrow on `form` ends here (value is cloned); safe to call app methods.
+                    if super::copy_to_clipboard(&value) {
+                        app.set_message("Copied to clipboard", MessageKind::Success);
+                    } else {
+                        app.set_message("Copy failed (wl-copy not found?)", MessageKind::Error);
+                    }
+                    return Ok(());
+                } else {
+                    form.pending_key = Some(('y', std::time::Instant::now()));
+                }
+            }
             _ => {}
+        }
+        // If we just entered Insert mode, clear any stale pending key so that
+        // Normal-mode sequences (dd / yy / gg) don't leak into Insert mode.
+        if form.vim_mode == VimMode::Insert {
+            form.pending_key = None;
         }
         return Ok(());
     }
 
     // ── Regular field — Insert mode ───────────────────────────────────────────
+
+    // Editing-specific keys intercepted before the common handler.
     match code {
         KeyCode::Enter => {
             form.vim_mode = VimMode::Normal;
             app.save_form_in_place()?;
             sync_proxy_config(app, server);
+            return Ok(());
         }
-        // Ctrl+J inserts a newline in multiline fields.
-        KeyCode::Char('j') if ctrl && form.fields[form.focused].is_multiline => {
-            form.fields[form.focused].insert_newline();
+        KeyCode::Tab => {
+            form.focus_next();
+            return Ok(());
         }
-        KeyCode::Tab => form.focus_next(),
-        KeyCode::BackTab => form.focus_prev(),
-        // Up / Down on single-line fields moves to prev/next field.
-        KeyCode::Down if !form.fields[form.focused].is_multiline => form.focus_next(),
-        KeyCode::Up if !form.fields[form.focused].is_multiline => form.focus_prev(),
-        KeyCode::Down => {
-            if !form.fields[form.focused].move_down() {
-                form.focus_next();
-            }
+        KeyCode::BackTab => {
+            form.focus_prev();
+            return Ok(());
         }
-        KeyCode::Up => {
-            if !form.fields[form.focused].move_up() {
-                form.focus_prev();
-            }
-        }
+        // Ctrl+J: insert newline in multiline fields, or move to next field.
         KeyCode::Char('j') if ctrl => {
             if form.fields[form.focused].is_multiline {
-                if !form.fields[form.focused].move_down() {
-                    form.focus_next();
-                }
+                form.fields[form.focused].insert_newline();
             } else {
                 form.focus_next();
             }
+            return Ok(());
         }
+        // Ctrl+K: move up/prev field.
         KeyCode::Char('k') if ctrl => {
             if form.fields[form.focused].is_multiline {
                 if !form.fields[form.focused].move_up() {
@@ -236,56 +272,67 @@ pub(super) fn handle_editing_key(
             } else {
                 form.focus_prev();
             }
+            return Ok(());
         }
-        _ => {
-            let field = &mut form.fields[form.focused];
-            if field.is_toggle {
-                match code {
-                    KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => {
-                        field.toggle_value();
-                    }
-                    KeyCode::Char('h') | KeyCode::Char('l') if ctrl => {
-                        field.toggle_value();
-                    }
-                    _ => {}
+        // Up/Down: field navigation (single-line) or cursor movement (multiline).
+        KeyCode::Down => {
+            if form.fields[form.focused].is_multiline {
+                if !form.fields[form.focused].move_down() {
+                    form.focus_next();
                 }
             } else {
-                match code {
-                    KeyCode::Char(c) if !ctrl => {
-                        field.insert(c);
-                        app.save_form_in_place()?;
-                        sync_proxy_config(app, server);
-                    }
-                    KeyCode::Char('w') if ctrl => {
-                        field.delete_word_back();
-                        app.save_form_in_place()?;
-                        sync_proxy_config(app, server);
-                    }
-                    KeyCode::Char('h') if ctrl => {
-                        field.backspace();
-                        app.save_form_in_place()?;
-                        sync_proxy_config(app, server);
-                    }
-                    KeyCode::Backspace => {
-                        field.backspace();
-                        app.save_form_in_place()?;
-                        sync_proxy_config(app, server);
-                    }
-                    KeyCode::Delete => {
-                        field.delete();
-                        app.save_form_in_place()?;
-                        sync_proxy_config(app, server);
-                    }
-                    KeyCode::Left => field.move_left(),
-                    KeyCode::Right => field.move_right(),
-                    KeyCode::Home => field.home(),
-                    KeyCode::End => field.end(),
-                    KeyCode::Char('a') if ctrl => field.home(),
-                    KeyCode::Char('e') if ctrl => field.end(),
-                    _ => {}
-                }
+                form.focus_next();
             }
+            return Ok(());
         }
+        KeyCode::Up => {
+            if form.fields[form.focused].is_multiline {
+                if !form.fields[form.focused].move_up() {
+                    form.focus_prev();
+                }
+            } else {
+                form.focus_prev();
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    // Toggle fields have their own key handling; common editor does not apply.
+    if form.fields[form.focused].is_toggle {
+        match code {
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => {
+                form.fields[form.focused].toggle_value();
+                app.save_form_in_place()?;
+                sync_proxy_config(app, server);
+            }
+            KeyCode::Char('h') | KeyCode::Char('l') if ctrl => {
+                form.fields[form.focused].toggle_value();
+                app.save_form_in_place()?;
+                sync_proxy_config(app, server);
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+
+    // Common Insert-mode editing (Backspace/Ctrl+W/Home/End/jk/Esc/…).
+    match handle_field_insert_key(
+        &mut form.fields[form.focused],
+        code,
+        ctrl,
+        &mut form.pending_key,
+    ) {
+        InsertKeyResult::ExitInsert => {
+            form.vim_mode = VimMode::Normal;
+            app.save_form_in_place()?;
+            sync_proxy_config(app, server);
+        }
+        InsertKeyResult::TextChanged => {
+            app.save_form_in_place()?;
+            sync_proxy_config(app, server);
+        }
+        InsertKeyResult::Consumed | InsertKeyResult::NotHandled => {}
     }
     Ok(())
 }

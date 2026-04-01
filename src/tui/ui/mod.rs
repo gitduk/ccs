@@ -2,9 +2,9 @@ mod dialogs;
 mod form;
 mod format;
 mod layout;
-mod main_view;
 mod route_editor;
 mod stats_panel;
+mod view;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -21,14 +21,15 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         ])
         .split(f.area());
 
-    main_view::draw_title_bar(f, app, chunks[0]);
-    main_view::draw_main(f, app, chunks[1]);
-    main_view::draw_keybindings(f, app, chunks[2]);
+    view::draw_title_bar(f, app, chunks[0]);
+    view::draw_main(f, app, chunks[1]);
+    view::draw_keybindings(f, app, chunks[2]);
 
     match &app.mode {
         Mode::Editing => form::draw_form(f, app),
         Mode::Confirm => dialogs::draw_confirm(f, app),
         Mode::Help => dialogs::draw_help(f, app),
+        Mode::Models => dialogs::draw_models(f, app),
         Mode::Normal => {}
     }
 }

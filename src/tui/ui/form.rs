@@ -18,8 +18,8 @@ pub(super) fn draw_form(f: &mut Frame, app: &App) {
     // Provider color: derived from the Name field so it updates live as the user types.
     let prov_color = t::provider_color(form.fields[0].value.trim());
 
-    // Compute suggestion count for layout height (only when editing target).
-    let suggest_items = super::route_editor::suggest_count(form, app);
+    // Compute suggestion panel height for layout (only when editing target).
+    let suggest_items = super::route_editor::suggest_panel_height(form, app);
 
     // ── Title: show action + Vim mode tag ────────────────────────────────────
     let vim_tag = match form.vim_mode {

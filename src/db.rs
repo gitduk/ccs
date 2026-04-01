@@ -79,36 +79,34 @@ fn do_migrate(conn: &Connection, name_to_id: &HashMap<String, String>) -> Result
         let mut stmt = conn.prepare(
             "SELECT provider_name, input, output, requests, failures FROM provider_stats",
         )?;
-        
-        stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, u64>(1)?,
-                    row.get::<_, u64>(2)?,
-                    row.get::<_, u64>(3)?,
-                    row.get::<_, u64>(4)?,
-                ))
-            })?
-            .filter_map(|r| r.ok())
-            .collect()
+
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u64>(1)?,
+                row.get::<_, u64>(2)?,
+                row.get::<_, u64>(3)?,
+                row.get::<_, u64>(4)?,
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .collect()
     };
 
     let model_rows: Vec<(String, String, u64, u64)> = {
         let mut stmt =
             conn.prepare("SELECT provider_name, model_name, input, output FROM model_stats")?;
-        
-        stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, u64>(2)?,
-                    row.get::<_, u64>(3)?,
-                ))
-            })?
-            .filter_map(|r| r.ok())
-            .collect()
+
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, u64>(2)?,
+                row.get::<_, u64>(3)?,
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .collect()
     };
 
     // Recreate tables with new schema.
@@ -285,14 +283,13 @@ pub fn load_provider_models(conn: &Connection) -> HashMap<String, Vec<String>> {
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
     if let Ok(mut stmt) = conn.prepare(
         "SELECT provider_name, model_name FROM model_stats ORDER BY provider_name, model_name",
-    )
-        && let Ok(rows) = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        }) {
-            for (provider, model) in rows.flatten() {
-                map.entry(provider).or_default().push(model);
-            }
+    ) && let Ok(rows) = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }) {
+        for (provider, model) in rows.flatten() {
+            map.entry(provider).or_default().push(model);
         }
+    }
     map
 }
 
@@ -315,6 +312,19 @@ pub fn upsert_provider_models(
 
 pub fn clear_all(conn: &Connection) -> Result<()> {
     conn.execute_batch("BEGIN; DELETE FROM provider_stats; DELETE FROM model_stats; COMMIT;")
+}
+
+pub fn clear_provider(conn: &Connection, provider_id: &str) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM provider_stats WHERE provider_id = ?1",
+        [provider_id],
+    )?;
+    tx.execute(
+        "DELETE FROM model_stats WHERE provider_id = ?1",
+        [provider_id],
+    )?;
+    tx.commit()
 }
 
 #[cfg(test)]
@@ -412,17 +422,4 @@ mod tests {
             "failures should be 5 after clear + 5 failure writes"
         );
     }
-}
-
-pub fn clear_provider(conn: &Connection, provider_id: &str) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
-    tx.execute(
-        "DELETE FROM provider_stats WHERE provider_id = ?1",
-        [provider_id],
-    )?;
-    tx.execute(
-        "DELETE FROM model_stats WHERE provider_id = ?1",
-        [provider_id],
-    )?;
-    tx.commit()
 }

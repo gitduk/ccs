@@ -82,12 +82,13 @@ pub fn anthropic_to_openai_responses_request(req: &Value, provider: &Provider) -
     // thinking/extended thinking → reasoning (Responses API 特有)
     if let Some(thinking) = req.get("thinking")
         && let Some(enabled) = thinking.get("enabled").and_then(|e| e.as_bool())
-            && enabled {
-                result["reasoning_effort"] = json!("high");
-                if let Some(budget) = thinking.get("budget_tokens") {
-                    result["max_completion_tokens"] = budget.clone();
-                }
-            }
+        && enabled
+    {
+        result["reasoning_effort"] = json!("high");
+        if let Some(budget) = thinking.get("budget_tokens") {
+            result["max_completion_tokens"] = budget.clone();
+        }
+    }
 
     Ok(result)
 }
@@ -145,11 +146,12 @@ pub fn anthropic_to_openai_chat_completions_request(
     // thinking/extended thinking → reasoning (Chat Completions 兼容)
     if let Some(thinking) = req.get("thinking")
         && let Some(enabled) = thinking.get("enabled").and_then(|e| e.as_bool())
-            && enabled
-                && let Some(budget) = thinking.get("budget_tokens") {
-                    result["reasoning_effort"] = json!("high");
-                    result["max_completion_tokens"] = budget.clone();
-                }
+        && enabled
+        && let Some(budget) = thinking.get("budget_tokens")
+    {
+        result["reasoning_effort"] = json!("high");
+        result["max_completion_tokens"] = budget.clone();
+    }
 
     // Stream options for OpenAI Chat Completions
     if req.get("stream").and_then(|s| s.as_bool()).unwrap_or(false) {
@@ -447,13 +449,349 @@ pub fn clean_schema(schema: &mut Value) {
             obj.remove("format");
         }
         if let Some(props) = obj.get_mut("properties")
-            && let Some(props_obj) = props.as_object_mut() {
-                for (_key, prop) in props_obj.iter_mut() {
-                    clean_schema(prop);
-                }
+            && let Some(props_obj) = props.as_object_mut()
+        {
+            for (_key, prop) in props_obj.iter_mut() {
+                clean_schema(prop);
             }
+        }
         if let Some(items) = obj.get_mut("items") {
             clean_schema(items);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use serde_json::json;
+
+    use super::*;
+    use crate::config::{ApiFormat, Provider};
+
+    // ─── helpers ─────────────────────────────────────────────────────────────
+
+    fn provider_chat(api_version: Option<&str>) -> Provider {
+        Provider {
+            id: "id".into(),
+            base_url: "https://api.example.com".into(),
+            api_key: "key".into(),
+            api_format: ApiFormat::OpenAI,
+            model_map: HashMap::new(),
+            notes: String::new(),
+            routes: Vec::new(),
+            enabled: true,
+            api_version: api_version.map(String::from),
+        }
+    }
+
+    fn provider_responses() -> Provider {
+        // Default OpenAI provider uses Responses API
+        provider_chat(None)
+    }
+
+    fn provider_chat_completions() -> Provider {
+        provider_chat(Some("chat_completions"))
+    }
+
+    fn _provider_anthropic() -> Provider {
+        Provider {
+            api_format: ApiFormat::Anthropic,
+            ..provider_chat(None)
+        }
+    }
+
+    // ─── clean_schema ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn clean_schema_removes_uri_format() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "url": { "type": "string", "format": "uri" },
+                "name": { "type": "string" }
+            }
+        });
+        clean_schema(&mut schema);
+        assert!(schema["properties"]["url"].get("format").is_none());
+        assert_eq!(schema["properties"]["name"]["type"], "string");
+    }
+
+    #[test]
+    fn clean_schema_preserves_non_uri_format() {
+        let mut schema = json!({
+            "type": "string",
+            "format": "date-time"
+        });
+        clean_schema(&mut schema);
+        assert_eq!(schema["format"], "date-time");
+    }
+
+    #[test]
+    fn clean_schema_recursive_in_items() {
+        let mut schema = json!({
+            "type": "array",
+            "items": { "type": "string", "format": "uri" }
+        });
+        clean_schema(&mut schema);
+        assert!(schema["items"].get("format").is_none());
+    }
+
+    // ─── anthropic_to_openai_chat_completions_request ────────────────────────
+
+    #[test]
+    fn chat_completions_simple_user_message() {
+        let req = json!({
+            "model": "claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 100
+        });
+        let out = anthropic_to_openai_chat_completions_request(&req, &provider_chat_completions())
+            .unwrap();
+        assert_eq!(out["model"], "claude-sonnet-4-20250514");
+        assert_eq!(out["messages"][0]["role"], "user");
+        assert_eq!(out["messages"][0]["content"], "Hello");
+        assert_eq!(out["max_tokens"], 100);
+    }
+
+    #[test]
+    fn chat_completions_system_prompt_becomes_first_message() {
+        let req = json!({
+            "model": "claude-opus-4",
+            "system": "You are helpful.",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 50
+        });
+        let out = anthropic_to_openai_chat_completions_request(&req, &provider_chat_completions())
+            .unwrap();
+        assert_eq!(out["messages"][0]["role"], "system");
+        assert_eq!(out["messages"][0]["content"], "You are helpful.");
+        assert_eq!(out["messages"][1]["role"], "user");
+    }
+
+    #[test]
+    fn chat_completions_system_as_content_blocks() {
+        let req = json!({
+            "model": "m",
+            "system": [{"type": "text", "text": "line1"}, {"type": "text", "text": "line2"}],
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 10
+        });
+        let out = anthropic_to_openai_chat_completions_request(&req, &provider_chat_completions())
+            .unwrap();
+        assert_eq!(out["messages"][0]["content"], "line1\nline2");
+    }
+
+    #[test]
+    fn chat_completions_model_mapping_applied() {
+        let mut p = provider_chat_completions();
+        p.model_map.insert(
+            "claude-sonnet-4-20250514".into(),
+            "openrouter/claude-sonnet-4".into(),
+        );
+        let req = json!({
+            "model": "claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 10
+        });
+        let out = anthropic_to_openai_chat_completions_request(&req, &p).unwrap();
+        assert_eq!(out["model"], "openrouter/claude-sonnet-4");
+    }
+
+    #[test]
+    fn chat_completions_stop_sequences_mapped_to_stop() {
+        let req = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 10,
+            "stop_sequences": ["END", "STOP"]
+        });
+        let out = anthropic_to_openai_chat_completions_request(&req, &provider_chat_completions())
+            .unwrap();
+        assert_eq!(out["stop"], json!(["END", "STOP"]));
+    }
+
+    #[test]
+    fn chat_completions_streaming_adds_stream_options() {
+        let req = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 10,
+            "stream": true
+        });
+        let out = anthropic_to_openai_chat_completions_request(&req, &provider_chat_completions())
+            .unwrap();
+        assert_eq!(out["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn chat_completions_tool_definitions_converted() {
+        let req = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 10,
+            "tools": [{
+                "name": "get_weather",
+                "description": "Get weather",
+                "input_schema": {
+                    "type": "object",
+                    "properties": { "city": { "type": "string" } }
+                }
+            }]
+        });
+        let out = anthropic_to_openai_chat_completions_request(&req, &provider_chat_completions())
+            .unwrap();
+        let tool = &out["tools"][0];
+        assert_eq!(tool["type"], "function");
+        assert_eq!(tool["function"]["name"], "get_weather");
+        assert_eq!(tool["function"]["description"], "Get weather");
+    }
+
+    #[test]
+    fn chat_completions_tool_choice_any_maps_to_required() {
+        let req = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 10,
+            "tools": [{"name": "t", "description": "", "input_schema": {"type": "object"}}],
+            "tool_choice": {"type": "any"}
+        });
+        let out = anthropic_to_openai_chat_completions_request(&req, &provider_chat_completions())
+            .unwrap();
+        assert_eq!(out["tool_choice"], "required");
+    }
+
+    #[test]
+    fn chat_completions_tool_choice_specific_tool() {
+        let req = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 10,
+            "tools": [{"name": "search", "description": "", "input_schema": {"type": "object"}}],
+            "tool_choice": {"type": "tool", "name": "search"}
+        });
+        let out = anthropic_to_openai_chat_completions_request(&req, &provider_chat_completions())
+            .unwrap();
+        assert_eq!(out["tool_choice"]["type"], "function");
+        assert_eq!(out["tool_choice"]["function"]["name"], "search");
+    }
+
+    #[test]
+    fn chat_completions_thinking_maps_to_reasoning_effort() {
+        let req = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "Think hard"}],
+            "max_tokens": 10,
+            "thinking": {"enabled": true, "budget_tokens": 2000}
+        });
+        let out = anthropic_to_openai_chat_completions_request(&req, &provider_chat_completions())
+            .unwrap();
+        assert_eq!(out["reasoning_effort"], "high");
+        assert_eq!(out["max_completion_tokens"], 2000);
+    }
+
+    #[test]
+    fn chat_completions_assistant_tool_use_converted() {
+        let req = json!({
+            "model": "m",
+            "messages": [{
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": "call-1",
+                    "name": "search",
+                    "input": {"query": "rust"}
+                }]
+            }],
+            "max_tokens": 10
+        });
+        let out = anthropic_to_openai_chat_completions_request(&req, &provider_chat_completions())
+            .unwrap();
+        let msg = &out["messages"][0];
+        assert_eq!(msg["role"], "assistant");
+        let tc = &msg["tool_calls"][0];
+        assert_eq!(tc["id"], "call-1");
+        assert_eq!(tc["function"]["name"], "search");
+    }
+
+    #[test]
+    fn chat_completions_tool_result_uses_tool_call_id() {
+        let req = json!({
+            "model": "m",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "call-1",
+                    "content": "sunny"
+                }]
+            }],
+            "max_tokens": 10
+        });
+        let out = anthropic_to_openai_chat_completions_request(&req, &provider_chat_completions())
+            .unwrap();
+        let msg = &out["messages"][0];
+        assert_eq!(msg["role"], "tool");
+        assert_eq!(msg["tool_call_id"], "call-1");
+        assert_eq!(msg["content"], "sunny");
+    }
+
+    // ─── anthropic_to_openai_responses_request ────────────────────────────────
+
+    #[test]
+    fn responses_api_uses_input_field() {
+        let req = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 10
+        });
+        let out = anthropic_to_openai_responses_request(&req, &provider_responses()).unwrap();
+        assert!(out.get("input").is_some(), "Responses API must use 'input'");
+        assert!(out.get("messages").is_none());
+    }
+
+    #[test]
+    fn responses_api_tool_result_uses_call_id() {
+        let req = json!({
+            "model": "m",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "call-42",
+                    "content": "rainy"
+                }]
+            }],
+            "max_tokens": 10
+        });
+        let out = anthropic_to_openai_responses_request(&req, &provider_responses()).unwrap();
+        let msg = &out["input"][0];
+        assert_eq!(msg["call_id"], "call-42");
+        assert!(msg.get("tool_call_id").is_none());
+    }
+
+    // ─── anthropic_to_openai_request dispatch ────────────────────────────────
+
+    #[test]
+    fn dispatch_routes_to_responses_api_by_default() {
+        let req = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 10
+        });
+        let out = anthropic_to_openai_request(&req, &provider_responses()).unwrap();
+        assert!(out.get("input").is_some());
+    }
+
+    #[test]
+    fn dispatch_routes_to_chat_completions_when_configured() {
+        let req = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 10
+        });
+        let out = anthropic_to_openai_request(&req, &provider_chat_completions()).unwrap();
+        assert!(out.get("messages").is_some());
     }
 }

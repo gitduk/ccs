@@ -1,4 +1,5 @@
 use ratatui::Frame;
+use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
@@ -187,4 +188,174 @@ pub(super) fn draw_confirm(f: &mut Frame, app: &App) {
         Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
         area,
     );
+}
+
+/// Render the Models browser popup.
+///
+/// Layout (inside the outer border):
+///   Line 1  — search box  (Length 1)
+///   Line 2  — divider     (Length 1)
+///   Rest    — model list  (Min 0, scrollable)
+pub(super) fn draw_models(f: &mut Frame, app: &App) {
+    let filter = app.models_search_field.value.to_lowercase();
+
+    // Build filtered list: (provider_name, [model, ...]) sorted, empty providers skipped.
+    let mut providers: Vec<&String> = app.provider_models.keys().collect();
+    providers.sort_unstable();
+
+    let filtered: Vec<(&str, Vec<&str>)> = providers
+        .iter()
+        .filter_map(|prov| {
+            let models = app.provider_models.get(*prov)?;
+            let mut matched: Vec<&str> = models
+                .iter()
+                .filter(|m| filter.is_empty() || m.to_lowercase().contains(&filter))
+                .map(|s| s.as_str())
+                .collect();
+            if matched.is_empty() {
+                return None;
+            }
+            matched.sort_unstable();
+            Some((prov.as_str(), matched))
+        })
+        .collect();
+
+    // heading-per-provider + model rows + blank lines between groups; capped at u16::MAX.
+    let content_lines = (filtered.iter().map(|(_, ms)| 1 + ms.len()).sum::<usize>()
+        + filtered.len().saturating_sub(1))
+    .min(u16::MAX as usize) as u16;
+
+    // content + search(1) + divider(1) + border top/bottom(2) = +4 overhead.
+    let dialog_height = (content_lines + 4).min(f.area().height * 4 / 5).max(6);
+    let area = centered_fixed(80, dialog_height, f.area());
+    f.render_widget(Clear, area);
+
+    // Border color reflects mode: PRIMARY when search box is focused, MUTED in list-nav mode.
+    let border_color = if app.models_insert {
+        t::PRIMARY
+    } else {
+        t::MUTED
+    };
+    let outer_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .title(" Models ")
+        .title_style(
+            Style::default()
+                .fg(border_color)
+                .add_modifier(Modifier::BOLD),
+        )
+        .padding(Padding::new(1, 1, 0, 0));
+    let inner = outer_block.inner(area);
+    f.render_widget(outer_block, area);
+
+    // Split inner area: search line | divider | list.
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // search box
+            Constraint::Length(1), // divider
+            Constraint::Min(0),    // model list
+        ])
+        .split(inner);
+
+    // ── Search box ────────────────────────────────────────────────────────
+    // In Insert mode: show cursor at the correct position (reversed block).
+    // In Normal mode: render as plain dimmed text (no cursor).
+    let search_line = if app.models_insert {
+        let val = &app.models_search_field.value;
+        let cur = app.models_search_field.cursor.min(val.len());
+        let before = &val[..cur];
+        let cursor_ch = val[cur..].chars().next().unwrap_or(' ');
+        let after_start = cur
+            + if cur < val.len() {
+                cursor_ch.len_utf8()
+            } else {
+                0
+            };
+        let after = if after_start <= val.len() {
+            &val[after_start..]
+        } else {
+            ""
+        };
+        Line::from(vec![
+            Span::styled("Search  ", Style::default().fg(t::MUTED)),
+            Span::raw(before.to_string()),
+            Span::styled(
+                cursor_ch.to_string(),
+                Style::default()
+                    .fg(t::PRIMARY)
+                    .add_modifier(Modifier::REVERSED),
+            ),
+            Span::raw(after.to_string()),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("Search  ", Style::default().fg(t::MUTED)),
+            Span::styled(
+                &app.models_search_field.value,
+                Style::default().fg(t::MUTED),
+            ),
+        ])
+    };
+    f.render_widget(Paragraph::new(search_line), chunks[0]);
+
+    // ── Divider ───────────────────────────────────────────────────────────
+    let divider = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(t::MUTED));
+    f.render_widget(divider, chunks[1]);
+
+    // ── Model list ────────────────────────────────────────────────────────
+    let list_height = chunks[2].height;
+
+    // Build lines and a flat index for highlight lookup.
+    let mut lines: Vec<Line> = Vec::new();
+    let mut flat_idx: usize = 0; // global index into the flat model list
+
+    if filtered.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No matches",
+            Style::default().fg(t::MUTED),
+        )));
+    } else {
+        for (gi, (prov, models)) in filtered.iter().enumerate() {
+            if gi > 0 {
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(Span::styled(
+                format!("  {prov}"),
+                Style::default()
+                    .fg(t::provider_color(prov))
+                    .add_modifier(Modifier::BOLD),
+            )));
+            let last = models.len().saturating_sub(1);
+            for (mi, model) in models.iter().enumerate() {
+                let is_selected = flat_idx == app.models_selected;
+                let prefix = if mi == last { "    └ " } else { "    ├ " };
+                if is_selected {
+                    let prov_color = t::provider_color(prov);
+                    lines.push(Line::from(vec![
+                        Span::styled("  ▶ ", Style::default().fg(prov_color)),
+                        Span::styled(
+                            model.to_string(),
+                            Style::default().fg(prov_color).add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::styled(prefix, Style::default().fg(t::MUTED)),
+                        Span::styled(*model, Style::default().fg(t::TEXT)),
+                    ]));
+                }
+                flat_idx += 1;
+            }
+        }
+    }
+
+    // Clamp scroll so we never scroll past the last line.
+    let max_scroll = (lines.len().min(u16::MAX as usize) as u16).saturating_sub(list_height);
+    let scroll = app.models_scroll.min(max_scroll);
+
+    f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), chunks[2]);
 }

@@ -1,7 +1,7 @@
 use crossterm::event::KeyCode;
 
 use crate::tui::server::sync_proxy_config;
-use crate::tui::state::{ConfirmAction, Mode};
+use crate::tui::state::{ConfirmAction, MessageKind, Mode};
 use crate::tui::{App, ServerHandle};
 
 pub(super) fn handle_normal_key(
@@ -18,7 +18,7 @@ pub(super) fn handle_normal_key(
     let prev = app
         .pending_key
         .take()
-        .and_then(|(k, t)| (t.elapsed() < std::time::Duration::from_millis(500)).then_some(k));
+        .and_then(|(k, t)| (t.elapsed() < super::insert::PENDING_KEY_TIMEOUT).then_some(k));
 
     // Two-key sequences: dd → delete, gg → go to top.
     if let Some(pk) = prev {
@@ -32,6 +32,20 @@ pub(super) fn handle_normal_key(
             ('g', KeyCode::Char('g')) => {
                 if !app.provider_names.is_empty() {
                     app.table_state.select(Some(0));
+                }
+                return Ok(());
+            }
+            ('y', KeyCode::Char('y')) => {
+                if let Some(provider) = app
+                    .selected_name()
+                    .and_then(|name| app.config.providers.get(name))
+                {
+                    let url = provider.base_url.clone();
+                    if super::copy_to_clipboard(&url) {
+                        app.set_message("Copied base URL", MessageKind::Success);
+                    } else {
+                        app.set_message("Copy failed (wl-copy not found?)", MessageKind::Error);
+                    }
                 }
                 return Ok(());
             }
@@ -61,12 +75,15 @@ pub(super) fn handle_normal_key(
                 app.table_state.select(Some(last));
             }
         }
-        // First key of gg / dd — store in buffer.
+        // First key of gg / dd / yy — store in buffer.
         KeyCode::Char('g') => {
             app.pending_key = Some(('g', std::time::Instant::now()));
         }
         KeyCode::Char('d') => {
             app.pending_key = Some(('d', std::time::Instant::now()));
+        }
+        KeyCode::Char('y') => {
+            app.pending_key = Some(('y', std::time::Instant::now()));
         }
 
         // ── Provider actions ──────────────────────────────────────────────────
@@ -110,6 +127,12 @@ pub(super) fn handle_normal_key(
         KeyCode::Char('C') => app.confirm(ConfirmAction::Clear),
         KeyCode::Char('h') | KeyCode::Char('?') => {
             app.mode = Mode::Help;
+        }
+        KeyCode::Char('m') => {
+            app.mode = Mode::Models;
+            app.models_insert = true;
+            app.models_selected = 0;
+            app.models_scroll = 0;
         }
         _ => {}
     }

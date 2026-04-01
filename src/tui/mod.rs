@@ -3,7 +3,7 @@ pub mod theme;
 mod ui;
 
 mod event_loop;
-mod keys;
+mod input;
 mod server;
 mod testing;
 
@@ -100,12 +100,13 @@ fn run_loop(
         terminal.draw(|f| ui::draw(f, app))?;
 
         if event::poll(Duration::from_millis(250))?
-            && let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                keys::handle_key(app, key.code, key.modifiers, server)?;
+            && let Event::Key(key) = event::read()?
+        {
+            if key.kind != KeyEventKind::Press {
+                continue;
             }
+            input::handle_key(app, key.code, key.modifiers, server)?;
+        }
 
         if app.should_quit {
             break;

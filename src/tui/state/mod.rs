@@ -28,6 +28,8 @@ pub enum Mode {
     Editing,
     Confirm,
     Help,
+    /// Models browser popup: search and browse all available models.
+    Models,
 }
 
 /// Vim-style sub-mode used inside the provider editor form.
@@ -85,6 +87,14 @@ pub struct App {
     pub test_client: reqwest::Client,
     /// Pending first key of a two-key sequence (`dd`, `gg`) in the normal list view.
     pub pending_key: Option<(char, std::time::Instant)>,
+    /// Search field in the Models popup (value + cursor).
+    pub models_search_field: FormField,
+    /// True = Insert mode (search box focused); false = Normal mode (list navigation).
+    pub models_insert: bool,
+    /// Index of the highlighted model in the flat filtered list.
+    pub models_selected: usize,
+    /// Scroll offset (rows) for the models list.
+    pub models_scroll: u16,
 }
 
 // ─── Provider editor form ─────────────────────────────────────────────────────
@@ -115,8 +125,10 @@ pub struct ProviderForm {
     pub route_tgt_field: FormField,
     /// True when keyboard navigation focus is inside the suggestion list.
     pub route_suggest_active: bool,
-    /// Currently highlighted index inside the filtered suggestion list.
+    /// Currently highlighted index inside the filtered suggestion list (global, not viewport-relative).
     pub route_suggest_idx: usize,
+    /// First visible suggestion index; keeps the highlighted item within the 8-row viewport.
+    pub route_suggest_scroll: usize,
 
     /// Pending first key of a two-key sequence (`ZZ`, `ZQ`, `dd`) inside the form.
     pub pending_key: Option<(char, std::time::Instant)>,
@@ -369,6 +381,7 @@ impl ProviderForm {
             route_tgt_field: FormField::text("", ""),
             route_suggest_active: false,
             route_suggest_idx: 0,
+            route_suggest_scroll: 0,
             pending_key: None,
             error: None,
         }
@@ -385,6 +398,7 @@ impl ProviderForm {
         self.route_edit_target = false;
         self.route_suggest_active = false;
         self.route_suggest_idx = 0;
+        self.route_suggest_scroll = 0;
     }
 
     /// Clamp route_cursor to valid range after routes have been modified.

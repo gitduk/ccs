@@ -63,9 +63,10 @@ pub(super) fn draw_title_bar(f: &mut Frame, app: &App, area: Rect) {
 fn detail_panel_height(app: &App, route_avail: usize) -> u16 {
     // Error-toast early-return path: blank + "Error" title + message = 3
     if app.mode == Mode::Normal
-        && let Some((_, MessageKind::Error, _)) = &app.message {
-            return 3;
-        }
+        && let Some((_, MessageKind::Error, _)) = &app.message
+    {
+        return 3;
+    }
 
     // No provider selected: blank + "Info" title = 2
     if app.provider_names.is_empty() {
@@ -366,28 +367,29 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
 
     // Show error toast only when not in editing mode (errors in form are shown inline)
     if app.mode == Mode::Normal
-        && let Some((msg, MessageKind::Error, _)) = &app.message {
-            let error_block = Block::default()
-                .borders(Borders::LEFT | Borders::RIGHT)
-                .border_style(Style::default().fg(t::ERROR))
-                .padding(Padding::horizontal(1));
-            let lines = vec![
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Error",
+        && let Some((msg, MessageKind::Error, _)) = &app.message
+    {
+        let error_block = Block::default()
+            .borders(Borders::LEFT | Borders::RIGHT)
+            .border_style(Style::default().fg(t::ERROR))
+            .padding(Padding::horizontal(1));
+        let lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "Error",
+                Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(vec![
+                Span::styled(
+                    "✗ ",
                     Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD),
-                )),
-                Line::from(vec![
-                    Span::styled(
-                        "✗ ",
-                        Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(msg.as_str(), Style::default().fg(t::TEXT)),
-                ]),
-            ];
-            f.render_widget(Paragraph::new(lines).block(error_block), area);
-            return;
-        }
+                ),
+                Span::styled(msg.as_str(), Style::default().fg(t::TEXT)),
+            ]),
+        ];
+        f.render_widget(Paragraph::new(lines).block(error_block), area);
+        return;
+    }
 
     let label = Style::default().fg(t::MUTED);
     let title_line = Line::from(Span::styled(
@@ -493,28 +495,29 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
 
     // Last request error — shown after Routes so it doesn't obscure the route list.
     if let Ok(m) = app.metrics.lock()
-        && let Some(err) = m.last_error.get(name.as_str()) {
-            let status_str = if err.status == 0 {
-                "Network error".to_string()
-            } else {
-                format!("HTTP {}", err.status)
-            };
-            let model_part = if err.model.is_empty() {
-                String::new()
-            } else {
-                format!("{}  ", err.model)
-            };
-            lines.push(Line::from(vec![
-                Span::styled("Error ", Style::default().fg(t::MUTED)),
-                Span::styled(
-                    status_str,
-                    Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  "),
-                Span::styled(model_part, Style::default().fg(t::WARNING)),
-                Span::styled(truncate_error(&err.message), Style::default().fg(t::ERROR)),
-            ]));
-        }
+        && let Some(err) = m.last_error.get(name.as_str())
+    {
+        let status_str = if err.status == 0 {
+            "Network error".to_string()
+        } else {
+            format!("HTTP {}", err.status)
+        };
+        let model_part = if err.model.is_empty() {
+            String::new()
+        } else {
+            format!("{}  ", err.model)
+        };
+        lines.push(Line::from(vec![
+            Span::styled("Error ", Style::default().fg(t::MUTED)),
+            Span::styled(
+                status_str,
+                Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(model_part, Style::default().fg(t::WARNING)),
+            Span::styled(truncate_error(&err.message), Style::default().fg(t::ERROR)),
+        ]));
+    }
 
     f.render_widget(Paragraph::new(lines).block(block), area);
 }

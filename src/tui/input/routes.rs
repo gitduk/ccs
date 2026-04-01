@@ -3,6 +3,8 @@ use crossterm::event::KeyCode;
 use crate::config::RouteRule;
 use crate::tui::state::{FormField, ProviderForm, filter_suggestions};
 
+use super::insert::{InsertKeyResult, handle_field_insert_key};
+
 /// Remove the rule at `route_cursor` if it is invalid.
 fn prune_current_rule(form: &mut ProviderForm, provider_models: &[String]) {
     let valid = form
@@ -28,9 +30,14 @@ fn suggest_nav_down(form: &mut ProviderForm, provider_models: &[String]) {
         if !form.route_suggest_active {
             form.route_suggest_active = true;
             form.route_suggest_idx = 0;
+            form.route_suggest_scroll = 0;
         } else {
             form.route_suggest_idx =
                 (form.route_suggest_idx + 1).min(suggestions.len().saturating_sub(1));
+            // Scroll down if the highlighted item goes below the visible window.
+            if form.route_suggest_idx >= form.route_suggest_scroll + 8 {
+                form.route_suggest_scroll = form.route_suggest_idx + 1 - 8;
+            }
         }
     }
 }
@@ -40,8 +47,13 @@ fn suggest_nav_up(form: &mut ProviderForm) {
     if form.route_suggest_active {
         if form.route_suggest_idx == 0 {
             form.route_suggest_active = false;
+            form.route_suggest_scroll = 0;
         } else {
             form.route_suggest_idx -= 1;
+            // Scroll up if the highlighted item goes above the visible window.
+            if form.route_suggest_idx < form.route_suggest_scroll {
+                form.route_suggest_scroll = form.route_suggest_idx;
+            }
         }
     }
 }
@@ -56,19 +68,14 @@ fn exit_route_insert(form: &mut ProviderForm, provider_models: &[String]) {
 fn reset_suggest(form: &mut ProviderForm) {
     form.route_suggest_active = false;
     form.route_suggest_idx = 0;
+    form.route_suggest_scroll = 0;
 }
 
 /// Return a mutable reference to whichever route field is currently active.
-fn route_field(form: &mut ProviderForm) -> &mut FormField {
-    if form.route_edit_target {
-        &mut form.route_tgt_field
-    } else {
-        &mut form.route_pat_field
-    }
-}
-
 /// Enter route Insert mode on either the pattern or target field.
 fn enter_route_insert_mode(form: &mut ProviderForm, edit_target: bool) {
+    // Clear any stale pending key so Normal-mode sequences (dd) don't leak into Insert.
+    form.pending_key = None;
     // Auto-add a blank rule when routes are empty.
     if form.routes.is_empty() {
         form.routes.push(crate::config::RouteRule::new(""));
@@ -111,18 +118,23 @@ pub(super) fn handle_routes_key(
 ) {
     if form.route_editing {
         // ── Insert mode ────────────────────────────────────────────────────
-        match code {
-            // Confirm / exit Insert mode.
-            KeyCode::Esc => {
-                if form.route_suggest_active {
-                    form.route_suggest_active = false;
-                } else {
-                    exit_route_insert(form, provider_models);
-                }
+
+        // Route-specific keys intercepted before the common handler.
+
+        // Esc has two-layer logic here (close suggest first, then exit Insert),
+        // so it must be handled before the common handler which would ExitInsert directly.
+        if code == KeyCode::Esc {
+            if form.route_suggest_active {
+                reset_suggest(form);
+            } else {
+                exit_route_insert(form, provider_models);
             }
+            return;
+        }
+
+        match code {
             KeyCode::Enter => {
                 if form.route_suggest_active {
-                    // Select highlighted suggestion.
                     let filter = form
                         .routes
                         .get(form.route_cursor)
@@ -135,6 +147,7 @@ pub(super) fn handle_routes_key(
                     }
                 }
                 exit_route_insert(form, provider_models);
+                return;
             }
             // Tab: cycle pattern → target → pattern.
             KeyCode::Tab => {
@@ -146,6 +159,7 @@ pub(super) fn handle_routes_key(
                 } else {
                     focus_pattern(form);
                 }
+                return;
             }
             // BackTab: switch target → pattern; if on pattern → exit Insert.
             KeyCode::BackTab => {
@@ -155,59 +169,54 @@ pub(super) fn handle_routes_key(
                     exit_route_insert(form, provider_models);
                     form.focus_prev();
                 }
+                return;
             }
             // ↓ / Ctrl+J: navigate suggestion list down (only when editing target).
             KeyCode::Down if form.route_edit_target => {
                 suggest_nav_down(form, provider_models);
+                return;
             }
             KeyCode::Char('j') if ctrl && form.route_edit_target => {
                 suggest_nav_down(form, provider_models);
+                return;
             }
             // ↑ / Ctrl+K: navigate suggestion list up (only when editing target).
             KeyCode::Up if form.route_edit_target => {
                 suggest_nav_up(form);
+                return;
             }
             KeyCode::Char('k') if ctrl && form.route_edit_target => {
                 suggest_nav_up(form);
+                return;
             }
-            // Character input (no spaces: model names never contain spaces).
-            KeyCode::Char(c) if !ctrl && c != ' ' => {
-                route_field(form).insert(c);
-                if form.route_edit_target {
-                    reset_suggest(form);
-                }
-                sync_route_fields(form);
-            }
-            KeyCode::Backspace => {
-                route_field(form).backspace();
-                if form.route_edit_target {
-                    reset_suggest(form);
-                }
-                sync_route_fields(form);
-            }
-            KeyCode::Char('h') if ctrl => {
-                route_field(form).backspace();
-                if form.route_edit_target {
-                    reset_suggest(form);
-                }
-                sync_route_fields(form);
-            }
-            KeyCode::Delete => {
-                route_field(form).delete();
-                sync_route_fields(form);
-            }
-            KeyCode::Left => route_field(form).move_left(),
-            KeyCode::Right => route_field(form).move_right(),
-            KeyCode::Home | KeyCode::Char('a') if ctrl => route_field(form).home(),
-            KeyCode::End | KeyCode::Char('e') if ctrl => route_field(form).end(),
-            KeyCode::Char('w') if ctrl => {
-                route_field(form).delete_word_back();
-                if form.route_edit_target {
-                    reset_suggest(form);
-                }
-                sync_route_fields(form);
-            }
+            // Spaces are forbidden in model names.
+            KeyCode::Char(' ') if !ctrl => return,
             _ => {}
+        }
+
+        // Common Insert-mode editing (Backspace/Ctrl+W/Home/End/jk/…).
+        let edit_target = form.route_edit_target;
+        let field = if edit_target {
+            &mut form.route_tgt_field
+        } else {
+            &mut form.route_pat_field
+        };
+        match handle_field_insert_key(field, code, ctrl, &mut form.pending_key) {
+            InsertKeyResult::ExitInsert => {
+                // "jk" sequence ('j' discarded) or Esc → exit Insert mode.
+                if edit_target {
+                    reset_suggest(form);
+                }
+                sync_route_fields(form);
+                exit_route_insert(form, provider_models);
+            }
+            InsertKeyResult::TextChanged => {
+                if edit_target {
+                    reset_suggest(form);
+                }
+                sync_route_fields(form);
+            }
+            InsertKeyResult::Consumed | InsertKeyResult::NotHandled => {}
         }
     } else {
         // ── Normal mode ─────────────────────────────────────────────────────
