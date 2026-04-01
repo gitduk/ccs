@@ -429,6 +429,9 @@ impl ProviderForm {
         self.focused = next;
         if next == routes_slot {
             self.reset_route_editing();
+            // Routes has its own editing state machine; entering it while
+            // VimMode::Insert is active causes a stuck [I] indicator.
+            self.vim_mode = VimMode::Normal;
         }
     }
 
@@ -451,6 +454,8 @@ impl ProviderForm {
         self.focused = prev;
         if prev == routes_slot {
             self.reset_route_editing();
+            // Same reason as focus_next: reset vim_mode on entering Routes.
+            self.vim_mode = VimMode::Normal;
         }
     }
 }

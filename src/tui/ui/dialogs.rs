@@ -234,7 +234,7 @@ pub(super) fn draw_models(f: &mut Frame, app: &App) {
     let mode_tag = if app.models_insert { "[I]" } else { "[N]" };
     let outer_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(t::MUTED))
+        .border_style(Style::default().fg(t::PRIMARY))
         .title(format!(" Models  {mode_tag} "))
         .title_style(Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD))
         .padding(Padding::new(1, 1, 0, 0));

@@ -169,6 +169,12 @@ impl App {
                 }
                 self.provider_models.insert(name.clone(), models.clone());
             }
+            // Clear stale error when test passes so Info panel shows clean state.
+            if matches!(result.status, crate::tester::TestStatus::Ok)
+                && let Ok(mut m) = self.metrics.lock()
+            {
+                m.clear_error(&name);
+            }
             self.test_results.insert(name, result);
         }
     }
