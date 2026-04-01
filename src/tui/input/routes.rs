@@ -194,14 +194,18 @@ pub(super) fn handle_routes_key(
             _ => {}
         }
 
-        // Common Insert-mode editing (Backspace/Ctrl+W/Home/End/jk/…).
+        // Common Insert-mode editing (Backspace/Ctrl+W/Home/End/…).
+        // Use a local pending so the jk escape sequence does not interfere
+        // with route patterns (which may legitimately contain 'j'/'k').
+        // Route editing is exited via Esc or Enter only.
         let edit_target = form.route_edit_target;
         let field = if edit_target {
             &mut form.route_tgt_field
         } else {
             &mut form.route_pat_field
         };
-        match handle_field_insert_key(field, code, ctrl, &mut form.pending_key) {
+        let mut local_pending = None;
+        match handle_field_insert_key(field, code, ctrl, &mut local_pending) {
             InsertKeyResult::ExitInsert => {
                 // "jk" sequence ('j' discarded) or Esc → exit Insert mode.
                 if edit_target {

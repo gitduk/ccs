@@ -22,9 +22,12 @@ pub(super) fn draw_form(f: &mut Frame, app: &App) {
     let suggest_items = super::route_editor::suggest_panel_height(form, app);
 
     // ── Title: show action + Vim mode tag ────────────────────────────────────
-    let vim_tag = match form.vim_mode {
-        VimMode::Normal => "[N]",
-        VimMode::Insert => "[I]",
+    // Route editing has its own state machine (route_editing) independent of
+    // vim_mode; treat it as Insert mode for the title indicator.
+    let vim_tag = if form.route_editing || form.vim_mode == VimMode::Insert {
+        "[I]"
+    } else {
+        "[N]"
     };
     let title = format!(
         " {} Provider  {} ",
