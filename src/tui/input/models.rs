@@ -3,7 +3,7 @@ use std::time::Instant;
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use super::super::state::{App, MessageKind, Mode};
-use super::insert::{InsertKeyResult, handle_field_insert_key};
+use super::insert::{InsertKeyResult, consume_pending_key, handle_field_insert_key};
 
 // ── Scroll helpers ────────────────────────────────────────────────────────────
 
@@ -109,10 +109,7 @@ pub(super) fn handle_models_key(
         // ── Normal mode: list navigation ──────────────────────────────────────
 
         // Consume pending two-key sequence (500 ms timeout).
-        let prev = app
-            .pending_key
-            .take()
-            .and_then(|(k, t)| (t.elapsed() < super::insert::PENDING_KEY_TIMEOUT).then_some(k));
+        let prev = consume_pending_key(&mut app.pending_key);
 
         if let Some(pk) = prev {
             match (pk, &code) {

@@ -4,9 +4,16 @@ use crate::tui::server::sync_proxy_config;
 use crate::tui::state::{MessageKind, Mode, VimMode};
 use crate::tui::{App, ServerHandle};
 
-use super::insert::{InsertKeyResult, handle_field_insert_key};
+use super::insert::{InsertKeyResult, consume_pending_key, handle_field_insert_key};
 
 use super::routes::handle_routes_key;
+
+#[inline]
+fn save_and_sync(app: &mut App, server: &Option<ServerHandle>) -> crate::error::Result<()> {
+    app.save_form_in_place()?;
+    sync_proxy_config(app, server);
+    Ok(())
+}
 
 pub(super) fn handle_editing_key(
     app: &mut App,
@@ -26,9 +33,7 @@ pub(super) fn handle_editing_key(
     // Note: in Insert mode, pending_key is managed by handle_field_insert_key
     // for the "jk" escape sequence. Only consume it here for Normal mode sequences.
     let prev = if form.vim_mode == VimMode::Normal {
-        form.pending_key
-            .take()
-            .and_then(|(k, t)| (t.elapsed() < super::insert::PENDING_KEY_TIMEOUT).then_some(k))
+        consume_pending_key(&mut form.pending_key)
     } else {
         None
     };
@@ -43,8 +48,7 @@ pub(super) fn handle_editing_key(
         if !form.routes.is_empty() && form.route_cursor < form.routes.len() {
             form.routes.remove(form.route_cursor);
             form.clamp_route_cursor();
-            app.save_form_in_place()?;
-            sync_proxy_config(app, server);
+            save_and_sync(app, server)?;
         }
         return Ok(());
     }
@@ -96,8 +100,7 @@ pub(super) fn handle_editing_key(
         // Only save when not actively editing a route — do_save_form retains only
         // valid routes, which would immediately prune any rule being typed.
         if !form.route_editing {
-            app.save_form_in_place()?;
-            sync_proxy_config(app, server);
+            save_and_sync(app, server)?;
         }
         return Ok(());
     }
@@ -140,8 +143,7 @@ pub(super) fn handle_editing_key(
                 let focused = form.focused;
                 if form.fields[focused].is_toggle {
                     form.fields[focused].toggle_value();
-                    app.save_form_in_place()?;
-                    sync_proxy_config(app, server);
+                    save_and_sync(app, server)?;
                     return Ok(());
                 } else {
                     form.fields[focused].move_left();
@@ -151,8 +153,7 @@ pub(super) fn handle_editing_key(
                 let focused = form.focused;
                 if form.fields[focused].is_toggle {
                     form.fields[focused].toggle_value();
-                    app.save_form_in_place()?;
-                    sync_proxy_config(app, server);
+                    save_and_sync(app, server)?;
                     return Ok(());
                 } else {
                     form.fields[focused].move_right();
@@ -163,8 +164,7 @@ pub(super) fn handle_editing_key(
                 let focused = form.focused;
                 if form.fields[focused].is_toggle {
                     form.fields[focused].toggle_value();
-                    app.save_form_in_place()?;
-                    sync_proxy_config(app, server);
+                    save_and_sync(app, server)?;
                     return Ok(());
                 }
             }
@@ -195,8 +195,7 @@ pub(super) fn handle_editing_key(
                     let focused = form.focused;
                     form.fields[focused].delete_current_line();
                     // Borrow on `form` ends here; safe to call app methods below.
-                    app.save_form_in_place()?;
-                    sync_proxy_config(app, server);
+                    save_and_sync(app, server)?;
                     return Ok(());
                 } else {
                     form.pending_key = Some(('d', std::time::Instant::now()));
@@ -233,8 +232,7 @@ pub(super) fn handle_editing_key(
     match code {
         KeyCode::Enter => {
             form.vim_mode = VimMode::Normal;
-            app.save_form_in_place()?;
-            sync_proxy_config(app, server);
+            save_and_sync(app, server)?;
             return Ok(());
         }
         KeyCode::Tab => {
@@ -294,13 +292,11 @@ pub(super) fn handle_editing_key(
         match code {
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => {
                 form.fields[form.focused].toggle_value();
-                app.save_form_in_place()?;
-                sync_proxy_config(app, server);
+                save_and_sync(app, server)?;
             }
             KeyCode::Char('h') | KeyCode::Char('l') if ctrl => {
                 form.fields[form.focused].toggle_value();
-                app.save_form_in_place()?;
-                sync_proxy_config(app, server);
+                save_and_sync(app, server)?;
             }
             _ => {}
         }
@@ -316,12 +312,10 @@ pub(super) fn handle_editing_key(
     ) {
         InsertKeyResult::ExitInsert => {
             form.vim_mode = VimMode::Normal;
-            app.save_form_in_place()?;
-            sync_proxy_config(app, server);
+            save_and_sync(app, server)?;
         }
         InsertKeyResult::TextChanged => {
-            app.save_form_in_place()?;
-            sync_proxy_config(app, server);
+            save_and_sync(app, server)?;
         }
         InsertKeyResult::Consumed | InsertKeyResult::NotHandled => {}
     }

@@ -9,6 +9,16 @@ const JK_TIMEOUT: Duration = Duration::from_millis(500);
 /// Shared timeout for all two-key sequences (jk, gg, dd, yy…).
 pub const PENDING_KEY_TIMEOUT: Duration = JK_TIMEOUT;
 
+/// Consume the pending two-key buffer and return the buffered char if it is
+/// still within the timeout window. Works for any two-key sequence (jk, dd, yy, gg…).
+///
+/// Pass `&mut form.pending_key` or `&mut app.pending_key` depending on context.
+pub fn consume_pending_key(pending: &mut Option<(char, Instant)>) -> Option<char> {
+    pending
+        .take()
+        .and_then(|(k, t)| (t.elapsed() < PENDING_KEY_TIMEOUT).then_some(k))
+}
+
 /// Result returned by [`handle_field_insert_key`] to tell the caller what happened.
 pub enum InsertKeyResult {
     /// Key was handled; field content did not change (e.g. cursor movement).

@@ -15,10 +15,7 @@ pub(super) fn handle_normal_key(
     }
 
     // Consume and validate the pending key (500 ms timeout).
-    let prev = app
-        .pending_key
-        .take()
-        .and_then(|(k, t)| (t.elapsed() < super::insert::PENDING_KEY_TIMEOUT).then_some(k));
+    let prev = super::insert::consume_pending_key(&mut app.pending_key);
 
     // Two-key sequences: dd → delete, gg → go to top.
     if let Some(pk) = prev {
