@@ -230,21 +230,13 @@ pub(super) fn draw_models(f: &mut Frame, app: &App) {
     let area = centered_fixed(80, dialog_height, f.area());
     f.render_widget(Clear, area);
 
-    // Border color reflects mode: PRIMARY when search box is focused, MUTED in list-nav mode.
-    let border_color = if app.models_insert {
-        t::PRIMARY
-    } else {
-        t::MUTED
-    };
+    // Mode indicator in title, consistent with the Edit Provider form.
+    let mode_tag = if app.models_insert { "[I]" } else { "[N]" };
     let outer_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color))
-        .title(" Models ")
-        .title_style(
-            Style::default()
-                .fg(border_color)
-                .add_modifier(Modifier::BOLD),
-        )
+        .border_style(Style::default().fg(t::MUTED))
+        .title(format!(" Models  {mode_tag} "))
+        .title_style(Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD))
         .padding(Padding::new(1, 1, 0, 0));
     let inner = outer_block.inner(area);
     f.render_widget(outer_block, area);
