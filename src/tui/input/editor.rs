@@ -32,7 +32,8 @@ pub(super) fn handle_editing_key(
     // ── Consume pending key (500 ms timeout) ─────────────────────────────────
     // Note: in Insert mode, pending_key is managed by handle_field_insert_key
     // for the "jk" escape sequence. Only consume it here for Normal mode sequences.
-    let prev = if form.vim_mode == VimMode::Normal {
+    // Also exclude route_editing: its Insert-mode field handler manages pending too.
+    let prev = if form.vim_mode == VimMode::Normal && !form.route_editing {
         consume_pending_key(&mut form.pending_key)
     } else {
         None
