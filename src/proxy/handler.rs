@@ -17,14 +17,7 @@ struct ProviderKey {
     name: String,
 }
 
-/// Delta bag for a single DB upsert — avoids positional u64 parameter confusion.
-#[derive(Clone, Debug, Default)]
-struct StatsDelta {
-    input: u64,
-    output: u64,
-    requests: u64,
-    failures: u64,
-}
+use crate::repo::StatsDelta;
 
 /// Health check endpoint.
 pub async fn health_check(State(state): State<SharedState>) -> impl IntoResponse {
@@ -453,15 +446,7 @@ fn persist_stats(
     let pkey = pkey.clone();
     let mid = model_name.map(|s| s.to_string());
     tokio::task::spawn_blocking(move || {
-        repo.persist_stats(
-            &pkey.id,
-            &pkey.name,
-            mid.as_deref(),
-            delta.input,
-            delta.output,
-            delta.requests,
-            delta.failures,
-        );
+        repo.persist_stats(&pkey.id, &pkey.name, mid.as_deref(), delta);
     });
 }
 

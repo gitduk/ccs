@@ -57,7 +57,9 @@ fn build_http_client() -> Client {
 pub async fn start_server(config: AppConfig) -> crate::error::Result<()> {
     let listen = config.listen.clone();
     let db = crate::repo::Repository::open(&config.resolve_db_path());
-    db.migrate(&config.name_to_id_map());
+    if let Err(e) = db.migrate(&config.name_to_id_map()) {
+        tracing::warn!("DB schema migration failed: {e}");
+    }
     let shared_config = Arc::new(RwLock::new(config));
     let state = Arc::new(AppState {
         config: shared_config.clone(),

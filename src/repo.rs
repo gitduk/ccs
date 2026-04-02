@@ -8,41 +8,61 @@ use crate::proxy::metrics::TokenMetrics;
 #[derive(Clone)]
 pub struct Repository(SharedDb);
 
+/// Token/request deltas to persist for a single proxy request.
+#[derive(Clone, Default)]
+pub struct StatsDelta {
+    pub input: u64,
+    pub output: u64,
+    pub requests: u64,
+    pub failures: u64,
+}
+
 impl Repository {
     pub fn open(path: &str) -> Self {
         Self(db::open_with_fallback(path))
     }
 
-    pub fn migrate(&self, name_to_id: &HashMap<String, String>) {
-        db::migrate_schema(&self.0, name_to_id);
+    /// Run DB schema migration. Returns an error if migration SQL fails;
+    /// callers decide whether to abort or warn and continue.
+    pub fn migrate(&self, name_to_id: &HashMap<String, String>) -> rusqlite::Result<()> {
+        db::migrate_schema(&self.0, name_to_id)
     }
 
     /// Write provider + model token/request deltas atomically.
     /// Intended to be called from `tokio::task::spawn_blocking`.
-    #[allow(clippy::too_many_arguments)]
     pub fn persist_stats(
         &self,
         provider_id: &str,
         provider_name: &str,
         model_name: Option<&str>,
-        input: u64,
-        output: u64,
-        requests: u64,
-        failures: u64,
+        delta: StatsDelta,
     ) {
-        let Ok(mut conn) = self.0.lock() else { return };
+        let mut conn = match self.0.lock() {
+            Ok(c) => c,
+            Err(_) => {
+                tracing::warn!("DB mutex poisoned; skipping persist_stats for {provider_name}");
+                return;
+            }
+        };
         let result = conn.transaction().and_then(|tx| {
             db::upsert_provider(
                 &tx,
                 provider_id,
                 provider_name,
-                input,
-                output,
-                requests,
-                failures,
+                delta.input,
+                delta.output,
+                delta.requests,
+                delta.failures,
             )?;
             if let Some(model) = model_name {
-                db::upsert_model(&tx, provider_id, provider_name, model, input, output)?;
+                db::upsert_model(
+                    &tx,
+                    provider_id,
+                    provider_name,
+                    model,
+                    delta.input,
+                    delta.output,
+                )?;
             }
             tx.commit()
         });
@@ -54,14 +74,20 @@ impl Repository {
     pub fn load_metrics(&self) -> TokenMetrics {
         match self.0.lock() {
             Ok(conn) => db::load_metrics(&conn),
-            Err(_) => TokenMetrics::default(),
+            Err(_) => {
+                tracing::warn!("DB mutex poisoned in load_metrics; returning empty metrics");
+                TokenMetrics::default()
+            }
         }
     }
 
     pub fn load_provider_models(&self) -> HashMap<String, Vec<String>> {
         match self.0.lock() {
             Ok(conn) => db::load_provider_models(&conn),
-            Err(_) => HashMap::new(),
+            Err(_) => {
+                tracing::warn!("DB mutex poisoned in load_provider_models; returning empty map");
+                HashMap::new()
+            }
         }
     }
 

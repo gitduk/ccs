@@ -26,7 +26,9 @@ impl App {
         }
 
         let db = crate::repo::Repository::open(&config.resolve_db_path());
-        db.migrate(&config.name_to_id_map());
+        if let Err(e) = db.migrate(&config.name_to_id_map()) {
+            tracing::warn!("DB schema migration failed: {e}");
+        }
 
         let metrics = Arc::new(Mutex::new(db.load_metrics()));
         let provider_models = db.load_provider_models();

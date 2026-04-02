@@ -60,11 +60,14 @@ fn init_schema(conn: &Connection) -> Result<()> {
 /// Migrate old schema (provider_name as PK, no provider_id column) to new schema.
 /// name_to_id maps provider_name → provider UUID from config.
 /// Safe to call on an already-migrated DB (no-op if provider_id column exists).
-pub fn migrate_schema(db: &SharedDb, name_to_id: &HashMap<String, String>) {
-    let Ok(mut conn) = db.lock() else { return };
-    if let Err(e) = do_migrate(&mut conn, name_to_id) {
-        tracing::warn!("DB schema migration failed: {e}");
-    }
+pub(crate) fn migrate_schema(
+    db: &SharedDb,
+    name_to_id: &HashMap<String, String>,
+) -> rusqlite::Result<()> {
+    let Ok(mut conn) = db.lock() else {
+        return Ok(());
+    };
+    do_migrate(&mut conn, name_to_id)
 }
 
 fn do_migrate(conn: &mut Connection, name_to_id: &HashMap<String, String>) -> Result<()> {
