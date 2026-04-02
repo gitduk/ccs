@@ -48,11 +48,34 @@ pub(super) fn handle_normal_key(
                 return Ok(());
             }
             ('y', KeyCode::Char('c')) => {
-                if let Some(provider) = app
-                    .selected_name()
-                    .and_then(|name| app.config.providers.get(name))
+                if let Some(name) = app.selected_name().map(|s| s.to_string())
+                    && let Some(provider) = app.config.providers.get(&name)
                 {
-                    match build_test_curl(provider) {
+                    // Mirror the model-selection logic in testing::test_provider_by_name:
+                    // 1. Most-used model (by token volume) from the known list.
+                    // 2. First model from the known list if no usage data.
+                    // 3. Empty string if no models known yet (provider not yet tested).
+                    let supported = app.provider_models.get(&name);
+                    let model = supported
+                        .filter(|s| !s.is_empty())
+                        .and_then(|models| {
+                            app.metrics
+                                .lock()
+                                .ok()
+                                .and_then(|m| {
+                                    models
+                                        .iter()
+                                        .max_by_key(|mdl| {
+                                            m.by_model.get(*mdl).map_or(0, |s| s.input + s.output)
+                                        })
+                                        .filter(|mdl| m.by_model.contains_key(*mdl))
+                                        .map(|s| s.to_string())
+                                })
+                                .or_else(|| models.first().map(|s| s.to_string()))
+                        })
+                        .unwrap_or_default();
+
+                    match build_test_curl(provider, &model) {
                         Ok(cmd) => {
                             if super::copy_to_clipboard(&cmd) {
                                 app.set_message("Copied curl command", MessageKind::Success);
@@ -162,23 +185,25 @@ pub(super) fn handle_normal_key(
 
 /// Build a `curl` command that replicates the test request sent by the tester.
 /// Returns an error string if the API key cannot be resolved.
-fn build_test_curl(provider: &Provider) -> Result<String, String> {
+fn build_test_curl(provider: &Provider, model: &str) -> Result<String, String> {
     let api_key = provider.resolve_api_key().map_err(|e| e.to_string())?;
 
     let base = provider.base_url.trim_end_matches('/');
     let (url, body) = match provider.api_format {
         ApiFormat::Anthropic => (
             format!("{base}/v1/messages"),
-            r#"{"model":"MODEL","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}"#,
+            format!(
+                r#"{{"model":"{model}","max_tokens":1,"messages":[{{"role":"user","content":"ping"}}]}}"#
+            ),
         ),
         ApiFormat::OpenAI => (
             format!("{base}/v1/chat/completions"),
-            r#"{"model":"MODEL","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}"#,
+            format!(
+                r#"{{"model":"{model}","max_tokens":1,"messages":[{{"role":"user","content":"ping"}}]}}"#
+            ),
         ),
     };
 
-    // Pick a representative model from test_results / provider config if available,
-    // but keep it simple — the user can edit MODEL in the clipboard anyway.
     let mut cmd = format!("curl -s -X POST '{url}' \\\n  -H 'Content-Type: application/json' \\\n");
 
     match provider.api_format {
