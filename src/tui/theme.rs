@@ -20,6 +20,22 @@ pub fn format_color(fmt: &ApiFormat) -> Color {
     }
 }
 
+/// Color for a route target string, based on the model platform.
+/// Matches on well-known prefixes: claude → yellow, gpt/o1/o3/o4 → cyan, gemini → blue, others → white.
+pub fn route_target_color(target: &str) -> Color {
+    let t = target.to_ascii_lowercase();
+    if t.contains("claude") {
+        WARNING // yellow
+    } else if t.contains("gemini") {
+        Color::Indexed(75) // cornflower blue
+    } else if t.contains("gpt") || t.starts_with("o1") || t.starts_with("o3") || t.starts_with("o4")
+    {
+        PRIMARY // cyan
+    } else {
+        TEXT
+    }
+}
+
 /// Stable color for a provider, derived from its ID.
 /// The same ID always maps to the same color regardless of list order.
 pub fn provider_color(id: &str) -> Color {

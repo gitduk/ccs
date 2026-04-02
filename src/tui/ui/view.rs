@@ -471,9 +471,6 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
         .map(|p| p.routes.iter().filter(|r| r.enabled).collect())
         .unwrap_or_default();
     if !enabled_routes.is_empty() {
-        let prov_color = provider
-            .map(|p| t::provider_color(&p.id))
-            .unwrap_or(t::PRIMARY);
         let avail = (area.width as usize).saturating_sub(4 + ROUTE_LABEL_WIDTH);
         for (row_idx, group) in pack_routes(&enabled_routes, avail).into_iter().enumerate() {
             let mut spans: Vec<Span> = vec![if row_idx == 0 {
@@ -487,7 +484,10 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
                 }
                 spans.push(Span::styled(&route.pattern, Style::default().fg(t::TEXT)));
                 spans.push(Span::styled(" → ", Style::default().fg(t::MUTED)));
-                spans.push(Span::styled(&route.target, Style::default().fg(prov_color)));
+                spans.push(Span::styled(
+                    &route.target,
+                    Style::default().fg(t::route_target_color(&route.target)),
+                ));
             }
             lines.push(Line::from(spans));
         }
