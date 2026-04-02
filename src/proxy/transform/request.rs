@@ -468,11 +468,11 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::config::{ApiFormat, Provider};
+    use crate::config::{ApiFormat, OpenAiApiVersion, Provider};
 
     // ─── helpers ─────────────────────────────────────────────────────────────
 
-    fn provider_chat(api_version: Option<&str>) -> Provider {
+    fn provider_chat(api_version: Option<OpenAiApiVersion>) -> Provider {
         Provider {
             id: "id".into(),
             base_url: "https://api.example.com".into(),
@@ -482,7 +482,7 @@ mod tests {
             notes: String::new(),
             routes: Vec::new(),
             enabled: true,
-            api_version: api_version.map(String::from),
+            api_version,
         }
     }
 
@@ -492,7 +492,7 @@ mod tests {
     }
 
     fn provider_chat_completions() -> Provider {
-        provider_chat(Some("chat_completions"))
+        provider_chat(Some(OpenAiApiVersion::ChatCompletions))
     }
 
     fn _provider_anthropic() -> Provider {

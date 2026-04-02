@@ -10,16 +10,14 @@ use crate::error::{AppError, Result};
 /// OpenAI API Version enumeration
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub enum OpenAiApiVersion {
+    /// New Responses API (preferred, default)
     #[serde(rename = "responses")]
     #[default]
-    Responses, // Default to new version
+    Responses,
+    /// Legacy Chat Completions API (for compatibility)
     #[serde(rename = "chat_completions")]
     ChatCompletions,
 }
-
-// Legacy string constants for compatibility
-const API_VERSION_RESPONSES: &str = "responses";
-const API_VERSION_CHAT_COMPLETIONS: &str = "chat_completions";
 
 fn default_true() -> bool {
     true
@@ -142,12 +140,9 @@ pub struct Provider {
     /// When false, this provider is skipped during request forwarding.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// API version selection. Only effective when api_format = "openai"
-    /// "responses" = New Responses API (preferred)
-    /// "chat_completions" = Legacy Chat Completions API (compatibility)
-    /// None = Auto-detect (try new version first, fallback to legacy)
+    /// Only effective when api_format = OpenAI. See [`OpenAiApiVersion`] for variants.
     #[serde(default)]
-    pub api_version: Option<String>,
+    pub api_version: Option<OpenAiApiVersion>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -196,16 +191,20 @@ impl Provider {
 
     /// Get the actual OpenAI API version (defaults to Responses API)
     pub fn openai_api_version(&self) -> &str {
-        match self.api_version.as_deref() {
-            Some(API_VERSION_CHAT_COMPLETIONS) => API_VERSION_CHAT_COMPLETIONS,
-            Some(API_VERSION_RESPONSES) => API_VERSION_RESPONSES,
-            _ => API_VERSION_RESPONSES, // Default to new version
+        match self
+            .api_version
+            .as_ref()
+            .unwrap_or(&OpenAiApiVersion::Responses)
+        {
+            OpenAiApiVersion::ChatCompletions => "chat_completions",
+            OpenAiApiVersion::Responses => "responses",
         }
     }
 
     /// Check if this provider should use Responses API format
     pub fn uses_responses_api(&self) -> bool {
-        self.api_format == ApiFormat::OpenAI && self.openai_api_version() == API_VERSION_RESPONSES
+        self.api_format == ApiFormat::OpenAI
+            && !matches!(self.api_version, Some(OpenAiApiVersion::ChatCompletions))
     }
 }
 
@@ -533,7 +532,7 @@ mod tests {
     #[test]
     fn openai_api_version_chat_completions() {
         let mut p = make_provider("key", ApiFormat::OpenAI);
-        p.api_version = Some("chat_completions".into());
+        p.api_version = Some(OpenAiApiVersion::ChatCompletions);
         assert_eq!(p.openai_api_version(), "chat_completions");
     }
 
@@ -552,7 +551,7 @@ mod tests {
     #[test]
     fn uses_responses_api_false_for_chat_completions() {
         let mut p = make_provider("key", ApiFormat::OpenAI);
-        p.api_version = Some("chat_completions".into());
+        p.api_version = Some(OpenAiApiVersion::ChatCompletions);
         assert!(!p.uses_responses_api());
     }
 

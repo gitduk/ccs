@@ -20,9 +20,17 @@ pub fn open(path: &str) -> Result<SharedDb> {
 pub fn open_with_fallback(path: &str) -> SharedDb {
     open(path).unwrap_or_else(|e| {
         tracing::warn!("Failed to open DB at {path}: {e}; using in-memory fallback");
-        let conn = Connection::open_in_memory()
-            .expect("in-memory SQLite unavailable — system may be out of file descriptors");
-        init_schema(&conn).expect("failed to init in-memory schema");
+        let conn = match Connection::open_in_memory() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("In-memory SQLite unavailable: {e}; cannot continue");
+                std::process::exit(1);
+            }
+        };
+        if let Err(e) = init_schema(&conn) {
+            tracing::error!("Failed to init in-memory schema: {e}; cannot continue");
+            std::process::exit(1);
+        }
         Arc::new(Mutex::new(conn))
     })
 }
@@ -53,13 +61,13 @@ fn init_schema(conn: &Connection) -> Result<()> {
 /// name_to_id maps provider_name → provider UUID from config.
 /// Safe to call on an already-migrated DB (no-op if provider_id column exists).
 pub fn migrate_schema(db: &SharedDb, name_to_id: &HashMap<String, String>) {
-    let Ok(conn) = db.lock() else { return };
-    if let Err(e) = do_migrate(&conn, name_to_id) {
+    let Ok(mut conn) = db.lock() else { return };
+    if let Err(e) = do_migrate(&mut conn, name_to_id) {
         tracing::warn!("DB schema migration failed: {e}");
     }
 }
 
-fn do_migrate(conn: &Connection, name_to_id: &HashMap<String, String>) -> Result<()> {
+fn do_migrate(conn: &mut Connection, name_to_id: &HashMap<String, String>) -> Result<()> {
     // Check if provider_id column already exists — if so, nothing to do.
     let already_migrated: bool = conn
         .query_row(
@@ -74,9 +82,14 @@ fn do_migrate(conn: &Connection, name_to_id: &HashMap<String, String>) -> Result
         return Ok(());
     }
 
+    // Begin an exclusive transaction so the entire migration is atomic.
+    // If any step fails, the transaction is rolled back automatically when
+    // `tx` is dropped, leaving the original data intact.
+    let tx = conn.transaction()?;
+
     // Read old data before recreating tables.
     let provider_rows: Vec<(String, u64, u64, u64, u64)> = {
-        let mut stmt = conn.prepare(
+        let mut stmt = tx.prepare(
             "SELECT provider_name, input, output, requests, failures FROM provider_stats",
         )?;
 
@@ -95,7 +108,7 @@ fn do_migrate(conn: &Connection, name_to_id: &HashMap<String, String>) -> Result
 
     let model_rows: Vec<(String, String, u64, u64)> = {
         let mut stmt =
-            conn.prepare("SELECT provider_name, model_name, input, output FROM model_stats")?;
+            tx.prepare("SELECT provider_name, model_name, input, output FROM model_stats")?;
 
         stmt.query_map([], |row| {
             Ok((
@@ -110,7 +123,7 @@ fn do_migrate(conn: &Connection, name_to_id: &HashMap<String, String>) -> Result
     };
 
     // Recreate tables with new schema.
-    conn.execute_batch(
+    tx.execute_batch(
         "DROP TABLE IF EXISTS provider_stats;
          DROP TABLE IF EXISTS model_stats;
          CREATE TABLE provider_stats (
@@ -139,7 +152,7 @@ fn do_migrate(conn: &Connection, name_to_id: &HashMap<String, String>) -> Result
             .entry(name.clone())
             .or_insert_with(|| uuid::Uuid::new_v4().to_string())
             .clone();
-        conn.execute(
+        tx.execute(
             "INSERT INTO provider_stats (provider_id, provider_name, input, output, requests, failures)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![id, name, input, output, requests, failures],
@@ -151,13 +164,14 @@ fn do_migrate(conn: &Connection, name_to_id: &HashMap<String, String>) -> Result
             .entry(name.clone())
             .or_insert_with(|| uuid::Uuid::new_v4().to_string())
             .clone();
-        conn.execute(
+        tx.execute(
             "INSERT INTO model_stats (provider_id, provider_name, model_name, input, output)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![id, name, model, input, output],
         )?;
     }
 
+    tx.commit()?;
     tracing::info!("DB schema migrated to provider_id primary key");
     Ok(())
 }
@@ -310,12 +324,14 @@ pub fn upsert_provider_models(
     Ok(())
 }
 
-pub fn clear_all(conn: &Connection) -> Result<()> {
-    conn.execute_batch("BEGIN; DELETE FROM provider_stats; DELETE FROM model_stats; COMMIT;")
+pub fn clear_all(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute_batch("DELETE FROM provider_stats; DELETE FROM model_stats;")?;
+    tx.commit()
 }
 
-pub fn clear_provider(conn: &Connection, provider_id: &str) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
+pub fn clear_provider(conn: &mut Connection, provider_id: &str) -> Result<()> {
+    let tx = conn.transaction()?;
     tx.execute(
         "DELETE FROM provider_stats WHERE provider_id = ?1",
         [provider_id],
@@ -389,7 +405,7 @@ mod tests {
 
     #[test]
     fn test_upsert_after_clear() {
-        let conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         init_schema(&conn).unwrap();
 
         let id = "test-id";
@@ -398,7 +414,7 @@ mod tests {
         // Accumulate some data
         upsert_provider(&conn, id, name, 100, 50, 1, 0).unwrap();
         // Clear
-        clear_provider(&conn, id).unwrap();
+        clear_provider(&mut conn, id).unwrap();
 
         // Now simulate 5 failures on fresh state
         for _ in 0..5 {

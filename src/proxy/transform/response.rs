@@ -47,7 +47,15 @@ pub fn openai_to_anthropic_response(resp: &Value) -> Result<Value> {
                     .get("arguments")
                     .and_then(|a| a.as_str())
                     .unwrap_or("{}");
-                let input: Value = serde_json::from_str(args_str).unwrap_or(json!({}));
+                let input: Value = match serde_json::from_str(args_str) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to parse tool arguments for '{name}': {e}; using empty input"
+                        );
+                        json!({})
+                    }
+                };
                 content_blocks.push(json!({
                     "type": "tool_use",
                     "id": id,

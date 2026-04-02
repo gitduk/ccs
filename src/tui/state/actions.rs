@@ -179,8 +179,8 @@ impl App {
     }
 
     pub fn clear_metrics(&mut self) {
-        if let Ok(conn) = self.db.lock() {
-            let _ = crate::db::clear_all(&conn);
+        if let Ok(mut conn) = self.db.lock() {
+            let _ = crate::db::clear_all(&mut conn);
         }
         if let Ok(mut m) = self.metrics.lock() {
             m.last_error.clear();
@@ -199,8 +199,8 @@ impl App {
             return;
         };
 
-        if let Ok(conn) = self.db.lock() {
-            let _ = crate::db::clear_provider(&conn, &provider_id);
+        if let Ok(mut conn) = self.db.lock() {
+            let _ = crate::db::clear_provider(&mut conn, &provider_id);
         }
         if let Ok(mut m) = self.metrics.lock() {
             m.clear_error(&name);
@@ -234,9 +234,9 @@ impl App {
 
     pub(super) fn do_delete(&mut self, name: &str) -> Result<()> {
         let removed = self.config.providers.shift_remove(name);
-        if let Ok(conn) = self.db.lock() {
+        if let Ok(mut conn) = self.db.lock() {
             let id = removed.as_ref().map(|p| p.id.as_str()).unwrap_or(name);
-            let _ = crate::db::clear_provider(&conn, id);
+            let _ = crate::db::clear_provider(&mut conn, id);
         }
         if let Ok(mut m) = self.metrics.lock() {
             m.clear_error(name);

@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 
-use crate::config::{ApiFormat, Provider};
+use crate::config::{ApiFormat, OpenAiApiVersion, Provider};
 
 const TEST_TIMEOUT_SECS: u64 = 10;
 
@@ -53,15 +53,31 @@ pub async fn test_latency(
     let auth_header = provider.auth_header(&api_key);
 
     // Real latency test: POST to messages/chat endpoint.
-    let msg_url = match provider.api_format {
-        ApiFormat::Anthropic => format!("{base}/v1/messages"),
-        ApiFormat::OpenAI => format!("{base}/v1/chat/completions"),
-    };
-    let body = json!({
+    // Mirror the same URL and body format that forwarder.rs uses so the
+    // measured latency actually reflects the live request path.
+    let chat_body = json!({
         "model": model,
         "max_tokens": 1,
         "messages": [{"role": "user", "content": "ping"}]
     });
+    let (msg_url, body) = match provider.api_format {
+        ApiFormat::Anthropic => (format!("{base}/v1/messages"), chat_body),
+        ApiFormat::OpenAI => match provider
+            .api_version
+            .as_ref()
+            .unwrap_or(&OpenAiApiVersion::Responses)
+        {
+            OpenAiApiVersion::ChatCompletions => (format!("{base}/v1/chat/completions"), chat_body),
+            OpenAiApiVersion::Responses => (
+                format!("{base}/v1/responses"),
+                json!({
+                    "model": model,
+                    "max_output_tokens": 1,
+                    "input": "ping"
+                }),
+            ),
+        },
+    };
 
     let t0 = Instant::now();
     let mut req = client

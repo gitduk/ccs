@@ -306,7 +306,7 @@ impl FormField {
                 .chars()
                 .next_back()
                 .expect("pos is a valid UTF-8 char boundary");
-            if c != ' ' {
+            if !c.is_whitespace() {
                 break;
             }
             pos -= c.len_utf8();
@@ -316,7 +316,7 @@ impl FormField {
                 .chars()
                 .next_back()
                 .expect("pos is a valid UTF-8 char boundary");
-            if c == ' ' {
+            if c.is_whitespace() {
                 break;
             }
             pos -= c.len_utf8();
