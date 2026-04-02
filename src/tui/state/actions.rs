@@ -4,8 +4,8 @@ use crate::error::Result;
 use super::{App, ConfirmAction, MessageKind, Mode, NOTES_FIELD_IDX, ProviderForm};
 
 impl App {
-    pub fn start_add(&mut self) {
-        self.form = Some(ProviderForm::new(true, "", None));
+    pub fn add(&mut self) {
+        self.form = Some(ProviderForm::new("", None));
         self.mode = Mode::Editing;
     }
 
@@ -17,7 +17,7 @@ impl App {
             return;
         };
 
-        self.form = Some(ProviderForm::new(false, name, Some(provider)));
+        self.form = Some(ProviderForm::new(name, Some(provider)));
         self.mode = Mode::Editing;
     }
 
@@ -42,7 +42,7 @@ impl App {
             .value
             .trim_matches('\n')
             .to_string();
-        let is_new = form.is_new;
+        let is_new = form.original_name.is_none();
         let original_name = form.original_name.clone();
         // Look up the known model list for this provider (used for route validation).
         // If not yet loaded we skip the target check (conservative).
@@ -74,7 +74,9 @@ impl App {
             None
         };
         if let Some(err) = validation_error {
-            self.form.as_mut().unwrap().error = Some(err);
+            if let Some(f) = self.form.as_mut() {
+                f.error = Some(err);
+            }
             return Ok(());
         }
 
@@ -160,7 +162,6 @@ impl App {
                 // Mirror the cleanup: remove invalid routes from the live form too.
                 f.routes.retain(|r| r.is_valid(&known_models));
                 f.clamp_route_cursor();
-                f.is_new = false;
                 f.original_name = Some(new_name);
                 f.error = None;
                 f.fields[NOTES_FIELD_IDX].cursor =

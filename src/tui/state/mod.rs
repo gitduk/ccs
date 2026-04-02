@@ -100,8 +100,7 @@ pub struct App {
 // ─── Provider editor form ─────────────────────────────────────────────────────
 
 pub struct ProviderForm {
-    pub is_new: bool,
-    /// Original name before editing — used to detect renames.
+    /// Original name before editing — `None` means this is a new provider.
     pub original_name: Option<String>,
     pub fields: Vec<FormField>,
     /// Focused slot index: 0..fields.len()-1 = a regular field;
@@ -350,7 +349,7 @@ impl FormField {
 
 impl ProviderForm {
     /// Create a new form for adding or editing a provider.
-    pub(super) fn new(is_new: bool, name: &str, provider: Option<&Provider>) -> Self {
+    pub(super) fn new(name: &str, provider: Option<&Provider>) -> Self {
         let (base_url, api_key, format, notes, routes) = match provider {
             Some(p) => (
                 p.base_url.as_str(),
@@ -362,8 +361,11 @@ impl ProviderForm {
             None => ("", "", "anthropic".to_string(), "", vec![]),
         };
         Self {
-            is_new,
-            original_name: if is_new { None } else { Some(name.to_string()) },
+            original_name: if name.is_empty() {
+                None
+            } else {
+                Some(name.to_string())
+            },
             fields: vec![
                 FormField::text("Name", name),
                 FormField::text("Base URL", base_url),

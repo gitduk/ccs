@@ -89,7 +89,7 @@ pub(super) fn handle_normal_key(
             sync_proxy_config(app, server);
         }
         // a / o → add (Vim: 'o' opens new line below, 'a' appends)
-        KeyCode::Char('a') | KeyCode::Char('o') => app.start_add(),
+        KeyCode::Char('a' | 'o') => app.add(),
         // e / Enter → edit
         KeyCode::Enter | KeyCode::Char('e') => {
             if app.selected_name().is_some() {
@@ -122,7 +122,7 @@ pub(super) fn handle_normal_key(
         }
         KeyCode::Char('c') => app.confirm(ConfirmAction::ClearCurrent),
         KeyCode::Char('C') => app.confirm(ConfirmAction::Clear),
-        KeyCode::Char('h') | KeyCode::Char('?') => {
+        KeyCode::Char('h' | '?') => {
             app.mode = Mode::Help;
         }
         KeyCode::Char('m') => {

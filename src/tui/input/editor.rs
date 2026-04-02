@@ -65,9 +65,8 @@ pub(super) fn handle_editing_key(
         } else if form.vim_mode == VimMode::Insert {
             form.vim_mode = VimMode::Normal;
         } else {
-            // Normal mode Esc → cancel the form.
-            app.form = None;
-            app.mode = Mode::Normal;
+            // Normal mode Esc → close the form.
+            close_editor(app);
         }
         return Ok(());
     }
@@ -75,8 +74,7 @@ pub(super) fn handle_editing_key(
     // ── q — cancel (Normal mode only, not while editing a route pattern) ──────
     if form.vim_mode == VimMode::Normal && !form.route_editing && matches!(code, KeyCode::Char('q'))
     {
-        app.form = None;
-        app.mode = Mode::Normal;
+        close_editor(app);
         return Ok(());
     }
 
@@ -114,7 +112,7 @@ pub(super) fn handle_editing_key(
                 form.vim_mode = VimMode::Insert;
             }
             // 'a' / 'A' → Insert at end of current value.
-            KeyCode::Char('a') | KeyCode::Char('A') => {
+            KeyCode::Char('a' | 'A') => {
                 form.vim_mode = VimMode::Insert;
                 form.fields[form.focused].end();
             }
@@ -146,9 +144,8 @@ pub(super) fn handle_editing_key(
                     form.fields[focused].toggle_value();
                     save_and_sync(app, server)?;
                     return Ok(());
-                } else {
-                    form.fields[focused].move_left();
                 }
+                form.fields[focused].move_left();
             }
             KeyCode::Char('l') | KeyCode::Right => {
                 let focused = form.focused;
@@ -156,9 +153,8 @@ pub(super) fn handle_editing_key(
                     form.fields[focused].toggle_value();
                     save_and_sync(app, server)?;
                     return Ok(());
-                } else {
-                    form.fields[focused].move_right();
                 }
+                form.fields[focused].move_right();
             }
             // Space: toggle toggle-type fields.
             KeyCode::Char(' ') => {
@@ -198,9 +194,8 @@ pub(super) fn handle_editing_key(
                     // Borrow on `form` ends here; safe to call app methods below.
                     save_and_sync(app, server)?;
                     return Ok(());
-                } else {
-                    form.pending_key = Some(('d', std::time::Instant::now()));
                 }
+                form.pending_key = Some(('d', std::time::Instant::now()));
             }
             // yy → copy current field value to clipboard.
             KeyCode::Char('y') => {
@@ -213,9 +208,8 @@ pub(super) fn handle_editing_key(
                         app.set_message("Copy failed (wl-copy not found?)", MessageKind::Error);
                     }
                     return Ok(());
-                } else {
-                    form.pending_key = Some(('y', std::time::Instant::now()));
                 }
+                form.pending_key = Some(('y', std::time::Instant::now()));
             }
             _ => {}
         }
@@ -295,7 +289,7 @@ pub(super) fn handle_editing_key(
                 form.fields[form.focused].toggle_value();
                 save_and_sync(app, server)?;
             }
-            KeyCode::Char('h') | KeyCode::Char('l') if ctrl => {
+            KeyCode::Char('h' | 'l') if ctrl => {
                 form.fields[form.focused].toggle_value();
                 save_and_sync(app, server)?;
             }
@@ -321,4 +315,10 @@ pub(super) fn handle_editing_key(
         InsertKeyResult::Consumed | InsertKeyResult::NotHandled => {}
     }
     Ok(())
+}
+
+/// Close the editor and return to Normal mode.
+fn close_editor(app: &mut App) {
+    app.form = None;
+    app.mode = Mode::Normal;
 }

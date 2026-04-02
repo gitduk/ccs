@@ -31,7 +31,11 @@ pub(super) fn draw_form(f: &mut Frame, app: &App) {
     };
     let title = format!(
         " {} Provider  {} ",
-        if form.is_new { "Add" } else { "Edit" },
+        if form.original_name.is_none() {
+            "Add"
+        } else {
+            "Edit"
+        },
         vim_tag
     );
 
@@ -201,23 +205,20 @@ pub(super) fn draw_form(f: &mut Frame, app: &App) {
                 all_lines.extend(lines);
                 f.render_widget(Paragraph::new(all_lines), chunks[ci]);
                 continue;
-            } else {
-                let first_line = field.value.lines().next().unwrap_or("");
-                let label_line =
-                    Line::from(Span::styled(format!("{:<10}", field.label), label_style));
-                let content_chars: Vec<char> = first_line.chars().collect();
-                let max_w = chunks[ci].width.saturating_sub(2) as usize;
-                let display_str = if content_chars.len() > max_w && max_w > 1 {
-                    let truncated: String = content_chars[..max_w - 1].iter().collect();
-                    format!("{}\u{2026}", truncated)
-                } else {
-                    first_line.to_string()
-                };
-                let content_line =
-                    Line::from(Span::styled(display_str, Style::default().fg(t::MUTED)));
-                f.render_widget(Paragraph::new(vec![label_line, content_line]), chunks[ci]);
-                continue;
             }
+            let first_line = field.value.lines().next().unwrap_or("");
+            let label_line = Line::from(Span::styled(format!("{:<10}", field.label), label_style));
+            let content_chars: Vec<char> = first_line.chars().collect();
+            let max_w = chunks[ci].width.saturating_sub(2) as usize;
+            let display_str = if content_chars.len() > max_w && max_w > 1 {
+                let truncated: String = content_chars[..max_w - 1].iter().collect();
+                format!("{}\u{2026}", truncated)
+            } else {
+                first_line.to_string()
+            };
+            let content_line = Line::from(Span::styled(display_str, Style::default().fg(t::MUTED)));
+            f.render_widget(Paragraph::new(vec![label_line, content_line]), chunks[ci]);
+            continue;
         } else {
             let display_val = if field.label == "API Key" && !is_focused {
                 mask_api_key_str(&field.value).unwrap_or_else(|| field.value.clone())

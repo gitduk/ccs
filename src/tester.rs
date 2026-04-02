@@ -5,7 +5,6 @@ use serde_json::json;
 use crate::config::{ApiFormat, Provider};
 
 const TEST_TIMEOUT_SECS: u64 = 10;
-const FALLBACK_MODEL: &str = "claude-haiku-4-5-20251001";
 
 #[derive(Debug, Clone)]
 pub enum TestStatus {
@@ -23,11 +22,21 @@ pub struct TestResult {
     pub tested_at: Instant,
 }
 
-pub async fn test_connectivity(
+/// Run a latency test against the provider using `model`.
+///
+/// If `known_models` is supplied (e.g. pre-fetched by the caller), it is
+/// attached directly to the result and the internal `/v1/models` fetch is
+/// skipped, saving one extra HTTP request.
+pub async fn test_latency(
     client: &reqwest::Client,
     provider: &Provider,
-    test_model: Option<String>,
+    model: String,
+    known_models: Option<Vec<String>>,
 ) -> TestResult {
+    // Record the start time before any fallible work so all early-return
+    // paths share the same reference point.
+    let tested_at = Instant::now();
+
     let api_key = match provider.resolve_api_key() {
         Ok(k) => k,
         Err(e) => {
@@ -35,36 +44,24 @@ pub async fn test_connectivity(
                 status: TestStatus::Error(format!("Key error: {e}")),
                 latency_ms: 0,
                 model_count: None,
-                model_names: None,
-                tested_at: Instant::now(),
+                model_names: known_models,
+                tested_at,
             };
         }
     };
     let base = provider.base_url.trim_end_matches('/');
-
     let auth_header = provider.auth_header(&api_key);
 
-    let model = test_model.as_deref().unwrap_or(FALLBACK_MODEL).to_string();
-
     // Real latency test: POST to messages/chat endpoint.
-    let (msg_url, body) = match provider.api_format {
-        ApiFormat::Anthropic => (
-            format!("{base}/v1/messages"),
-            json!({
-                "model": model,
-                "max_tokens": 1,
-                "messages": [{"role": "user", "content": "hi"}]
-            }),
-        ),
-        ApiFormat::OpenAI => (
-            format!("{base}/v1/chat/completions"),
-            json!({
-                "model": model,
-                "max_tokens": 1,
-                "messages": [{"role": "user", "content": "hi"}]
-            }),
-        ),
+    let msg_url = match provider.api_format {
+        ApiFormat::Anthropic => format!("{base}/v1/messages"),
+        ApiFormat::OpenAI => format!("{base}/v1/chat/completions"),
     };
+    let body = json!({
+        "model": model,
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "ping"}]
+    });
 
     let t0 = Instant::now();
     let mut req = client
@@ -86,9 +83,9 @@ pub async fn test_connectivity(
             return TestResult {
                 status: TestStatus::Error(format!("Connection failed: {e}")),
                 latency_ms,
-                model_count: None,
-                model_names: None,
-                tested_at: Instant::now(),
+                model_count: known_models.as_ref().map(|v| v.len()),
+                model_names: known_models,
+                tested_at,
             };
         }
         Ok(r) => r.status(),
@@ -102,17 +99,35 @@ pub async fn test_connectivity(
         TestStatus::Error(format!("HTTP {}", status.as_u16()))
     };
 
-    // Fetch model list (best-effort, does not affect status or latency).
-    let (model_count, model_names) =
-        fetch_models(client, base, &auth_header, &provider.api_format).await;
+    // Use the pre-fetched model list when available; otherwise fetch now
+    // (best-effort, does not affect status or latency).
+    let (model_count, model_names) = if let Some(models) = known_models {
+        (Some(models.len()), Some(models))
+    } else {
+        fetch_models(client, base, &auth_header, &provider.api_format).await
+    };
 
     TestResult {
         status: msg_status,
         latency_ms,
         model_count,
         model_names,
-        tested_at: Instant::now(),
+        tested_at,
     }
+}
+
+/// Fetch the model list for a provider. Returns an empty Vec on failure.
+pub async fn fetch_provider_models(client: &reqwest::Client, provider: &Provider) -> Vec<String> {
+    let api_key = match provider.resolve_api_key() {
+        Ok(k) => k,
+        Err(_) => return vec![],
+    };
+    let base = provider.base_url.trim_end_matches('/');
+    let auth_header = provider.auth_header(&api_key);
+    fetch_models(client, base, &auth_header, &provider.api_format)
+        .await
+        .1
+        .unwrap_or_default()
 }
 
 async fn fetch_models(

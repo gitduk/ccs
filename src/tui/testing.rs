@@ -9,6 +9,55 @@ pub(super) fn test_selected(app: &mut App) {
 }
 
 pub(super) fn test_provider_by_name(app: &mut App, name: &str) {
+    if !app.config.providers.contains_key(name) {
+        return;
+    }
+
+    // If no model list is known yet, fall back to the fetch-then-test flow.
+    let supported = app.provider_models.get(name);
+    let Some(supported) = supported.filter(|s| !s.is_empty()) else {
+        test_provider_after_add(app, name);
+        return;
+    };
+
+    let provider = app.config.providers[name].clone();
+    let tx = app.test_tx.clone();
+    let name_owned = name.to_string();
+
+    // Pick the best test model:
+    // 1. Most-used model from the provider list (by input + output tokens).
+    // 2. Random model from the provider list (no usage data yet).
+    let best_model: String = app
+        .metrics
+        .lock()
+        .ok()
+        .and_then(|m| {
+            supported
+                .iter()
+                .max_by_key(|model| m.by_model.get(*model).map_or(0, |s| s.input + s.output))
+                .filter(|model| m.by_model.contains_key(*model))
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| pick_random(supported));
+
+    // Clone the known list so test_latency can skip the redundant /v1/models fetch.
+    let known_models = supported.clone();
+
+    app.pending_tests.insert(name_owned.clone());
+    app.set_message(format!("Testing {name}…"), MessageKind::Info);
+
+    let client = app.test_client.clone();
+    tokio::spawn(async move {
+        let result =
+            crate::tester::test_latency(&client, &provider, best_model, Some(known_models)).await;
+        let _ = tx.send((name_owned, result));
+    });
+}
+
+/// Called when no model list is known for the provider (first test or empty list).
+/// Fetches the model list first, then picks a random model to run a latency test.
+/// Passes the fetched list directly to `test_latency` to avoid a redundant fetch.
+pub(super) fn test_provider_after_add(app: &mut App, name: &str) {
     let Some(provider) = app.config.providers.get(name) else {
         return;
     };
@@ -16,46 +65,36 @@ pub(super) fn test_provider_by_name(app: &mut App, name: &str) {
     let tx = app.test_tx.clone();
     let name_owned = name.to_string();
 
-    // Pick the best test model:
-    // 1. Most-used model from the provider's supported list (intersection with usage data).
-    // 2. Random model from the supported list (no usage intersection).
-    // 3. Globally most-used model (supported list empty).
-    let best_model: Option<String> = app.metrics.lock().ok().and_then(|m| {
-        let supported = app.provider_models.get(name);
-        if let Some(supported) = supported.filter(|s| !s.is_empty()) {
-            // Cases 1 & 2: provider has a known model list.
-            let best = supported
-                .iter()
-                .filter(|model| m.by_model.contains_key(*model))
-                .max_by_key(|model| {
-                    m.by_model
-                        .get(*model)
-                        .map(|s| s.input + s.output)
-                        .unwrap_or(0)
-                });
-            best.or_else(|| {
-                let idx = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.subsec_nanos() as usize)
-                    .unwrap_or(0);
-                supported.get(idx % supported.len())
-            })
-            .map(|s| s.to_string())
-        } else {
-            // Case 3: no supported list — use the globally most-used model.
-            m.by_model
-                .iter()
-                .max_by_key(|(_, s)| s.input + s.output)
-                .map(|(model, _)| model.clone())
-        }
-    });
-
     app.pending_tests.insert(name_owned.clone());
     app.set_message(format!("Testing {name}…"), MessageKind::Info);
 
     let client = app.test_client.clone();
     tokio::spawn(async move {
-        let result = crate::tester::test_connectivity(&client, &provider, best_model).await;
+        // Record the test start time before any I/O so the timestamp reflects
+        // when the test was initiated, not when a failure was detected.
+        let tested_at = std::time::Instant::now();
+
+        // Step 1: fetch model list.
+        let models = crate::tester::fetch_provider_models(&client, &provider).await;
+
+        if models.is_empty() {
+            // Provider returned no models — report the error without writing an
+            // empty list to DB (model_names: None keeps provider_models untouched).
+            let result = crate::tester::TestResult {
+                status: crate::tester::TestStatus::Error("No models available".to_string()),
+                latency_ms: 0,
+                model_count: None,
+                model_names: None,
+                tested_at,
+            };
+            let _ = tx.send((name_owned, result));
+            return;
+        }
+
+        // Step 2: pick a random model and run the latency test, passing the
+        // already-fetched model list so test_latency skips a redundant fetch.
+        let model = pick_random(&models);
+        let result = crate::tester::test_latency(&client, &provider, model, Some(models)).await;
         let _ = tx.send((name_owned, result));
     });
 }
@@ -65,4 +104,14 @@ pub(super) fn start_background_tests(app: &mut App) {
     for name in names {
         test_provider_by_name(app, &name);
     }
+}
+
+/// Pick a pseudo-random element from a non-empty slice using subsecond nanos
+/// as a cheap entropy source.
+fn pick_random(items: &[String]) -> String {
+    let idx = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as usize)
+        .unwrap_or(0);
+    items[idx % items.len()].clone()
 }
