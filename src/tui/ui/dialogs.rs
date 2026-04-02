@@ -22,6 +22,8 @@ pub(super) fn draw_help(f: &mut Frame, _app: &App) {
                 ("e / Enter", "Edit selected provider"),
                 ("dd", "Delete selected provider"),
                 ("t", "Test provider connectivity"),
+                ("yy", "Copy provider base URL to clipboard"),
+                ("yc", "Copy test curl command to clipboard"),
                 ("K / J", "Move provider up / down"),
                 ("f", "Toggle fallback mode"),
                 ("r", "Reload config from disk"),

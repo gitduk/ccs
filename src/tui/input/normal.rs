@@ -1,5 +1,6 @@
 use crossterm::event::KeyCode;
 
+use crate::config::{ApiFormat, Provider};
 use crate::tui::server::sync_proxy_config;
 use crate::tui::state::{ConfirmAction, MessageKind, Mode};
 use crate::tui::{App, ServerHandle};
@@ -42,6 +43,29 @@ pub(super) fn handle_normal_key(
                         app.set_message("Copied base URL", MessageKind::Success);
                     } else {
                         app.set_message("Copy failed (wl-copy not found?)", MessageKind::Error);
+                    }
+                }
+                return Ok(());
+            }
+            ('y', KeyCode::Char('c')) => {
+                if let Some(provider) = app
+                    .selected_name()
+                    .and_then(|name| app.config.providers.get(name))
+                {
+                    match build_test_curl(provider) {
+                        Ok(cmd) => {
+                            if super::copy_to_clipboard(&cmd) {
+                                app.set_message("Copied curl command", MessageKind::Success);
+                            } else {
+                                app.set_message(
+                                    "Copy failed (wl-copy not found?)",
+                                    MessageKind::Error,
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            app.set_message(format!("Cannot build curl: {e}"), MessageKind::Error);
+                        }
                     }
                 }
                 return Ok(());
@@ -134,4 +158,40 @@ pub(super) fn handle_normal_key(
         _ => {}
     }
     Ok(())
+}
+
+/// Build a `curl` command that replicates the test request sent by the tester.
+/// Returns an error string if the API key cannot be resolved.
+fn build_test_curl(provider: &Provider) -> Result<String, String> {
+    let api_key = provider.resolve_api_key().map_err(|e| e.to_string())?;
+
+    let base = provider.base_url.trim_end_matches('/');
+    let (url, body) = match provider.api_format {
+        ApiFormat::Anthropic => (
+            format!("{base}/v1/messages"),
+            r#"{"model":"MODEL","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}"#,
+        ),
+        ApiFormat::OpenAI => (
+            format!("{base}/v1/chat/completions"),
+            r#"{"model":"MODEL","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}"#,
+        ),
+    };
+
+    // Pick a representative model from test_results / provider config if available,
+    // but keep it simple — the user can edit MODEL in the clipboard anyway.
+    let mut cmd = format!("curl -s -X POST '{url}' \\\n  -H 'Content-Type: application/json' \\\n");
+
+    match provider.api_format {
+        ApiFormat::Anthropic => {
+            cmd.push_str(&format!(
+                "  -H 'x-api-key: {api_key}' \\\n  -H 'anthropic-version: 2023-06-01' \\\n"
+            ));
+        }
+        ApiFormat::OpenAI => {
+            cmd.push_str(&format!("  -H 'Authorization: Bearer {api_key}' \\\n"));
+        }
+    }
+
+    cmd.push_str(&format!("  -d '{body}'"));
+    Ok(cmd)
 }

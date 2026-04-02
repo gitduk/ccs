@@ -5,19 +5,22 @@ use ratatui::widgets::Cell;
 use super::super::theme::{self as t};
 
 pub(super) fn truncate_error(e: &str) -> String {
-    // Strip verbose reqwest prefix: "Connection failed: error sending request for url (...): <cause>"
-    let msg = if let Some(pos) = e.rfind(": ") {
-        let suffix = &e[pos + 2..];
-        // Only use suffix if it's meaningfully shorter and not a URL
-        if suffix.len() < e.len() / 2 && !suffix.starts_with("http") {
-            suffix
-        } else {
-            e.split(':').next().unwrap_or(e)
-        }
-    } else {
-        e
-    };
     const MAX: usize = 30;
+
+    // HTML/XML body returned instead of JSON — not useful to display verbatim.
+    let trimmed = e.trim_start();
+    if trimmed.starts_with('<') {
+        return "non-JSON response (HTML/XML)".to_string();
+    }
+
+    // Strip verbose reqwest chain: "...: error sending request for url (...): <root cause>"
+    // Pick the last colon-separated segment that is short enough and not a URL.
+    let msg: &str = e
+        .split(": ")
+        .filter(|seg| !seg.starts_with("http") && seg.chars().count() <= MAX * 2)
+        .last()
+        .unwrap_or_else(|| e.split(':').next().unwrap_or(e));
+
     if msg.chars().count() > MAX {
         let truncated: String = msg.chars().take(MAX).collect();
         format!("{}…", truncated)
