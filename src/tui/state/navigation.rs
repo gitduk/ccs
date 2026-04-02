@@ -4,6 +4,7 @@ use std::sync::Mutex;
 
 use crate::config;
 use crate::error::Result;
+use crate::repo::Repository;
 
 use super::{App, MESSAGE_TIMEOUT_SECS, MessageKind};
 
@@ -25,13 +26,13 @@ impl App {
             table_state.select(Some(idx));
         }
 
-        let db = crate::repo::Repository::open(&config.resolve_db_path());
+        let db = Repository::open(&config.resolve_db_path());
         if let Err(e) = db.migrate(&config.name_to_id_map()) {
             tracing::warn!("DB schema migration failed: {e}");
         }
 
-        let metrics = Arc::new(Mutex::new(db.load_metrics()));
-        let provider_models = db.load_provider_models();
+        let (metrics_data, provider_models) = db.load_all();
+        let metrics = Arc::new(Mutex::new(metrics_data));
 
         let bg_proxy_pid = super::bg_proxy::load_bg_proxy_pid();
         let (test_tx, test_rx) = mpsc::channel();
@@ -155,15 +156,13 @@ impl App {
         while let Ok((name, result)) = self.test_rx.try_recv() {
             self.pending_tests.remove(&name);
             if let Some(models) = &result.model_names {
-                {
-                    let id = self
-                        .config
-                        .providers
-                        .get(&name)
-                        .map(|p| p.id.as_str())
-                        .unwrap_or(&name);
-                    self.db.upsert_provider_models(id, &name, models);
-                }
+                let id = self
+                    .config
+                    .providers
+                    .get(&name)
+                    .map(|p| p.id.as_str())
+                    .unwrap_or(&name);
+                self.db.upsert_provider_models(id, &name, models);
                 self.provider_models.insert(name.clone(), models.clone());
             }
             // Clear stale error when test passes so Info panel shows clean state.

@@ -9,8 +9,8 @@ use crate::proxy::metrics::TokenMetrics;
 pub struct Repository(SharedDb);
 
 /// Token/request deltas to persist for a single proxy request.
-#[derive(Clone, Default)]
-pub struct StatsDelta {
+#[derive(Default)]
+pub(crate) struct StatsDelta {
     pub input: u64,
     pub output: u64,
     pub requests: u64,
@@ -30,7 +30,7 @@ impl Repository {
 
     /// Write provider + model token/request deltas atomically.
     /// Intended to be called from `tokio::task::spawn_blocking`.
-    pub fn persist_stats(
+    pub(crate) fn persist_stats(
         &self,
         provider_id: &str,
         provider_name: &str,
@@ -91,14 +91,26 @@ impl Repository {
         }
     }
 
+    /// Load both metrics and provider models in a single lock acquisition.
+    pub fn load_all(&self) -> (TokenMetrics, HashMap<String, Vec<String>>) {
+        match self.0.lock() {
+            Ok(conn) => (db::load_metrics(&conn), db::load_provider_models(&conn)),
+            Err(_) => {
+                tracing::warn!("DB mutex poisoned in load_all; returning empty state");
+                (TokenMetrics::default(), HashMap::new())
+            }
+        }
+    }
+
     pub fn upsert_provider_models(
         &self,
         provider_id: &str,
         provider_name: &str,
         models: &[String],
     ) {
-        if let Ok(conn) = self.0.lock()
-            && let Err(e) = db::upsert_provider_models(&conn, provider_id, provider_name, models)
+        if let Ok(mut conn) = self.0.lock()
+            && let Err(e) =
+                db::upsert_provider_models(&mut conn, provider_id, provider_name, models)
         {
             tracing::warn!("Failed to upsert provider models for {provider_name}: {e}");
         }

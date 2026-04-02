@@ -17,7 +17,7 @@ struct ProviderKey {
     name: String,
 }
 
-use crate::repo::StatsDelta;
+use crate::repo::{Repository, StatsDelta};
 
 /// Health check endpoint.
 pub async fn health_check(State(state): State<SharedState>) -> impl IntoResponse {
@@ -367,7 +367,7 @@ pub async fn handle_messages(
 async fn handle_buffered_response(
     response: reqwest::Response,
     is_openai: bool,
-    db: crate::repo::Repository,
+    db: Repository,
     pkey: ProviderKey,
 ) -> Result<Response, AppError> {
     let ProviderKey {
@@ -395,15 +395,19 @@ async fn handle_buffered_response(
     } else {
         (0, 0, None)
     };
-    record_and_persist(
+    persist_stats(
         &db,
         &ProviderKey {
             id: provider_id,
             name: provider_name,
         },
         model.as_deref(),
-        input,
-        output,
+        StatsDelta {
+            requests: 1,
+            input,
+            output,
+            ..Default::default()
+        },
     );
 
     Ok((
@@ -414,34 +418,8 @@ async fn handle_buffered_response(
         .into_response())
 }
 
-/// Persist token usage and request count to DB. TUI will reload from DB on next tick.
-fn record_and_persist(
-    db: &crate::repo::Repository,
-    pkey: &ProviderKey,
-    model: Option<&str>,
-    input: u64,
-    output: u64,
-) {
-    persist_stats(
-        db,
-        pkey,
-        model,
-        StatsDelta {
-            requests: 1,
-            input,
-            output,
-            ..Default::default()
-        },
-    );
-}
-
 /// Fire-and-forget: persist provider and model deltas to DB outside the hot path.
-fn persist_stats(
-    db: &crate::repo::Repository,
-    pkey: &ProviderKey,
-    model_name: Option<&str>,
-    delta: StatsDelta,
-) {
+fn persist_stats(db: &Repository, pkey: &ProviderKey, model_name: Option<&str>, delta: StatsDelta) {
     let repo = db.clone();
     let pkey = pkey.clone();
     let mid = model_name.map(|s| s.to_string());
@@ -454,7 +432,7 @@ fn persist_stats(
 async fn handle_streaming_response(
     response: reqwest::Response,
     is_openai: bool,
-    db: crate::repo::Repository,
+    db: Repository,
     pkey: ProviderKey,
 ) -> Result<Response, AppError> {
     let raw_stream: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>> =
@@ -484,7 +462,7 @@ async fn handle_streaming_response(
 /// Passes all bytes through unchanged; records metrics when the stream ends.
 fn track_tokens_in_stream(
     mut inner: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>>,
-    db: crate::repo::Repository,
+    db: Repository,
     pkey: ProviderKey,
 ) -> impl futures::Stream<Item = std::io::Result<Bytes>> + Send {
     let provider_id = pkey.id;
@@ -541,12 +519,16 @@ fn track_tokens_in_stream(
         }
 
         // Stream ended: persist request count and token usage atomically.
-        record_and_persist(
+        persist_stats(
             &db,
             &ProviderKey { id: provider_id, name: provider_name },
             model.as_deref(),
-            input_tokens,
-            output_tokens,
+            StatsDelta {
+                requests: 1,
+                input: input_tokens,
+                output: output_tokens,
+                ..Default::default()
+            },
         );
     }
 }

@@ -52,8 +52,7 @@ pub(super) fn start_db_watcher(app: &App) -> Option<(Receiver<()>, notify::Recom
 }
 
 pub(crate) fn reload_metrics_from_db(app: &mut App) {
-    let fresh = app.db.load_metrics();
-    let fresh_models = app.db.load_provider_models();
+    let (fresh, fresh_models) = app.db.load_all();
     if let Ok(mut m) = app.metrics.lock() {
         // Preserve last_error — it's ephemeral session state, not stored in DB.
         let saved_errors = std::mem::take(&mut m.last_error);

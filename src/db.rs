@@ -312,19 +312,22 @@ pub fn load_provider_models(conn: &Connection) -> HashMap<String, Vec<String>> {
 
 /// Ensure discovered models exist in model_stats (preserves existing usage data).
 pub fn upsert_provider_models(
-    conn: &Connection,
+    conn: &mut Connection,
     provider_id: &str,
     provider_name: &str,
     models: &[String],
 ) -> Result<()> {
-    let mut stmt = conn.prepare(
-        "INSERT OR IGNORE INTO model_stats (provider_id, provider_name, model_name, input, output)
-         VALUES (?1, ?2, ?3, 0, 0)",
-    )?;
-    for model in models {
-        stmt.execute(params![provider_id, provider_name, model])?;
+    let tx = conn.transaction()?;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT OR IGNORE INTO model_stats (provider_id, provider_name, model_name, input, output)
+             VALUES (?1, ?2, ?3, 0, 0)",
+        )?;
+        for model in models {
+            stmt.execute(params![provider_id, provider_name, model])?;
+        }
     }
-    Ok(())
+    tx.commit()
 }
 
 pub fn clear_all(conn: &mut Connection) -> Result<()> {
