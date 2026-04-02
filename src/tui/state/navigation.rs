@@ -25,16 +25,11 @@ impl App {
             table_state.select(Some(idx));
         }
 
-        let db = crate::db::open_with_fallback(&config.resolve_db_path());
-        crate::db::migrate_schema(&db, &config.name_to_id_map());
+        let db = crate::repo::Repository::open(&config.resolve_db_path());
+        db.migrate(&config.name_to_id_map());
 
-        let (metrics, provider_models) = {
-            let conn = db.lock().unwrap();
-            (
-                Arc::new(Mutex::new(crate::db::load_metrics(&conn))),
-                crate::db::load_provider_models(&conn),
-            )
-        };
+        let metrics = Arc::new(Mutex::new(db.load_metrics()));
+        let provider_models = db.load_provider_models();
 
         let bg_proxy_pid = super::bg_proxy::load_bg_proxy_pid();
         let (test_tx, test_rx) = mpsc::channel();
@@ -158,14 +153,14 @@ impl App {
         while let Ok((name, result)) = self.test_rx.try_recv() {
             self.pending_tests.remove(&name);
             if let Some(models) = &result.model_names {
-                if let Ok(conn) = self.db.lock() {
+                {
                     let id = self
                         .config
                         .providers
                         .get(&name)
                         .map(|p| p.id.as_str())
                         .unwrap_or(&name);
-                    let _ = crate::db::upsert_provider_models(&conn, id, &name, models);
+                    self.db.upsert_provider_models(id, &name, models);
                 }
                 self.provider_models.insert(name.clone(), models.clone());
             }
@@ -198,9 +193,7 @@ impl App {
                     self.table_state.select(None);
                 }
 
-                if let Ok(conn) = self.db.lock() {
-                    self.provider_models = crate::db::load_provider_models(&conn);
-                }
+                self.provider_models = self.db.load_provider_models();
 
                 self.set_message("Configuration reloaded", MessageKind::Success);
                 Ok(())

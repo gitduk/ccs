@@ -125,9 +125,7 @@ impl App {
                 self.config.current = new_name.clone();
             }
 
-            if let Ok(conn) = self.db.lock() {
-                let _ = crate::db::rename_provider(&conn, &provider_id, &new_name);
-            }
+            self.db.rename_provider(&provider_id, &new_name);
 
             if let Some(models) = self.provider_models.remove(old_name) {
                 self.provider_models.insert(new_name.clone(), models);
@@ -179,9 +177,7 @@ impl App {
     }
 
     pub fn clear_metrics(&mut self) {
-        if let Ok(mut conn) = self.db.lock() {
-            let _ = crate::db::clear_all(&mut conn);
-        }
+        self.db.clear_all();
         if let Ok(mut m) = self.metrics.lock() {
             m.last_error.clear();
         }
@@ -199,9 +195,7 @@ impl App {
             return;
         };
 
-        if let Ok(mut conn) = self.db.lock() {
-            let _ = crate::db::clear_provider(&mut conn, &provider_id);
-        }
+        self.db.clear_provider(&provider_id);
         if let Ok(mut m) = self.metrics.lock() {
             m.clear_error(&name);
         }
@@ -234,10 +228,8 @@ impl App {
 
     pub(super) fn do_delete(&mut self, name: &str) -> Result<()> {
         let removed = self.config.providers.shift_remove(name);
-        if let Ok(mut conn) = self.db.lock() {
-            let id = removed.as_ref().map(|p| p.id.as_str()).unwrap_or(name);
-            let _ = crate::db::clear_provider(&mut conn, id);
-        }
+        let id = removed.as_ref().map(|p| p.id.as_str()).unwrap_or(name);
+        self.db.clear_provider(id);
         if let Ok(mut m) = self.metrics.lock() {
             m.clear_error(name);
         }

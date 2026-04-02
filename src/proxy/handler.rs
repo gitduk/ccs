@@ -374,7 +374,7 @@ pub async fn handle_messages(
 async fn handle_buffered_response(
     response: reqwest::Response,
     is_openai: bool,
-    db: crate::db::SharedDb,
+    db: crate::repo::Repository,
     pkey: ProviderKey,
 ) -> Result<Response, AppError> {
     let ProviderKey {
@@ -423,7 +423,7 @@ async fn handle_buffered_response(
 
 /// Persist token usage and request count to DB. TUI will reload from DB on next tick.
 fn record_and_persist(
-    db: &crate::db::SharedDb,
+    db: &crate::repo::Repository,
     pkey: &ProviderKey,
     model: Option<&str>,
     input: u64,
@@ -444,42 +444,24 @@ fn record_and_persist(
 
 /// Fire-and-forget: persist provider and model deltas to DB outside the hot path.
 fn persist_stats(
-    db: &crate::db::SharedDb,
+    db: &crate::repo::Repository,
     pkey: &ProviderKey,
     model_name: Option<&str>,
     delta: StatsDelta,
 ) {
-    let db = db.clone();
+    let repo = db.clone();
     let pkey = pkey.clone();
     let mid = model_name.map(|s| s.to_string());
     tokio::task::spawn_blocking(move || {
-        if let Ok(mut conn) = db.lock() {
-            let result = conn.transaction().and_then(|tx| {
-                crate::db::upsert_provider(
-                    &tx,
-                    &pkey.id,
-                    &pkey.name,
-                    delta.input,
-                    delta.output,
-                    delta.requests,
-                    delta.failures,
-                )?;
-                if let Some(ref model) = mid {
-                    crate::db::upsert_model(
-                        &tx,
-                        &pkey.id,
-                        &pkey.name,
-                        model,
-                        delta.input,
-                        delta.output,
-                    )?;
-                }
-                tx.commit()
-            });
-            if let Err(e) = result {
-                tracing::warn!("Failed to persist stats for {}: {e}", pkey.name);
-            }
-        }
+        repo.persist_stats(
+            &pkey.id,
+            &pkey.name,
+            mid.as_deref(),
+            delta.input,
+            delta.output,
+            delta.requests,
+            delta.failures,
+        );
     });
 }
 
@@ -487,7 +469,7 @@ fn persist_stats(
 async fn handle_streaming_response(
     response: reqwest::Response,
     is_openai: bool,
-    db: crate::db::SharedDb,
+    db: crate::repo::Repository,
     pkey: ProviderKey,
 ) -> Result<Response, AppError> {
     let raw_stream: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>> =
@@ -517,7 +499,7 @@ async fn handle_streaming_response(
 /// Passes all bytes through unchanged; records metrics when the stream ends.
 fn track_tokens_in_stream(
     mut inner: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>>,
-    db: crate::db::SharedDb,
+    db: crate::repo::Repository,
     pkey: ProviderKey,
 ) -> impl futures::Stream<Item = std::io::Result<Bytes>> + Send {
     let provider_id = pkey.id;

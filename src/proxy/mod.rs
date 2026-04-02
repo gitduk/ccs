@@ -14,14 +14,14 @@ use tokio::sync::RwLock;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::config::AppConfig;
-use crate::db::SharedDb;
+use crate::repo::Repository;
 use metrics::SharedMetrics;
 
 pub struct AppState {
     pub config: Arc<RwLock<AppConfig>>,
     pub http_client: Client,
     pub metrics: SharedMetrics,
-    pub db: SharedDb,
+    pub db: Repository,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -56,8 +56,8 @@ fn build_http_client() -> Client {
 /// Start the proxy server (CLI mode, shuts down on Ctrl+C / SIGTERM).
 pub async fn start_server(config: AppConfig) -> crate::error::Result<()> {
     let listen = config.listen.clone();
-    let db = crate::db::open_with_fallback(&config.resolve_db_path());
-    crate::db::migrate_schema(&db, &config.name_to_id_map());
+    let db = crate::repo::Repository::open(&config.resolve_db_path());
+    db.migrate(&config.name_to_id_map());
     let shared_config = Arc::new(RwLock::new(config));
     let state = Arc::new(AppState {
         config: shared_config.clone(),
@@ -106,7 +106,7 @@ pub async fn start_server_with_shutdown(
     shared_config: Arc<RwLock<AppConfig>>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     metrics: SharedMetrics,
-    db: SharedDb,
+    db: Repository,
 ) -> crate::error::Result<()> {
     let listen = shared_config.read().await.listen.clone();
     let state = Arc::new(AppState {

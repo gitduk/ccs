@@ -7,8 +7,8 @@ pub(super) const NOTES_FIELD_IDX: usize = 4;
 use ratatui::widgets::TableState;
 
 use crate::config::{AppConfig, Provider, RouteRule};
-use crate::db::SharedDb;
 use crate::proxy::metrics::SharedMetrics;
+use crate::repo::Repository;
 use crate::tester::TestResult;
 
 // UI constants
@@ -79,7 +79,7 @@ pub struct App {
     pub pending_tests: HashSet<String>,
     pub test_tx: mpsc::Sender<(String, TestResult)>,
     pub(super) test_rx: mpsc::Receiver<(String, TestResult)>,
-    pub db: SharedDb,
+    pub db: Repository,
     pub bg_proxy_pid: Option<u32>,
     /// Model names per provider, loaded from DB and updated on test.
     pub provider_models: HashMap<String, Vec<String>>,

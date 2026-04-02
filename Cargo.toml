@@ -1,6 +1,6 @@
 [package]
 name = "ccs"
-version = "0.26.4"
+version = "0.26.5"
 edition = "2024"
 description = "Claude Code Switch - Lightweight API proxy for routing Claude Code traffic"
 

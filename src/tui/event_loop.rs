@@ -52,21 +52,19 @@ pub(super) fn start_db_watcher(app: &App) -> Option<(Receiver<()>, notify::Recom
 }
 
 pub(crate) fn reload_metrics_from_db(app: &mut App) {
-    if let Ok(conn) = app.db.lock() {
-        let fresh = crate::db::load_metrics(&conn);
-        let fresh_models = crate::db::load_provider_models(&conn);
-        if let Ok(mut m) = app.metrics.lock() {
-            // Preserve last_error — it's ephemeral session state, not stored in DB.
-            let saved_errors = std::mem::take(&mut m.last_error);
-            *m = fresh;
-            m.last_error = saved_errors;
-        }
-        app.provider_models = fresh_models;
-        // NOTE: models_scroll is intentionally NOT reset here.
-        // draw_models already clamps scroll to max_scroll on every frame,
-        // so stale offsets are harmless. Resetting would jump the viewport
-        // back to the top every time the DB watcher fires.
+    let fresh = app.db.load_metrics();
+    let fresh_models = app.db.load_provider_models();
+    if let Ok(mut m) = app.metrics.lock() {
+        // Preserve last_error — it's ephemeral session state, not stored in DB.
+        let saved_errors = std::mem::take(&mut m.last_error);
+        *m = fresh;
+        m.last_error = saved_errors;
     }
+    app.provider_models = fresh_models;
+    // NOTE: models_scroll is intentionally NOT reset here.
+    // draw_models already clamps scroll to max_scroll on every frame,
+    // so stale offsets are harmless. Resetting would jump the viewport
+    // back to the top every time the DB watcher fires.
 }
 
 pub(super) fn check_server_status(app: &mut App, server: &mut Option<ServerHandle>) {
