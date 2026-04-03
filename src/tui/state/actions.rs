@@ -337,22 +337,39 @@ impl App {
                 } => {
                     self.tests.pending.remove(&name);
                     self.tests.testing_model.remove(&name);
+                    let provider_id = self
+                        .config
+                        .providers
+                        .get(&name)
+                        .map(|p| p.id.clone())
+                        .unwrap_or_else(|| name.clone());
                     if let Some(models) = &result.model_names {
-                        let id = self
-                            .config
-                            .providers
-                            .get(&name)
-                            .map(|p| p.id.as_str())
-                            .unwrap_or(&name);
-                        self.db.upsert_provider_models(id, &name, models);
+                        self.db.upsert_provider_models(&provider_id, &name, models);
                         self.models
                             .provider_models
                             .insert(name.clone(), models.clone());
                     }
+                    // Record the test request in provider stats so it appears in By Provider.
+                    let failed = !matches!(result.status, crate::tester::TestStatus::Ok);
+                    let model_str =
+                        (!result.used_model.is_empty()).then(|| result.used_model.clone());
+                    let db = self.db.clone();
+                    let pid = provider_id.clone();
+                    let pname = name.clone();
+                    tokio::task::spawn_blocking(move || {
+                        db.persist_stats(
+                            &pid,
+                            &pname,
+                            model_str.as_deref(),
+                            crate::repo::StatsDelta {
+                                requests: 1,
+                                failures: u64::from(failed),
+                                ..Default::default()
+                            },
+                        );
+                    });
                     // Clear stale error when test passes so Info panel shows clean state.
-                    if matches!(result.status, crate::tester::TestStatus::Ok)
-                        && let Ok(mut m) = self.metrics.lock()
-                    {
+                    if !failed && let Ok(mut m) = self.metrics.lock() {
                         m.clear_error(&name);
                     }
                     self.tests.results.insert(name, result);

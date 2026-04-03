@@ -273,7 +273,7 @@ dependencies = [
 
 [[package]]
 name = "ccs"
-version = "0.27.2"
+version = "0.27.3"
 dependencies = [
  "async-stream",
  "axum",

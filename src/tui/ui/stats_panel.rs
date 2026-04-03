@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -7,7 +9,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::super::state::App;
 use super::super::theme::{self as t};
-use super::format::{format_tokens, max_content_width};
+use super::format::{format_tokens, max_content_width, strip_model_prefix};
 
 pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
@@ -163,12 +165,30 @@ pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
     if model_entries.is_empty() {
         lines.push(Line::from(Span::styled("  No data yet", muted)));
     } else {
+        // Determine display name per model: strip the `org/` prefix unless two
+        // different full names share the same suffix (collision), in which case
+        // keep the full name to disambiguate.
+        let mut suffix_count: HashMap<&str, usize> = HashMap::new();
+        for (k, _, _) in &model_entries {
+            *suffix_count
+                .entry(strip_model_prefix(k.as_str()))
+                .or_insert(0) += 1;
+        }
+        let display_names: Vec<&str> = model_entries
+            .iter()
+            .map(|(full, _, _)| {
+                let s = strip_model_prefix(full.as_str());
+                if suffix_count.get(s).copied().unwrap_or(0) > 1 {
+                    full.as_str()
+                } else {
+                    s
+                }
+            })
+            .collect();
+
         // Cap label width at 30 chars to leave room for bars
-        let model_col_width = max_content_width(
-            model_entries.iter().map(|(k, _, _)| k.chars().count()),
-            10,
-            30,
-        );
+        let model_col_width =
+            max_content_width(display_names.iter().map(|s| s.chars().count()), 10, 30);
         let value_width = 8usize; // "  1234.5K"
         let bar_area = (inner.width as usize).saturating_sub(model_col_width + 2 + value_width);
         // Mix weight: 0.0 = pure log (small values always visible),
@@ -182,7 +202,9 @@ pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
             .unwrap_or(1);
         let log_max = ((max_total + 1) as f64).ln();
 
-        for (model, input, output) in &model_entries {
+        for ((_model, input, output), display_name) in
+            model_entries.iter().zip(display_names.iter())
+        {
             let total = input + output;
             let total_bar = if bar_area > 0 && total > 0 {
                 let log_ratio = ((total + 1) as f64).ln() / log_max;
@@ -200,14 +222,14 @@ pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
             let output_bar = total_bar.saturating_sub(input_bar);
             let empty = bar_area.saturating_sub(total_bar);
 
-            let model_chars: Vec<char> = model.chars().collect();
+            let model_chars: Vec<char> = display_name.chars().collect();
             let label = if model_chars.len() > model_col_width {
                 let truncated: String = model_chars[..model_col_width.saturating_sub(1)]
                     .iter()
                     .collect();
                 format!("{}…", truncated)
             } else {
-                format!("{:<width$}", model, width = model_col_width)
+                format!("{:<width$}", display_name, width = model_col_width)
             };
 
             let label_color = t::TEXT;

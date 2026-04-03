@@ -107,3 +107,13 @@ pub(super) fn config_path_display() -> String {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "~/.ccs/config.json".to_string())
 }
+
+/// Strip the `org/` namespace prefix from a model id, keeping only the part
+/// after the last `/`. Returns the original string if there is no `/`.
+///
+/// Examples:
+///   `qwen/qwen3.6-plus-preview:free` → `qwen3.6-plus-preview:free`
+///   `claude-sonnet-4.6`              → `claude-sonnet-4.6`
+pub(super) fn strip_model_prefix(model: &str) -> &str {
+    model.rfind('/').map_or(model, |i| &model[i + 1..])
+}
