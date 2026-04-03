@@ -7,7 +7,7 @@ description = "Claude Code Switch - Lightweight API proxy for routing Claude Cod
 [dependencies]
 # CLI
 clap = { version = "4.5", features = ["derive"] }
-colored = "2"
+colored = "3"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -16,8 +16,8 @@ indexmap = { version = "2", features = ["serde"] }
 
 # Async + HTTP
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
-axum = "0.7"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+axum = "0.8"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"] }
 tower-http = { version = "0.6", features = ["cors"] }
 
 # Streaming
@@ -26,15 +26,15 @@ bytes = "1"
 async-stream = "0.3"
 
 # TUI
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = "0.30"
+crossterm = "0.29"
 
 # Utilities
 thiserror = "2"
 dirs = "6"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled", "fallible_uint"] }
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-notify = "6"
+notify = "8"
 unicode-width = "0.2"
