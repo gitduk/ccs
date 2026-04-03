@@ -71,11 +71,24 @@ pub struct ProviderList {
 }
 
 /// Background test state: channels, results, and the shared HTTP client.
+/// Events sent from background test tasks back to the TUI.
+pub(super) enum TestEvent {
+    /// The task has selected a model and is about to test it.
+    ModelSelected { provider: String, model: String },
+    /// The task completed (success, auth failure, or all retries exhausted).
+    Completed {
+        provider: String,
+        result: TestResult,
+    },
+}
+
 pub struct TestState {
     pub results: HashMap<String, TestResult>,
     pub pending: HashSet<String>,
-    pub tx: mpsc::Sender<(String, TestResult)>,
-    rx: mpsc::Receiver<(String, TestResult)>,
+    /// Model currently under test for each pending provider.
+    pub testing_model: HashMap<String, String>,
+    pub tx: mpsc::Sender<TestEvent>,
+    rx: mpsc::Receiver<TestEvent>,
     pub client: reqwest::Client,
 }
 
@@ -85,6 +98,7 @@ impl TestState {
         Self {
             results: HashMap::new(),
             pending: HashSet::new(),
+            testing_model: HashMap::new(),
             tx,
             rx,
             client: reqwest::Client::new(),
@@ -92,7 +106,7 @@ impl TestState {
     }
 
     /// Drain all pending results off the channel in one pass.
-    pub(super) fn drain(&mut self) -> impl Iterator<Item = (String, TestResult)> + '_ {
+    pub(super) fn drain(&mut self) -> impl Iterator<Item = TestEvent> + '_ {
         std::iter::from_fn(|| self.rx.try_recv().ok())
     }
 }

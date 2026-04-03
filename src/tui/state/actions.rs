@@ -137,6 +137,9 @@ impl App {
             if self.tests.pending.remove(old_name) {
                 self.tests.pending.insert(new_name.clone());
             }
+            if let Some(model) = self.tests.testing_model.remove(old_name) {
+                self.tests.testing_model.insert(new_name.clone(), model);
+            }
         } else {
             let is_first = self.config.providers.is_empty();
             self.config.providers.insert(new_name.clone(), provider);
@@ -235,6 +238,9 @@ impl App {
             m.clear_error(name);
         }
         self.models.provider_models.remove(name);
+        self.tests.results.remove(name);
+        self.tests.pending.remove(name);
+        self.tests.testing_model.remove(name);
         if self.config.current == name {
             self.config.current = self
                 .config
@@ -315,30 +321,43 @@ impl App {
         Ok(())
     }
 
-    /// Drain completed background test results into `tests.results`.
+    /// Drain background test events: update in-progress model display or
+    /// finalise completed results.
     pub fn drain_test_results(&mut self) {
-        let completed: Vec<_> = self.tests.drain().collect();
-        for (name, result) in completed {
-            self.tests.pending.remove(&name);
-            if let Some(models) = &result.model_names {
-                let id = self
-                    .config
-                    .providers
-                    .get(&name)
-                    .map(|p| p.id.as_str())
-                    .unwrap_or(&name);
-                self.db.upsert_provider_models(id, &name, models);
-                self.models
-                    .provider_models
-                    .insert(name.clone(), models.clone());
+        use super::TestEvent;
+        let events: Vec<_> = self.tests.drain().collect();
+        for event in events {
+            match event {
+                TestEvent::ModelSelected { provider, model } => {
+                    self.tests.testing_model.insert(provider, model);
+                }
+                TestEvent::Completed {
+                    provider: name,
+                    result,
+                } => {
+                    self.tests.pending.remove(&name);
+                    self.tests.testing_model.remove(&name);
+                    if let Some(models) = &result.model_names {
+                        let id = self
+                            .config
+                            .providers
+                            .get(&name)
+                            .map(|p| p.id.as_str())
+                            .unwrap_or(&name);
+                        self.db.upsert_provider_models(id, &name, models);
+                        self.models
+                            .provider_models
+                            .insert(name.clone(), models.clone());
+                    }
+                    // Clear stale error when test passes so Info panel shows clean state.
+                    if matches!(result.status, crate::tester::TestStatus::Ok)
+                        && let Ok(mut m) = self.metrics.lock()
+                    {
+                        m.clear_error(&name);
+                    }
+                    self.tests.results.insert(name, result);
+                }
             }
-            // Clear stale error when test passes so Info panel shows clean state.
-            if matches!(result.status, crate::tester::TestStatus::Ok)
-                && let Ok(mut m) = self.metrics.lock()
-            {
-                m.clear_error(&name);
-            }
-            self.tests.results.insert(name, result);
         }
     }
 }

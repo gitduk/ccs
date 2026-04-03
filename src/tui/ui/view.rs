@@ -417,10 +417,16 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
             .and_then(|r| r.model_count)
             .map(|n| format!("{n} models"))
             .unwrap_or_else(|| "—".to_string());
+        let testing_model = app
+            .tests
+            .testing_model
+            .get(name.as_str())
+            .map(|m| format!(" ({m})"))
+            .unwrap_or_default();
         lines.push(Line::from(vec![
             Span::styled("Status ", label),
             Span::styled(
-                "Testing",
+                format!("Testing{testing_model}"),
                 Style::default().fg(t::MUTED).add_modifier(Modifier::ITALIC),
             ),
             Span::styled("   Latency ", label),

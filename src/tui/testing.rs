@@ -1,5 +1,5 @@
 use super::App;
-use super::state::MessageKind;
+use super::state::{MessageKind, TestEvent};
 
 pub(super) fn test_selected(app: &mut App) {
     let Some(name) = app.selected_name().map(|s| s.to_string()) else {
@@ -38,7 +38,21 @@ pub(super) fn test_provider_by_name(app: &mut App, name: &str) {
                 .filter(|model| m.by_model.contains_key(*model))
                 .map(|s| s.to_string())
         })
-        .unwrap_or_else(|| pick_random(supported));
+        .unwrap_or_else(|| pick_next(supported));
+
+    // Build a fallback candidate list: best_model first, then remaining models
+    // (up to MAX_TEST_ATTEMPTS total). Used when best_model returns an Error so
+    // a broken model doesn't permanently block health-checking the provider.
+    const MAX_TEST_ATTEMPTS: usize = 3;
+    let candidates: Vec<String> = std::iter::once(best_model.clone())
+        .chain(
+            supported
+                .iter()
+                .filter(|m| m.as_str() != best_model)
+                .cloned(),
+        )
+        .take(MAX_TEST_ATTEMPTS)
+        .collect();
 
     // Clone the known list so test_latency can skip the redundant /v1/models fetch.
     let known_models = supported.clone();
@@ -48,9 +62,33 @@ pub(super) fn test_provider_by_name(app: &mut App, name: &str) {
 
     let client = app.tests.client.clone();
     tokio::spawn(async move {
-        let result =
-            crate::tester::test_latency(&client, &provider, best_model, Some(known_models)).await;
-        let _ = tx.send((name_owned, result));
+        // candidates always contains best_model, so the loop runs at least once.
+        let mut result = None;
+        for model in candidates {
+            // Notify TUI which model we're about to test so the display updates
+            // in real time when a fallback retry kicks in.
+            let _ = tx.send(TestEvent::ModelSelected {
+                provider: name_owned.clone(),
+                model: model.clone(),
+            });
+            let r =
+                crate::tester::test_latency(&client, &provider, model, Some(known_models.clone()))
+                    .await;
+            let done = matches!(
+                &r.status,
+                // Success or auth failure — no point trying other models.
+                crate::tester::TestStatus::Ok | crate::tester::TestStatus::AuthFailed
+            );
+            result = Some(r);
+            if done {
+                break;
+            }
+        }
+        let _ = tx.send(TestEvent::Completed {
+            provider: name_owned,
+            result: result
+                .expect("candidates is non-empty: built from std::iter::once(best_model)"),
+        });
     });
 }
 
@@ -66,6 +104,8 @@ pub(super) fn test_provider_after_add(app: &mut App, name: &str) {
     let name_owned = name.to_string();
 
     app.tests.pending.insert(name_owned.clone());
+    // Model is unknown until the async fetch completes; leave entry absent so
+    // the render falls back to "—".
     app.set_message(format!("Testing {name}…"), MessageKind::Info);
 
     let client = app.tests.client.clone();
@@ -87,15 +127,25 @@ pub(super) fn test_provider_after_add(app: &mut App, name: &str) {
                 model_names: None,
                 tested_at,
             };
-            let _ = tx.send((name_owned, result));
+            let _ = tx.send(TestEvent::Completed {
+                provider: name_owned,
+                result,
+            });
             return;
         }
 
         // Step 2: pick a random model and run the latency test, passing the
         // already-fetched model list so test_latency skips a redundant fetch.
-        let model = pick_random(&models);
+        let model = pick_next(&models);
+        let _ = tx.send(crate::tui::state::TestEvent::ModelSelected {
+            provider: name_owned.clone(),
+            model: model.clone(),
+        });
         let result = crate::tester::test_latency(&client, &provider, model, Some(models)).await;
-        let _ = tx.send((name_owned, result));
+        let _ = tx.send(TestEvent::Completed {
+            provider: name_owned,
+            result,
+        });
     });
 }
 
@@ -109,7 +159,7 @@ pub(super) fn start_background_tests(app: &mut App) {
 /// Pick a model from a non-empty slice using a module-level counter so
 /// consecutive calls (e.g. during start_background_tests) cycle through
 /// models rather than all landing on the same index.
-fn pick_random(items: &[String]) -> String {
+fn pick_next(items: &[String]) -> String {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static CTR: AtomicUsize = AtomicUsize::new(0);
     let idx = CTR.fetch_add(1, Ordering::Relaxed) % items.len();
