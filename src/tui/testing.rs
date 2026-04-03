@@ -14,14 +14,14 @@ pub(super) fn test_provider_by_name(app: &mut App, name: &str) {
     }
 
     // If no model list is known yet, fall back to the fetch-then-test flow.
-    let supported = app.provider_models.get(name);
+    let supported = app.models.provider_models.get(name);
     let Some(supported) = supported.filter(|s| !s.is_empty()) else {
         test_provider_after_add(app, name);
         return;
     };
 
     let provider = app.config.providers[name].clone();
-    let tx = app.test_tx.clone();
+    let tx = app.tests.tx.clone();
     let name_owned = name.to_string();
 
     // Pick the best test model:
@@ -43,10 +43,10 @@ pub(super) fn test_provider_by_name(app: &mut App, name: &str) {
     // Clone the known list so test_latency can skip the redundant /v1/models fetch.
     let known_models = supported.clone();
 
-    app.pending_tests.insert(name_owned.clone());
+    app.tests.pending.insert(name_owned.clone());
     app.set_message(format!("Testing {name}…"), MessageKind::Info);
 
-    let client = app.test_client.clone();
+    let client = app.tests.client.clone();
     tokio::spawn(async move {
         let result =
             crate::tester::test_latency(&client, &provider, best_model, Some(known_models)).await;
@@ -62,13 +62,13 @@ pub(super) fn test_provider_after_add(app: &mut App, name: &str) {
         return;
     };
     let provider = provider.clone();
-    let tx = app.test_tx.clone();
+    let tx = app.tests.tx.clone();
     let name_owned = name.to_string();
 
-    app.pending_tests.insert(name_owned.clone());
+    app.tests.pending.insert(name_owned.clone());
     app.set_message(format!("Testing {name}…"), MessageKind::Info);
 
-    let client = app.test_client.clone();
+    let client = app.tests.client.clone();
     tokio::spawn(async move {
         // Record the test start time before any I/O so the timestamp reflects
         // when the test was initiated, not when a failure was detected.
@@ -106,12 +106,12 @@ pub(super) fn start_background_tests(app: &mut App) {
     }
 }
 
-/// Pick a pseudo-random element from a non-empty slice using subsecond nanos
-/// as a cheap entropy source.
+/// Pick a model from a non-empty slice using a module-level counter so
+/// consecutive calls (e.g. during start_background_tests) cycle through
+/// models rather than all landing on the same index.
 fn pick_random(items: &[String]) -> String {
-    let idx = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as usize)
-        .unwrap_or(0);
-    items[idx % items.len()].clone()
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static CTR: AtomicUsize = AtomicUsize::new(0);
+    let idx = CTR.fetch_add(1, Ordering::Relaxed) % items.len();
+    items[idx].clone()
 }

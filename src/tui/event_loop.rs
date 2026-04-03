@@ -59,7 +59,7 @@ pub(crate) fn reload_metrics_from_db(app: &mut App) {
         *m = fresh;
         m.last_error = saved_errors;
     }
-    app.provider_models = fresh_models;
+    app.models.provider_models = fresh_models;
     // NOTE: models_scroll is intentionally NOT reset here.
     // draw_models already clamps scroll to max_scroll on every frame,
     // so stale offsets are harmless. Resetting would jump the viewport

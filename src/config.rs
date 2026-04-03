@@ -206,6 +206,37 @@ impl Provider {
         self.api_format == ApiFormat::OpenAI
             && !matches!(self.api_version, Some(OpenAiApiVersion::ChatCompletions))
     }
+
+    /// Return the (endpoint URL, JSON body string) for a minimal chat request
+    /// using the correct API format and version for this provider. Single source
+    /// of truth shared by the live request path and curl-command generation.
+    pub fn chat_url_and_body(&self, model: &str) -> (String, String) {
+        let base = self.base_url.trim_end_matches('/');
+        match self.api_format {
+            ApiFormat::Anthropic => (
+                format!("{base}/v1/messages"),
+                format!(
+                    r#"{{"model":"{model}","max_tokens":1,"messages":[{{"role":"user","content":"ping"}}]}}"#
+                ),
+            ),
+            ApiFormat::OpenAI => match self
+                .api_version
+                .as_ref()
+                .unwrap_or(&OpenAiApiVersion::Responses)
+            {
+                OpenAiApiVersion::ChatCompletions => (
+                    format!("{base}/v1/chat/completions"),
+                    format!(
+                        r#"{{"model":"{model}","max_tokens":1,"messages":[{{"role":"user","content":"ping"}}]}}"#
+                    ),
+                ),
+                OpenAiApiVersion::Responses => (
+                    format!("{base}/v1/responses"),
+                    format!(r#"{{"model":"{model}","max_output_tokens":1,"input":"ping"}}"#),
+                ),
+            },
+        }
+    }
 }
 
 impl AppConfig {

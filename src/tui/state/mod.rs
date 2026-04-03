@@ -64,37 +64,71 @@ pub enum ConfirmAction {
     Quit,
 }
 
+/// Provider list navigation state (main table).
+pub struct ProviderList {
+    pub table_state: TableState,
+    pub names: Vec<String>,
+}
+
+/// Background test state: channels, results, and the shared HTTP client.
+pub struct TestState {
+    pub results: HashMap<String, TestResult>,
+    pub pending: HashSet<String>,
+    pub tx: mpsc::Sender<(String, TestResult)>,
+    rx: mpsc::Receiver<(String, TestResult)>,
+    pub client: reqwest::Client,
+}
+
+impl TestState {
+    pub(super) fn new() -> Self {
+        let (tx, rx) = mpsc::channel();
+        Self {
+            results: HashMap::new(),
+            pending: HashSet::new(),
+            tx,
+            rx,
+            client: reqwest::Client::new(),
+        }
+    }
+
+    /// Drain all pending results off the channel in one pass.
+    pub(super) fn drain(&mut self) -> impl Iterator<Item = (String, TestResult)> + '_ {
+        std::iter::from_fn(|| self.rx.try_recv().ok())
+    }
+}
+
+/// Models browser popup state.
+pub struct ModelsState {
+    /// Model names per provider, loaded from DB and updated on test.
+    pub provider_models: HashMap<String, Vec<String>>,
+    /// Search field (value + cursor).
+    pub search_field: FormField,
+    /// True = search box focused (Insert mode); false = list navigation (Normal mode).
+    pub search_active: bool,
+    /// Index of the highlighted model in the flat filtered list.
+    pub selected: usize,
+    /// Scroll offset (rows) for the models list.
+    pub scroll: u16,
+    /// Pending first key of a two-key sequence inside the Models panel.
+    pub pending_key: Option<(char, std::time::Instant)>,
+}
+
 pub struct App {
     pub config: AppConfig,
     pub mode: Mode,
-    pub table_state: TableState,
-    pub provider_names: Vec<String>,
+    pub providers: ProviderList,
     pub form: Option<ProviderForm>,
     pub message: Option<(String, MessageKind, std::time::Instant)>,
     pub confirm_action: Option<ConfirmAction>,
     pub should_quit: bool,
     pub server_status: ServerStatus,
     pub metrics: SharedMetrics,
-    pub test_results: HashMap<String, TestResult>,
-    pub pending_tests: HashSet<String>,
-    pub test_tx: mpsc::Sender<(String, TestResult)>,
-    pub(super) test_rx: mpsc::Receiver<(String, TestResult)>,
+    pub tests: TestState,
     pub db: Repository,
     pub bg_proxy_pid: Option<u32>,
-    /// Model names per provider, loaded from DB and updated on test.
-    pub provider_models: HashMap<String, Vec<String>>,
-    /// Shared HTTP client for provider connectivity tests (reuses connection pool).
-    pub test_client: reqwest::Client,
-    /// Pending first key of a two-key sequence (`dd`, `gg`) in the normal list view.
+    pub models: ModelsState,
+    /// Pending first key of a two-key sequence in the Normal-mode provider list.
     pub pending_key: Option<(char, std::time::Instant)>,
-    /// Search field in the Models popup (value + cursor).
-    pub models_search_field: FormField,
-    /// True = Insert mode (search box focused); false = Normal mode (list navigation).
-    pub models_insert: bool,
-    /// Index of the highlighted model in the flat filtered list.
-    pub models_selected: usize,
-    /// Scroll offset (rows) for the models list.
-    pub models_scroll: u16,
 }
 
 // ─── Provider editor form ─────────────────────────────────────────────────────
@@ -146,6 +180,18 @@ pub struct FormField {
 // ─── FormField helpers ────────────────────────────────────────────────────────
 
 impl FormField {
+    /// Construct a plain search/filter field with no special flags set.
+    pub(super) fn search() -> Self {
+        Self {
+            label: "",
+            value: String::new(),
+            cursor: 0,
+            editable: true,
+            is_toggle: false,
+            is_multiline: false,
+        }
+    }
+
     pub(super) fn text(label: &'static str, value: &str) -> Self {
         Self {
             label,

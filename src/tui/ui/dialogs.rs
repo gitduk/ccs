@@ -199,16 +199,16 @@ pub(super) fn draw_confirm(f: &mut Frame, app: &App) {
 ///   Line 2  — divider     (Length 1)
 ///   Rest    — model list  (Min 0, scrollable)
 pub(super) fn draw_models(f: &mut Frame, app: &App) {
-    let filter = app.models_search_field.value.to_lowercase();
+    let filter = app.models.search_field.value.to_lowercase();
 
     // Build filtered list: (provider_name, [model, ...]) sorted, empty providers skipped.
-    let mut providers: Vec<&String> = app.provider_models.keys().collect();
+    let mut providers: Vec<&String> = app.models.provider_models.keys().collect();
     providers.sort_unstable();
 
     let filtered: Vec<(&str, Vec<&str>)> = providers
         .iter()
         .filter_map(|prov| {
-            let models = app.provider_models.get(*prov)?;
+            let models = app.models.provider_models.get(*prov)?;
             let mut matched: Vec<&str> = models
                 .iter()
                 .filter(|m| filter.is_empty() || m.to_lowercase().contains(&filter))
@@ -233,7 +233,11 @@ pub(super) fn draw_models(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
 
     // Mode indicator in title, consistent with the Edit Provider form.
-    let mode_tag = if app.models_insert { "[I]" } else { "[N]" };
+    let mode_tag = if app.models.search_active {
+        "[I]"
+    } else {
+        "[N]"
+    };
     let outer_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(t::PRIMARY))
@@ -256,9 +260,9 @@ pub(super) fn draw_models(f: &mut Frame, app: &App) {
     // ── Search box ────────────────────────────────────────────────────────
     // In Insert mode: show cursor at the correct position (reversed block).
     // In Normal mode: render as plain dimmed text (no cursor).
-    let search_line = if app.models_insert {
-        let val = &app.models_search_field.value;
-        let cur = app.models_search_field.cursor.min(val.len());
+    let search_line = if app.models.search_active {
+        let val = &app.models.search_field.value;
+        let cur = app.models.search_field.cursor.min(val.len());
         let before = &val[..cur];
         let cursor_ch = val[cur..].chars().next().unwrap_or(' ');
         let after_start = cur
@@ -287,7 +291,7 @@ pub(super) fn draw_models(f: &mut Frame, app: &App) {
         Line::from(vec![
             Span::styled("Search  ", Style::default().fg(t::MUTED)),
             Span::styled(
-                &app.models_search_field.value,
+                &app.models.search_field.value,
                 Style::default().fg(t::MUTED),
             ),
         ])
@@ -325,7 +329,7 @@ pub(super) fn draw_models(f: &mut Frame, app: &App) {
             )));
             let last = models.len().saturating_sub(1);
             for (mi, model) in models.iter().enumerate() {
-                let is_selected = flat_idx == app.models_selected;
+                let is_selected = flat_idx == app.models.selected;
                 let prefix = if mi == last { "    └ " } else { "    ├ " };
                 if is_selected {
                     let prov_color = t::provider_color(prov);
@@ -349,7 +353,7 @@ pub(super) fn draw_models(f: &mut Frame, app: &App) {
 
     // Clamp scroll so we never scroll past the last line.
     let max_scroll = (lines.len().min(u16::MAX as usize) as u16).saturating_sub(list_height);
-    let scroll = app.models_scroll.min(max_scroll);
+    let scroll = app.models.scroll.min(max_scroll);
 
     f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), chunks[2]);
 }

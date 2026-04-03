@@ -40,11 +40,11 @@ pub(super) fn handle_key(
         Mode::Models => {
             // Build the flat filtered list + per-model line offsets.
             // SYNC: filter/sort/grouping logic must match draw_models in ui/dialogs.rs.
-            let filter = app.models_search_field.value.to_lowercase();
-            let mut providers: Vec<&String> = app.provider_models.keys().collect();
+            let filter = app.models.search_field.value.to_lowercase();
+            let mut providers: Vec<&String> = app.models.provider_models.keys().collect();
             providers.sort_unstable();
 
-            // Clone strings so `flat` has no outstanding borrow on `app.provider_models`,
+            // Clone strings so `flat` has no outstanding borrow on `app.models.provider_models`,
             // allowing `handle_models_key` to take `&mut App` in the same scope.
             let mut flat_owned: Vec<String> = Vec::new();
             // line_offsets[i] = the row index in the rendered list that flat_owned[i] occupies.
@@ -56,6 +56,7 @@ pub(super) fn handle_key(
 
             for prov in &providers {
                 let models = app
+                    .models
                     .provider_models
                     .get(*prov)
                     .map(|v| v.as_slice())
@@ -83,7 +84,7 @@ pub(super) fn handle_key(
 
             let flat: Vec<&str> = flat_owned.iter().map(|s| s.as_str()).collect();
             // Clamp selection in case provider_models shrank since last keypress.
-            app.models_selected = app.models_selected.min(flat.len().saturating_sub(1));
+            app.models.selected = app.models.selected.min(flat.len().saturating_sub(1));
             models::handle_models_key(app, code, modifiers, &flat, &line_offsets)
         }
     }

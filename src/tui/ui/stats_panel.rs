@@ -26,7 +26,8 @@ pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
     // Collect (name, stats) pairs, then sort by failure rate ascending so the
     // most reliable providers appear at the top.
     let mut provider_rows: Vec<(&str, crate::proxy::metrics::ProviderStats)> = app
-        .provider_names
+        .providers
+        .names
         .iter()
         .map(|name| {
             (
@@ -65,7 +66,8 @@ pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
 
     let muted = Style::default().fg(t::MUTED);
     let id_col_width = app
-        .provider_names
+        .providers
+        .names
         .iter()
         .map(|s| s.width())
         .max()

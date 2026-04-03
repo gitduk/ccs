@@ -15,6 +15,7 @@ fn get_suggestions<'a>(form: &ProviderForm, app: &'a App) -> Vec<&'a str> {
             .as_deref()
             .unwrap_or_else(|| form.fields[0].value.trim());
         let models = app
+            .models
             .provider_models
             .get(prov_key)
             .map(|v| v.as_slice())

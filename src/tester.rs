@@ -1,8 +1,6 @@
 use std::time::{Duration, Instant};
 
-use serde_json::json;
-
-use crate::config::{ApiFormat, OpenAiApiVersion, Provider};
+use crate::config::{ApiFormat, Provider};
 
 const TEST_TIMEOUT_SECS: u64 = 10;
 
@@ -51,33 +49,8 @@ pub async fn test_latency(
     };
     let base = provider.base_url.trim_end_matches('/');
     let auth_header = provider.auth_header(&api_key);
-
-    // Real latency test: POST to messages/chat endpoint.
-    // Mirror the same URL and body format that forwarder.rs uses so the
-    // measured latency actually reflects the live request path.
-    let chat_body = json!({
-        "model": model,
-        "max_tokens": 1,
-        "messages": [{"role": "user", "content": "ping"}]
-    });
-    let (msg_url, body) = match provider.api_format {
-        ApiFormat::Anthropic => (format!("{base}/v1/messages"), chat_body),
-        ApiFormat::OpenAI => match provider
-            .api_version
-            .as_ref()
-            .unwrap_or(&OpenAiApiVersion::Responses)
-        {
-            OpenAiApiVersion::ChatCompletions => (format!("{base}/v1/chat/completions"), chat_body),
-            OpenAiApiVersion::Responses => (
-                format!("{base}/v1/responses"),
-                json!({
-                    "model": model,
-                    "max_output_tokens": 1,
-                    "input": "ping"
-                }),
-            ),
-        },
-    };
+    // Use the shared URL/body builder — same logic as build_test_curl in the TUI.
+    let (msg_url, body) = provider.chat_url_and_body(&model);
 
     let t0 = Instant::now();
     let mut req = client
@@ -88,7 +61,7 @@ pub async fn test_latency(
         req = req.header("anthropic-version", "2023-06-01");
     }
     let response = req
-        .json(&body)
+        .body(body)
         .timeout(Duration::from_secs(TEST_TIMEOUT_SECS))
         .send()
         .await;

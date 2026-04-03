@@ -69,7 +69,7 @@ fn detail_panel_height(app: &App, route_avail: usize) -> u16 {
     }
 
     // No provider selected: blank + "Info" title = 2
-    if app.provider_names.is_empty() {
+    if app.providers.names.is_empty() {
         return 2;
     }
 
@@ -110,7 +110,7 @@ fn detail_panel_height(app: &App, route_avail: usize) -> u16 {
 }
 
 pub(super) fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
-    let table_height = (app.provider_names.len() as u16 + 2)
+    let table_height = (app.providers.names.len() as u16 + 2)
         .max(3)
         .min(area.height * 2 / 3);
     // detail panel: LEFT+RIGHT border (2) + horizontal padding (2) = 4 overhead
@@ -118,44 +118,39 @@ pub(super) fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
     let route_avail = detail_inner_width.saturating_sub(ROUTE_LABEL_WIDTH);
     let detail_height = detail_panel_height(app, route_avail);
     // stats: blank + title + N provider rows + bottom border
-    let n_providers = app.provider_names.len() as u16;
+    let n_providers = app.providers.names.len() as u16;
     let stats_min_height = 3 + n_providers;
     // model: blank + title + N active rows + inactive grid rows + bottom border
-    let n_active = app
-        .metrics
-        .lock()
-        .map(|m| {
-            m.by_model
+    // Single lock acquisition; single pass over provider_models — no String clones.
+    let (n_active, n_inactive): (u16, u16) = {
+        if let Ok(m) = app.metrics.lock() {
+            let n_active = m
+                .by_model
                 .values()
                 .filter(|s| s.input + s.output > 0)
-                .count() as u16
-        })
-        .unwrap_or(0);
-    let n_inactive: u16 = {
-        let used: std::collections::HashSet<String> = app
-            .metrics
-            .lock()
-            .map(|m| m.by_model.keys().cloned().collect())
-            .unwrap_or_default();
-        let total_inactive = app
-            .provider_models
-            .values()
-            .flat_map(|v| v.iter())
-            .filter(|m| !used.contains(*m))
-            .collect::<std::collections::HashSet<_>>()
-            .len();
-        // Estimate grid rows: inactive models laid out with max_name+2 cell width.
-        // Use area.width as an approximation (stats panel has 2-char padding).
-        let max_name = app
-            .provider_models
-            .values()
-            .flat_map(|v| v.iter())
-            .map(|s| s.width())
-            .max()
-            .unwrap_or(1);
-        let panel_width = (area.width as usize).saturating_sub(4);
-        let cols = (panel_width / (max_name + 2)).max(1);
-        total_inactive.div_ceil(cols) as u16
+                .count() as u16;
+
+            // One pass: count inactive models (unique by name) and find max width.
+            let mut inactive: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            let mut max_name = 1usize;
+            for name in app.models.provider_models.values().flat_map(|v| v.iter()) {
+                let w = name.width();
+                if w > max_name {
+                    max_name = w;
+                }
+                if !m.by_model.contains_key(name.as_str()) {
+                    inactive.insert(name.as_str());
+                }
+            }
+
+            // Estimate grid rows: inactive models laid out with max_name+2 cell width.
+            let panel_width = (area.width as usize).saturating_sub(4);
+            let cols = (panel_width / (max_name + 2)).max(1);
+            let n_inactive = inactive.len().div_ceil(cols) as u16;
+            (n_active, n_inactive)
+        } else {
+            (0, 0)
+        }
     };
     let model_min_height = (3 + n_active + if n_inactive > 0 { n_inactive + 1 } else { 0 }).max(3);
 
@@ -185,7 +180,7 @@ pub(super) fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 pub(super) fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
-    if app.provider_names.is_empty() {
+    if app.providers.names.is_empty() {
         let empty = Paragraph::new(vec![
             Line::from(""),
             Line::from(Span::styled(
@@ -240,7 +235,8 @@ pub(super) fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
     };
     // Name col = longest name + 2 for the " ◀" indicator + 4 gap
     let max_name_len = app
-        .provider_names
+        .providers
+        .names
         .iter()
         .map(|name| name.width())
         .max()
@@ -261,10 +257,11 @@ pub(super) fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
     }
     let header = Row::new(header_cells).height(1);
 
-    let selected = app.table_state.selected();
+    let selected = app.providers.table_state.selected();
 
     let rows: Vec<Row> = app
-        .provider_names
+        .providers
+        .names
         .iter()
         .enumerate()
         .map(|(i, name)| {
@@ -355,7 +352,7 @@ pub(super) fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
         )
         .row_highlight_style(Style::default());
 
-    f.render_stateful_widget(table, area, &mut app.table_state);
+    f.render_stateful_widget(table, area, &mut app.providers.table_state);
 }
 
 pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
@@ -398,9 +395,10 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
     ));
 
     let Some(name) = app
+        .providers
         .table_state
         .selected()
-        .and_then(|i| app.provider_names.get(i))
+        .and_then(|i| app.providers.names.get(i))
     else {
         f.render_widget(
             Paragraph::new(vec![Line::from(""), title_line]).block(block),
@@ -410,8 +408,8 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let mut lines = vec![Line::from(""), title_line];
-    if app.pending_tests.contains(name.as_str()) {
-        let prev = app.test_results.get(name.as_str());
+    if app.tests.pending.contains(name.as_str()) {
+        let prev = app.tests.results.get(name.as_str());
         let latency_str = prev
             .map(|r| fmt_latency(r.latency_ms))
             .unwrap_or_else(|| "—".to_string());
@@ -430,7 +428,7 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("   Models ", label),
             Span::styled(models_str, Style::default().fg(t::MUTED)),
         ]));
-    } else if let Some(r) = app.test_results.get(name.as_str()) {
+    } else if let Some(r) = app.tests.results.get(name.as_str()) {
         let (status_str, status_style) = match &r.status {
             TestStatus::Ok => (
                 "✓ OK".to_string(),

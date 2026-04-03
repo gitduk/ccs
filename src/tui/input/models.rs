@@ -8,27 +8,27 @@ use super::insert::{InsertKeyResult, consume_pending_key, handle_field_insert_ke
 // ── Scroll helpers ────────────────────────────────────────────────────────────
 
 /// Move the highlighted model down by `step`, clamping to `total - 1`.
-/// Adjusts `models_scroll` using `line_offsets` so the highlighted row stays visible.
+/// Adjusts `models.scroll` using `line_offsets` so the highlighted row stays visible.
 fn nav_down(app: &mut App, total: usize, step: usize, line_offsets: &[usize]) {
     if total == 0 {
         return;
     }
-    app.models_selected = (app.models_selected + step).min(total - 1);
-    if let Some(&row) = line_offsets.get(app.models_selected) {
-        let bottom = app.models_scroll as usize + 8;
+    app.models.selected = (app.models.selected + step).min(total - 1);
+    if let Some(&row) = line_offsets.get(app.models.selected) {
+        let bottom = app.models.scroll as usize + 8;
         if row >= bottom {
-            app.models_scroll = (row + 1).saturating_sub(8) as u16;
+            app.models.scroll = (row + 1).saturating_sub(8) as u16;
         }
     }
 }
 
 /// Move the highlighted model up by `step`.
 fn nav_up(app: &mut App, step: usize, line_offsets: &[usize]) {
-    app.models_selected = app.models_selected.saturating_sub(step);
-    if let Some(&row) = line_offsets.get(app.models_selected)
-        && row < app.models_scroll as usize
+    app.models.selected = app.models.selected.saturating_sub(step);
+    if let Some(&row) = line_offsets.get(app.models.selected)
+        && row < app.models.scroll as usize
     {
-        app.models_scroll = row as u16;
+        app.models.scroll = row as u16;
     }
 }
 
@@ -36,7 +36,7 @@ fn nav_up(app: &mut App, step: usize, line_offsets: &[usize]) {
 
 /// Copy the currently highlighted model name to the clipboard and show a status message.
 fn copy_selected(app: &mut App, flat: &[&str]) {
-    if let Some(&name) = flat.get(app.models_selected) {
+    if let Some(&name) = flat.get(app.models.selected) {
         if super::copy_to_clipboard(name) {
             app.set_message(format!("Copied: {name}"), MessageKind::Success);
         } else {
@@ -61,7 +61,7 @@ pub(super) fn handle_models_key(
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     let total = flat.len();
 
-    if app.models_insert {
+    if app.models.search_active {
         // ── Insert mode: search box focused ──────────────────────────────────
 
         // Models-specific keys intercepted before the common handler.
@@ -91,17 +91,17 @@ pub(super) fn handle_models_key(
 
         // Common Insert-mode editing (Backspace/Ctrl+W/Home/End/jk/Esc/…).
         match handle_field_insert_key(
-            &mut app.models_search_field,
+            &mut app.models.search_field,
             code,
             ctrl,
-            &mut app.pending_key,
+            &mut app.models.pending_key,
         ) {
             InsertKeyResult::ExitInsert => {
-                app.models_insert = false;
+                app.models.search_active = false;
             }
             InsertKeyResult::TextChanged => {
-                app.models_selected = 0;
-                app.models_scroll = 0;
+                app.models.selected = 0;
+                app.models.scroll = 0;
             }
             InsertKeyResult::Consumed | InsertKeyResult::NotHandled => {}
         }
@@ -109,7 +109,7 @@ pub(super) fn handle_models_key(
         // ── Normal mode: list navigation ──────────────────────────────────────
 
         // Consume pending two-key sequence (500 ms timeout).
-        let prev = consume_pending_key(&mut app.pending_key);
+        let prev = consume_pending_key(&mut app.models.pending_key);
 
         if let Some(pk) = prev {
             match (pk, &code) {
@@ -118,8 +118,8 @@ pub(super) fn handle_models_key(
                     return Ok(());
                 }
                 ('g', KeyCode::Char('g')) => {
-                    app.models_selected = 0;
-                    app.models_scroll = 0;
+                    app.models.selected = 0;
+                    app.models.scroll = 0;
                     return Ok(());
                 }
                 _ => {} // unrecognised combo — prev discarded, current key handled below
@@ -134,15 +134,15 @@ pub(super) fn handle_models_key(
                 app.mode = Mode::Normal;
             }
             KeyCode::Char('i') => {
-                app.models_insert = true;
+                app.models.search_active = true;
             }
             KeyCode::Down | KeyCode::Char('j') => nav_down(app, total, 1, line_offsets),
             KeyCode::Up | KeyCode::Char('k') => nav_up(app, 1, line_offsets),
             KeyCode::Char('G') => {
                 if total > 0 {
-                    app.models_selected = total - 1;
+                    app.models.selected = total - 1;
                     if let Some(&row) = line_offsets.get(total - 1) {
-                        app.models_scroll = (row + 1).saturating_sub(8) as u16;
+                        app.models.scroll = (row + 1).saturating_sub(8) as u16;
                     }
                 }
             }
@@ -152,10 +152,10 @@ pub(super) fn handle_models_key(
             KeyCode::PageUp | KeyCode::Char('u') if ctrl => nav_up(app, 10, line_offsets),
             KeyCode::Enter => copy_selected(app, flat),
             KeyCode::Char('y') => {
-                app.pending_key = Some(('y', Instant::now()));
+                app.models.pending_key = Some(('y', Instant::now()));
             }
             KeyCode::Char('g') => {
-                app.pending_key = Some(('g', Instant::now()));
+                app.models.pending_key = Some(('g', Instant::now()));
             }
             _ => {}
         }

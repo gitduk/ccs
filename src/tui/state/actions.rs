@@ -48,6 +48,7 @@ impl App {
         // If not yet loaded we skip the target check (conservative).
         let models_key = original_name.as_deref().unwrap_or(new_name.as_str());
         let known_models: Vec<String> = self
+            .models
             .provider_models
             .get(models_key)
             .cloned()
@@ -127,14 +128,14 @@ impl App {
 
             self.db.rename_provider(&provider_id, &new_name);
 
-            if let Some(models) = self.provider_models.remove(old_name) {
-                self.provider_models.insert(new_name.clone(), models);
+            if let Some(models) = self.models.provider_models.remove(old_name) {
+                self.models.provider_models.insert(new_name.clone(), models);
             }
-            if let Some(result) = self.test_results.remove(old_name) {
-                self.test_results.insert(new_name.clone(), result);
+            if let Some(result) = self.tests.results.remove(old_name) {
+                self.tests.results.insert(new_name.clone(), result);
             }
-            if self.pending_tests.remove(old_name) {
-                self.pending_tests.insert(new_name.clone());
+            if self.tests.pending.remove(old_name) {
+                self.tests.pending.insert(new_name.clone());
             }
         } else {
             let is_first = self.config.providers.is_empty();
@@ -146,8 +147,8 @@ impl App {
 
         config::save_config(&self.config)?;
         self.refresh_ids();
-        if let Some(idx) = self.provider_names.iter().position(|s| s == &new_name) {
-            self.table_state.select(Some(idx));
+        if let Some(idx) = self.providers.names.iter().position(|s| s == &new_name) {
+            self.providers.table_state.select(Some(idx));
         }
 
         if close {
@@ -233,7 +234,7 @@ impl App {
         if let Ok(mut m) = self.metrics.lock() {
             m.clear_error(name);
         }
-        self.provider_models.remove(name);
+        self.models.provider_models.remove(name);
         if self.config.current == name {
             self.config.current = self
                 .config
@@ -245,11 +246,13 @@ impl App {
         }
         config::save_config(&self.config)?;
         self.refresh_ids();
-        if let Some(selected) = self.table_state.selected() {
-            if selected >= self.provider_names.len() && !self.provider_names.is_empty() {
-                self.table_state.select(Some(self.provider_names.len() - 1));
-            } else if self.provider_names.is_empty() {
-                self.table_state.select(None);
+        if let Some(selected) = self.providers.table_state.selected() {
+            if selected >= self.providers.names.len() && !self.providers.names.is_empty() {
+                self.providers
+                    .table_state
+                    .select(Some(self.providers.names.len() - 1));
+            } else if self.providers.names.is_empty() {
+                self.providers.table_state.select(None);
             }
         }
         self.set_message(format!("Deleted '{name}'"), MessageKind::Success);
@@ -310,5 +313,32 @@ impl App {
             self.set_message(format!("'{name}' {state}"), MessageKind::Info);
         }
         Ok(())
+    }
+
+    /// Drain completed background test results into `tests.results`.
+    pub fn drain_test_results(&mut self) {
+        let completed: Vec<_> = self.tests.drain().collect();
+        for (name, result) in completed {
+            self.tests.pending.remove(&name);
+            if let Some(models) = &result.model_names {
+                let id = self
+                    .config
+                    .providers
+                    .get(&name)
+                    .map(|p| p.id.as_str())
+                    .unwrap_or(&name);
+                self.db.upsert_provider_models(id, &name, models);
+                self.models
+                    .provider_models
+                    .insert(name.clone(), models.clone());
+            }
+            // Clear stale error when test passes so Info panel shows clean state.
+            if matches!(result.status, crate::tester::TestStatus::Ok)
+                && let Ok(mut m) = self.metrics.lock()
+            {
+                m.clear_error(&name);
+            }
+            self.tests.results.insert(name, result);
+        }
     }
 }

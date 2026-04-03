@@ -50,7 +50,7 @@ pub enum InsertKeyResult {
 /// [`InsertKeyResult::NotHandled`] so each context can handle them independently.
 ///
 /// # `pending_key`
-/// Pass `&mut form.pending_key` (routes / editing) or `&mut app.pending_key` (models).
+/// Pass `&mut form.pending_key` (routes / editing) or `&mut app.models.pending_key` (models search).
 /// The function reads and clears it to detect the `jk` escape sequence.
 pub fn handle_field_insert_key(
     field: &mut FormField,

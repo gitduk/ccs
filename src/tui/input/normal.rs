@@ -28,8 +28,8 @@ pub(super) fn handle_normal_key(
                 return Ok(());
             }
             ('g', KeyCode::Char('g')) => {
-                if !app.provider_names.is_empty() {
-                    app.table_state.select(Some(0));
+                if !app.providers.names.is_empty() {
+                    app.providers.table_state.select(Some(0));
                 }
                 return Ok(());
             }
@@ -55,7 +55,7 @@ pub(super) fn handle_normal_key(
                     // 1. Most-used model (by token volume) from the known list.
                     // 2. First model from the known list if no usage data.
                     // 3. Empty string if no models known yet (provider not yet tested).
-                    let supported = app.provider_models.get(&name);
+                    let supported = app.models.provider_models.get(&name);
                     let model = supported
                         .filter(|s| !s.is_empty())
                         .and_then(|models| {
@@ -114,9 +114,9 @@ pub(super) fn handle_normal_key(
         KeyCode::Up | KeyCode::Char('k') => app.select_prev(),
         KeyCode::Down | KeyCode::Char('j') => app.select_next(),
         KeyCode::Char('G') => {
-            if !app.provider_names.is_empty() {
-                let last = app.provider_names.len() - 1;
-                app.table_state.select(Some(last));
+            if !app.providers.names.is_empty() {
+                let last = app.providers.names.len() - 1;
+                app.providers.table_state.select(Some(last));
             }
         }
         // First key of gg / dd / yy — store in buffer.
@@ -174,9 +174,9 @@ pub(super) fn handle_normal_key(
         }
         KeyCode::Char('m') => {
             app.mode = Mode::Models;
-            app.models_insert = true;
-            app.models_selected = 0;
-            app.models_scroll = 0;
+            app.models.search_active = true;
+            app.models.selected = 0;
+            app.models.scroll = 0;
         }
         _ => {}
     }
@@ -187,22 +187,7 @@ pub(super) fn handle_normal_key(
 /// Returns an error string if the API key cannot be resolved.
 fn build_test_curl(provider: &Provider, model: &str) -> Result<String, String> {
     let api_key = provider.resolve_api_key().map_err(|e| e.to_string())?;
-
-    let base = provider.base_url.trim_end_matches('/');
-    let (url, body) = match provider.api_format {
-        ApiFormat::Anthropic => (
-            format!("{base}/v1/messages"),
-            format!(
-                r#"{{"model":"{model}","max_tokens":1,"messages":[{{"role":"user","content":"ping"}}]}}"#
-            ),
-        ),
-        ApiFormat::OpenAI => (
-            format!("{base}/v1/chat/completions"),
-            format!(
-                r#"{{"model":"{model}","max_tokens":1,"messages":[{{"role":"user","content":"ping"}}]}}"#
-            ),
-        ),
-    };
+    let (url, body) = provider.chat_url_and_body(model);
 
     let mut cmd = format!("curl -s -X POST '{url}' \\\n  -H 'Content-Type: application/json' \\\n");
 

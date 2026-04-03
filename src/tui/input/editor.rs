@@ -85,6 +85,7 @@ pub(super) fn handle_editing_key(
             .as_deref()
             .unwrap_or_else(|| form.fields[0].value.trim());
         let provider_models: Vec<String> = app
+            .models
             .provider_models
             .get(prov_name)
             .cloned()
