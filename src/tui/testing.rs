@@ -38,7 +38,7 @@ pub(super) fn test_provider_by_name(app: &mut App, name: &str) {
                 .filter(|model| m.by_model.contains_key(*model))
                 .map(|s| s.to_string())
         })
-        .unwrap_or_else(|| pick_next(supported));
+        .unwrap_or_else(|| pick_random(supported));
 
     // Build a fallback candidate list: best_model first, then remaining models
     // (up to MAX_TEST_ATTEMPTS total). Used when best_model returns an Error so
@@ -137,7 +137,7 @@ pub(super) fn test_provider_after_add(app: &mut App, name: &str) {
 
         // Step 2: pick a random model and run the latency test, passing the
         // already-fetched model list so test_latency skips a redundant fetch.
-        let model = pick_next(&models);
+        let model = pick_random(&models);
         let _ = tx.send(crate::tui::state::TestEvent::ModelSelected {
             provider: name_owned.clone(),
             model: model.clone(),
@@ -160,9 +160,11 @@ pub(super) fn start_background_tests(app: &mut App) {
 /// Pick a model from a non-empty slice using a module-level counter so
 /// consecutive calls (e.g. during start_background_tests) cycle through
 /// models rather than all landing on the same index.
-fn pick_next(items: &[String]) -> String {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static CTR: AtomicUsize = AtomicUsize::new(0);
-    let idx = CTR.fetch_add(1, Ordering::Relaxed) % items.len();
-    items[idx].clone()
+fn pick_random(items: &[String]) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0) as usize;
+    items[seed % items.len()].clone()
 }
