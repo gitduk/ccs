@@ -126,6 +126,7 @@ pub(super) fn test_provider_after_add(app: &mut App, name: &str) {
                 model_count: None,
                 model_names: None,
                 tested_at,
+                used_model: String::new(),
             };
             let _ = tx.send(TestEvent::Completed {
                 provider: name_owned,

@@ -450,14 +450,23 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
             Some(n) => Span::styled(format!("{n} models"), Style::default().fg(t::TEXT)),
             None => Span::styled("—", Style::default().fg(t::MUTED)),
         };
-        lines.push(Line::from(vec![
+        let mut status_spans = vec![
             Span::styled("Status ", label),
             Span::styled(status_str, status_style),
+        ];
+        if matches!(r.status, TestStatus::Ok) && !r.used_model.is_empty() {
+            status_spans.push(Span::styled(
+                format!(" ({})", r.used_model),
+                Style::default().fg(t::MUTED),
+            ));
+        }
+        status_spans.extend([
             Span::styled("   Latency ", label),
             Span::styled(fmt_latency(r.latency_ms), Style::default().fg(t::TEXT)),
             Span::styled("   Models ", label),
             models_str,
-        ]));
+        ]);
+        lines.push(Line::from(status_spans));
     } else {
         lines.push(Line::from(vec![
             Span::styled("Press ", Style::default().fg(t::MUTED)),

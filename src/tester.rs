@@ -18,6 +18,8 @@ pub struct TestResult {
     pub model_count: Option<usize>,
     pub model_names: Option<Vec<String>>,
     pub tested_at: Instant,
+    /// The model name used for the connectivity test.
+    pub used_model: String,
 }
 
 /// Run a latency test against the provider using `model`.
@@ -44,6 +46,7 @@ pub async fn test_latency(
                 model_count: None,
                 model_names: known_models,
                 tested_at,
+                used_model: model,
             };
         }
     };
@@ -75,6 +78,7 @@ pub async fn test_latency(
                 model_count: known_models.as_ref().map(|v| v.len()),
                 model_names: known_models,
                 tested_at,
+                used_model: model,
             };
         }
         Ok(r) => r.status(),
@@ -102,6 +106,7 @@ pub async fn test_latency(
         model_count,
         model_names,
         tested_at,
+        used_model: model,
     }
 }
 
