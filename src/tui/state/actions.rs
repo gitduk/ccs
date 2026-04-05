@@ -352,22 +352,17 @@ impl App {
                     // Record the test request in provider stats so it appears in By Provider.
                     let failed = !matches!(result.status, crate::tester::TestStatus::Ok);
                     let model_str =
-                        (!result.used_model.is_empty()).then(|| result.used_model.clone());
-                    let db = self.db.clone();
-                    let pid = provider_id.clone();
-                    let pname = name.clone();
-                    tokio::task::spawn_blocking(move || {
-                        db.persist_stats(
-                            &pid,
-                            &pname,
-                            model_str.as_deref(),
-                            crate::repo::StatsDelta {
-                                requests: 1,
-                                failures: u64::from(failed),
-                                ..Default::default()
-                            },
-                        );
-                    });
+                        (!result.used_model.is_empty()).then_some(result.used_model.as_str());
+                    self.db.persist_stats_async(
+                        &provider_id,
+                        &name,
+                        model_str,
+                        crate::repo::StatsDelta {
+                            requests: 1,
+                            failures: u64::from(failed),
+                            ..Default::default()
+                        },
+                    );
                     // Clear stale error when test passes so Info panel shows clean state.
                     if !failed && let Ok(mut m) = self.metrics.lock() {
                         m.clear_error(&name);

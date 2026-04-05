@@ -173,9 +173,9 @@ async fn try_providers(
         .to_string();
 
     let record_failure = |state: &SharedState, pkey: &ProviderKey| {
-        persist_stats(
-            &state.db,
-            pkey,
+        state.db.persist_stats_async(
+            &pkey.id,
+            &pkey.name,
             None,
             StatsDelta {
                 requests: 1,
@@ -395,12 +395,9 @@ async fn handle_buffered_response(
     } else {
         (0, 0, None)
     };
-    persist_stats(
-        &db,
-        &ProviderKey {
-            id: provider_id,
-            name: provider_name,
-        },
+    db.persist_stats_async(
+        &provider_id,
+        &provider_name,
         model.as_deref(),
         StatsDelta {
             requests: 1,
@@ -416,16 +413,6 @@ async fn handle_buffered_response(
         response_body,
     )
         .into_response())
-}
-
-/// Fire-and-forget: persist provider and model deltas to DB outside the hot path.
-fn persist_stats(db: &Repository, pkey: &ProviderKey, model_name: Option<&str>, delta: StatsDelta) {
-    let repo = db.clone();
-    let pkey = pkey.clone();
-    let mid = model_name.map(|s| s.to_string());
-    tokio::task::spawn_blocking(move || {
-        repo.persist_stats(&pkey.id, &pkey.name, mid.as_deref(), delta);
-    });
 }
 
 /// Handle streaming response.
@@ -519,9 +506,9 @@ fn track_tokens_in_stream(
         }
 
         // Stream ended: persist request count and token usage atomically.
-        persist_stats(
-            &db,
-            &ProviderKey { id: provider_id, name: provider_name },
+        db.persist_stats_async(
+            &provider_id,
+            &provider_name,
             model.as_deref(),
             StatsDelta {
                 requests: 1,

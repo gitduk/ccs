@@ -71,6 +71,25 @@ impl Repository {
         }
     }
 
+    /// Fire-and-forget: spawn a blocking task to persist provider/model deltas.
+    /// Owns the arguments so the caller does not need to juggle clones at every
+    /// call site. Callable from async contexts.
+    pub(crate) fn persist_stats_async(
+        &self,
+        provider_id: &str,
+        provider_name: &str,
+        model_name: Option<&str>,
+        delta: StatsDelta,
+    ) {
+        let repo = self.clone();
+        let pid = provider_id.to_string();
+        let pname = provider_name.to_string();
+        let mid = model_name.map(str::to_string);
+        tokio::task::spawn_blocking(move || {
+            repo.persist_stats(&pid, &pname, mid.as_deref(), delta);
+        });
+    }
+
     pub fn load_metrics(&self) -> TokenMetrics {
         match self.0.lock() {
             Ok(conn) => db::load_metrics(&conn),

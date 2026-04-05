@@ -168,20 +168,22 @@ pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
         // Determine display name per model: strip the `org/` prefix unless two
         // different full names share the same suffix (collision), in which case
         // keep the full name to disambiguate.
-        let mut suffix_count: HashMap<&str, usize> = HashMap::new();
-        for (k, _, _) in &model_entries {
-            *suffix_count
-                .entry(strip_model_prefix(k.as_str()))
-                .or_insert(0) += 1;
+        let suffixes: Vec<&str> = model_entries
+            .iter()
+            .map(|(k, _, _)| strip_model_prefix(k.as_str()))
+            .collect();
+        let mut suffix_count: HashMap<&str, usize> = HashMap::with_capacity(suffixes.len());
+        for s in &suffixes {
+            *suffix_count.entry(*s).or_insert(0) += 1;
         }
         let display_names: Vec<&str> = model_entries
             .iter()
-            .map(|(full, _, _)| {
-                let s = strip_model_prefix(full.as_str());
-                if suffix_count.get(s).copied().unwrap_or(0) > 1 {
+            .zip(suffixes.iter())
+            .map(|((full, _, _), s)| {
+                if suffix_count[s] > 1 {
                     full.as_str()
                 } else {
-                    s
+                    *s
                 }
             })
             .collect();
