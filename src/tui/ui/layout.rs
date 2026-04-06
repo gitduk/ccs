@@ -1,8 +1,34 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::symbols::border;
 
 use crate::config::RouteRule;
 
 pub(super) const ROUTE_LABEL_WIDTH: usize = 7; // "Routes "
+
+// ── Shared spacing tokens ──────────────────────────────────────────
+// These keep border characters, title dash counts, and gap widths in
+// sync across view.rs, logs.rs, and stats_panel.rs.
+
+/// Horizontal dash character for title separators and dashed borders.
+pub(super) const DASH: &str = "╌";
+
+/// Number of dash chars flanking a section title (e.g. "╌╌ Title ╌╌╌").
+pub(super) const TITLE_SIDE: usize = 2;
+
+/// Gap (spaces) between dash fill and suffix text in title lines.
+pub(super) const SUFFIX_GAP: usize = 1;
+
+/// Border set: dashed `╌` on top, solid everywhere else.
+pub(super) const BORDER_DASHED_TOP: border::Set = border::Set {
+    horizontal_top: DASH,
+    ..border::PLAIN
+};
+
+/// Border set: dashed `╎` on the left (inner column divider), solid elsewhere.
+pub(super) const BORDER_INNER_DIVIDER: border::Set = border::Set {
+    vertical_left: "╎",
+    ..border::PLAIN
+};
 
 /// Pack enabled routes into wrapped lines given the available text width.
 /// Returns groups of routes, each group rendered on one line.

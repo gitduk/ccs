@@ -38,10 +38,12 @@ pub(super) fn fmt_latency(ms: u64) -> String {
 }
 
 pub(super) fn format_tokens(n: u64) -> String {
-    if n >= 1_000_000 {
+    if n == 0 {
+        "—".to_string()
+    } else if n >= 100_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
     } else if n >= 1_000 {
-        format!("{:.1}K", n as f64 / 1_000.0)
+        format!("{:.1}k", n as f64 / 1_000.0)
     } else {
         format!("{n}")
     }
@@ -116,4 +118,19 @@ pub(super) fn config_path_display() -> String {
 ///   `claude-sonnet-4.6`              → `claude-sonnet-4.6`
 pub(super) fn strip_model_prefix(model: &str) -> &str {
     model.rfind('/').map_or(model, |i| &model[i + 1..])
+}
+
+/// Shorten a model name for compact display:
+/// 1. Strip `org/` namespace prefix (via strip_model_prefix)
+/// 2. Strip leading `claude-` if present — the family name adds no information
+///    in a mixed-provider log where the provider column already gives context.
+///
+/// Examples:
+///   `anthropic/claude-sonnet-4.6` → `sonnet-4.6`
+///   `claude-haiku-3.5`            → `haiku-3.5`
+///   `gpt-4o`                      → `gpt-4o`
+///   `qwen/qwen3-plus:free`        → `qwen3-plus:free`
+pub(super) fn shorten_model_name(model: &str) -> &str {
+    let stripped = strip_model_prefix(model);
+    stripped.strip_prefix("claude-").unwrap_or(stripped)
 }

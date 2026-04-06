@@ -1,47 +1,49 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Padding, Paragraph, Row, Table};
 use unicode_width::UnicodeWidthStr;
 
-use super::super::state::{App, MessageKind, Mode};
+use super::super::state::App;
 use super::super::theme::{self as t};
 use super::format::fmt_latency;
 use super::format::truncate_error;
 use super::format::{api_key_display_len, col_width, config_path_display, masked_api_key};
-use super::layout::{ROUTE_LABEL_WIDTH, pack_routes};
+use super::layout::{BORDER_DASHED_TOP, ROUTE_LABEL_WIDTH, pack_routes};
+use super::logs::draw_logs_panel;
 use super::stats_panel::draw_stats_panel;
 use crate::tester::TestStatus;
 
-pub(super) fn draw_title_bar(f: &mut Frame, app: &App, area: Rect) {
-    let fallback_label = if app.config.fallback {
-        "Fallback on  "
-    } else {
-        "Fallback off "
-    };
-    let listen_label = format!("{}  ", app.config.listen);
-    let version = format!("  v{}", env!("CARGO_PKG_VERSION"));
-    let title_left = " Claude Code Switcher";
-    let left_len = title_left.len() + version.len();
-    let right_len = listen_label.len() + fallback_label.len();
-    let gap = (area.width as usize).saturating_sub(left_len + right_len);
-
-    let spans: Vec<Span> = vec![
+/// Build the two title spans embedded in the provider table's top border.
+fn make_table_titles(app: &App) -> (Line<'static>, Line<'static>) {
+    let left = Line::from(vec![
         Span::styled(
             " Claude Code Switcher",
             Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(version, Style::default().fg(t::MUTED)),
-        Span::raw(" ".repeat(gap)),
         Span::styled(
-            listen_label,
+            format!("  v{} ", env!("CARGO_PKG_VERSION")),
+            Style::default().fg(t::MUTED),
+        ),
+    ]);
+    let listen = app.config.listen.to_string();
+    let fallback_label = if app.config.fallback {
+        "Fallback on"
+    } else {
+        "Fallback off"
+    };
+    let right = Line::from(vec![
+        Span::styled("╌╌ ", Style::default().fg(t::MUTED)),
+        Span::styled(
+            listen,
             if app.bg_proxy_pid.is_some() {
                 Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(t::MUTED)
             },
         ),
+        Span::styled("  ", Style::default()),
         Span::styled(
             fallback_label,
             if app.config.fallback {
@@ -50,9 +52,10 @@ pub(super) fn draw_title_bar(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(t::MUTED)
             },
         ),
-    ];
-    let line = Line::from(spans);
-    f.render_widget(Paragraph::new(line), area);
+        Span::styled(" ╌╌ ", Style::default().fg(t::MUTED)),
+    ])
+    .right_aligned();
+    (left, right)
 }
 
 /// Compute the height (in lines) needed by the detail panel.
@@ -61,13 +64,6 @@ pub(super) fn draw_title_bar(f: &mut Frame, app: &App, area: Rect) {
 /// `draw_main` can allocate an exact `Constraint::Length`.  When adding new
 /// lines to the detail panel, update this function as well.
 fn detail_panel_height(app: &App, route_avail: usize) -> u16 {
-    // Error-toast early-return path: blank + "Error" title + message = 3
-    if app.mode == Mode::Normal
-        && let Some((_, MessageKind::Error, _)) = &app.message
-    {
-        return 3;
-    }
-
     // No provider selected: blank + "Info" title = 2
     if app.providers.names.is_empty() {
         return 2;
@@ -79,42 +75,42 @@ fn detail_panel_height(app: &App, route_avail: usize) -> u16 {
     //   1  Status / "Press [t]" line
     let base: u16 = 3;
 
-    // Variable lines that differ per provider — take the max so the panel
-    // height stays stable when the user navigates between providers.
-    let max_extra: u16 = app
+    // Route lines only — errors and toasts moved to the Messages panel.
+    let max_routes: u16 = app
         .config
         .providers
-        .iter()
-        .map(|(name, p)| {
-            // Route lines
+        .values()
+        .map(|p| {
             let enabled: Vec<_> = p.routes.iter().filter(|r| r.enabled).collect();
-            let route_lines = if enabled.is_empty() {
+            if enabled.is_empty() {
                 0u16
             } else {
                 pack_routes(&enabled, route_avail).len() as u16
-            };
-
-            // Error line (1 if this provider has a last_error)
-            let error_line = app
-                .metrics
-                .lock()
-                .map(|m| u16::from(m.last_error.contains_key(name)))
-                .unwrap_or(0);
-
-            route_lines + error_line
+            }
         })
         .max()
         .unwrap_or(0);
 
-    base + max_extra
+    base + max_routes
 }
 
 pub(super) fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
+    const LOGS_PANEL_WIDTH: u16 = 47;
+    const MIN_WIDTH_FOR_SPLIT: u16 = 120;
+    let split = area.width >= MIN_WIDTH_FOR_SPLIT;
+
+    // Left column is narrower when the right logs panel is visible.
+    let left_width = if split {
+        area.width.saturating_sub(LOGS_PANEL_WIDTH) as usize
+    } else {
+        area.width as usize
+    };
+
     let table_height = (app.providers.names.len() as u16 + 2)
         .max(3)
         .min(area.height * 2 / 3);
     // detail panel: LEFT+RIGHT border (2) + horizontal padding (2) = 4 overhead
-    let detail_inner_width = (area.width as usize).saturating_sub(4);
+    let detail_inner_width = left_width.saturating_sub(4);
     let route_avail = detail_inner_width.saturating_sub(ROUTE_LABEL_WIDTH);
     let detail_height = detail_panel_height(app, route_avail);
     // stats: blank + title + N provider rows + bottom border
@@ -144,8 +140,7 @@ pub(super) fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
             }
 
             // Estimate grid rows: inactive models laid out with max_name+2 cell width.
-            let panel_width = (area.width as usize).saturating_sub(4);
-            let cols = (panel_width / (max_name + 2)).max(1);
+            let cols = (left_width.saturating_sub(4) / (max_name + 2)).max(1);
             let n_inactive = inactive.len().div_ceil(cols) as u16;
             (n_active, n_inactive)
         } else {
@@ -157,29 +152,57 @@ pub(super) fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
     let leftover = area.height.saturating_sub(table_height + detail_height);
     let show_stats = leftover >= stats_min_height;
 
-    let mut constraints = vec![
+    let mut left_constraints = vec![
         Constraint::Length(table_height),
         Constraint::Length(detail_height),
     ];
     if show_stats {
-        constraints.push(Constraint::Min(stats_min_height + model_min_height));
+        left_constraints.push(Constraint::Min(stats_min_height + model_min_height));
     } else {
-        constraints.push(Constraint::Min(0));
+        left_constraints.push(Constraint::Min(0));
     }
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(area);
+    if split {
+        // Horizontal split at the top level so the right column spans the full height.
+        let lr = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0), Constraint::Length(LOGS_PANEL_WIDTH)])
+            .split(area);
 
-    draw_provider_table(f, app, chunks[0]);
-    draw_detail_panel(f, app, chunks[1]);
-    if show_stats {
-        draw_stats_panel(f, app, chunks[2]);
+        let left_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(left_constraints)
+            .split(lr[0]);
+
+        draw_provider_table(f, app, left_chunks[0], false);
+        draw_detail_panel(f, app, left_chunks[1], false);
+        if show_stats {
+            draw_stats_panel(f, app, left_chunks[2], false);
+        }
+        // When stats are visible, +1 accounts for the blank line before "By Provider".
+        let align_bonus = if show_stats { 1 } else { 0 };
+        draw_logs_panel(f, app, lr[1], table_height + detail_height + align_bonus);
+    } else {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(left_constraints)
+            .split(area);
+
+        draw_provider_table(f, app, chunks[0], true);
+        draw_detail_panel(f, app, chunks[1], true);
+        if show_stats {
+            draw_stats_panel(f, app, chunks[2], true);
+        }
     }
 }
 
-pub(super) fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
+pub(super) fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect, right_border: bool) {
+    let table_borders = if right_border {
+        Borders::TOP | Borders::LEFT | Borders::RIGHT
+    } else {
+        Borders::TOP | Borders::LEFT
+    };
+    let (title_left, title_right) = make_table_titles(app);
     if app.providers.names.is_empty() {
         let empty = Paragraph::new(vec![
             Line::from(""),
@@ -203,8 +226,11 @@ pub(super) fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
         ])
         .block(
             Block::default()
-                .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
-                .border_style(Style::default().fg(t::MUTED)),
+                .borders(table_borders)
+                .border_set(BORDER_DASHED_TOP)
+                .border_style(Style::default().fg(t::MUTED))
+                .title_top(title_left)
+                .title_top(title_right),
         );
         f.render_widget(empty, area);
         return;
@@ -346,47 +372,29 @@ pub(super) fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect) {
         .header(header)
         .block(
             Block::default()
-                .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
+                .borders(table_borders)
+                .border_set(BORDER_DASHED_TOP)
                 .border_style(Style::default().fg(t::MUTED))
-                .padding(Padding::horizontal(1)),
+                .padding(Padding::horizontal(1))
+                .title_top(title_left)
+                .title_top(title_right),
         )
         .row_highlight_style(Style::default());
 
     f.render_stateful_widget(table, area, &mut app.providers.table_state);
 }
 
-pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
+pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect, right_border: bool) {
     let border_style = Style::default().fg(t::MUTED);
+    let detail_borders = if right_border {
+        Borders::LEFT | Borders::RIGHT
+    } else {
+        Borders::LEFT
+    };
     let block = Block::default()
-        .borders(Borders::LEFT | Borders::RIGHT)
+        .borders(detail_borders)
         .border_style(border_style)
         .padding(Padding::horizontal(1));
-
-    // Show error toast only when not in editing mode (errors in form are shown inline)
-    if app.mode == Mode::Normal
-        && let Some((msg, MessageKind::Error, _)) = &app.message
-    {
-        let error_block = Block::default()
-            .borders(Borders::LEFT | Borders::RIGHT)
-            .border_style(Style::default().fg(t::ERROR))
-            .padding(Padding::horizontal(1));
-        let lines = vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                "Error",
-                Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD),
-            )),
-            Line::from(vec![
-                Span::styled(
-                    "✗ ",
-                    Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(msg.as_str(), Style::default().fg(t::TEXT)),
-            ]),
-        ];
-        f.render_widget(Paragraph::new(lines).block(error_block), area);
-        return;
-    }
 
     let label = Style::default().fg(t::MUTED);
     let title_line = Line::from(Span::styled(
@@ -506,83 +514,5 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    // Last request error — shown after Routes so it doesn't obscure the route list.
-    if let Ok(m) = app.metrics.lock()
-        && let Some(err) = m.last_error.get(name.as_str())
-    {
-        let status_str = if err.status == 0 {
-            "Network error".to_string()
-        } else {
-            format!("HTTP {}", err.status)
-        };
-        let model_part = if err.model.is_empty() {
-            String::new()
-        } else {
-            format!("{}  ", err.model)
-        };
-        lines.push(Line::from(vec![
-            Span::styled("Error ", Style::default().fg(t::MUTED)),
-            Span::styled(
-                status_str,
-                Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(model_part, Style::default().fg(t::WARNING)),
-            Span::styled(truncate_error(&err.message), Style::default().fg(t::ERROR)),
-        ]));
-    }
-
     f.render_widget(Paragraph::new(lines).block(block), area);
-}
-
-pub(super) fn draw_keybindings(f: &mut Frame, app: &App, area: Rect) {
-    let bg_label = if app.bg_proxy_pid.is_some() {
-        "Stop"
-    } else {
-        "Server"
-    };
-    // (key, desc, key_color, desc_color)
-    let all_keys: &[(&str, &str, Color, Color)] = &[
-        ("a", "Add", t::PRIMARY, t::MUTED),
-        ("e", "Edit", t::PRIMARY, t::MUTED),
-        ("dd", "Delete", t::WARNING, t::MUTED),
-        ("s", "Switch", t::PRIMARY, t::MUTED),
-        ("p", "Toggle", t::PRIMARY, t::MUTED),
-        ("f", "Fallback", t::PRIMARY, t::MUTED),
-        ("S", bg_label, t::PRIMARY, t::MUTED),
-        ("c", "Clear", t::WARNING, t::MUTED),
-        ("q", "Quit", t::WARNING, t::MUTED),
-        ("L", "Logs", t::PRIMARY, t::MUTED),
-        ("yc", "Curl", t::MUTED, t::MUTED),
-        ("h", "Help", t::MUTED, t::MUTED),
-    ];
-
-    let max_width = area.width as usize;
-    let mut spans: Vec<Span> = vec![Span::raw(" ")];
-    let mut used = 1usize;
-    let mut first = true;
-
-    for (key, desc, key_color, desc_color) in all_keys.iter() {
-        let sep = if first { 0 } else { 2 };
-        // "[k]" (3) + " " (1) + desc
-        let item_len = sep + 3 + 1 + desc.len();
-        if used + item_len > max_width {
-            break;
-        }
-        if !first {
-            spans.push(Span::raw("  "));
-        }
-        spans.push(Span::styled(
-            format!("[{}]", key),
-            Style::default().fg(*key_color),
-        ));
-        spans.push(Span::styled(
-            format!(" {}", desc),
-            Style::default().fg(*desc_color),
-        ));
-        used += item_len;
-        first = false;
-    }
-
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }

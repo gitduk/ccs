@@ -1,12 +1,13 @@
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 
-use super::super::state::App;
+use super::super::state::{App, MessageKind};
 use super::super::theme::{self as t};
-use super::layout::centered_rect;
+use super::format::{fmt_latency, format_tokens, shorten_model_name};
+use super::layout::{BORDER_INNER_DIVIDER, DASH, TITLE_SIDE, centered_rect};
 
 pub(super) fn draw_logs(f: &mut Frame, app: &mut App) {
     let area = centered_rect(90, 80, f.area());
@@ -35,13 +36,12 @@ pub(super) fn draw_logs(f: &mut Frame, app: &mut App) {
         return;
     }
 
-    // Build lines: header + entries
     let mut lines: Vec<Line> = Vec::new();
 
-    // Header
+    // Header — col widths: Status(8) Latency(10) Provider(11) Model(32) In(8) Out(8) Time(8)
     lines.push(Line::from(vec![
         Span::styled(
-            format!("{:<8}", "Status"),
+            format!("{:<7}", "Status"),
             Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
@@ -49,7 +49,7 @@ pub(super) fn draw_logs(f: &mut Frame, app: &mut App) {
             Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("{:<16}", "Provider"),
+            format!("{:<11}", "Provider"),
             Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
@@ -57,15 +57,15 @@ pub(super) fn draw_logs(f: &mut Frame, app: &mut App) {
             Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("{:<10}", "In"),
+            format!("{:<6}", "In"),
             Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("{:<10}", "Out"),
+            format!("{:<6}", "Out"),
             Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "Time",
+            "Age",
             Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD),
         ),
     ]));
@@ -73,7 +73,6 @@ pub(super) fn draw_logs(f: &mut Frame, app: &mut App) {
     let viewport_height = inner.height.saturating_sub(1) as usize; // minus header
     let selected = app.logs.selected.min(entries.len().saturating_sub(1));
 
-    // Compute scroll to keep selected visible
     let scroll = if selected < app.logs.scroll as usize {
         selected
     } else if selected >= app.logs.scroll as usize + viewport_height {
@@ -98,20 +97,13 @@ pub(super) fn draw_logs(f: &mut Frame, app: &mut App) {
             Style::default().fg(t::SUCCESS)
         };
 
-        let status_str = if let Some(err) = &entry.error {
-            truncate(err, 7)
-        } else {
-            format!("{}", entry.status)
-        };
-
-        let latency_str = format_latency(entry.latency_ms);
-        let provider = truncate(&entry.provider, 15);
+        let status_str = format!("{}", entry.status);
+        let latency_str = fmt_latency(entry.latency_ms);
+        let provider = truncate(&entry.provider, 9);
         let model = truncate(&entry.model, 31);
         let in_str = format_tokens(entry.input_tokens);
         let out_str = format_tokens(entry.output_tokens);
         let time_str = format_time(entry.timestamp);
-        let stream_indicator = if entry.is_stream { "⇄" } else { " " };
-
         let row_style = if is_selected {
             Style::default().add_modifier(Modifier::REVERSED)
         } else {
@@ -119,22 +111,191 @@ pub(super) fn draw_logs(f: &mut Frame, app: &mut App) {
         };
 
         lines.push(Line::from(vec![
-            Span::styled(format!("{:<7} ", status_str), status_style),
-            Span::styled(stream_indicator, Style::default().fg(t::MUTED)),
-            Span::styled(format!("{:<9}", latency_str), row_style),
-            Span::styled(format!("{:<16}", provider), row_style.fg(t::TEXT)),
+            Span::styled(format!("{:<7}", status_str), status_style),
+            Span::styled(format!("{:<10}", latency_str), row_style),
+            Span::styled(format!("{:<11}", provider), row_style.fg(t::TEXT)),
             Span::styled(format!("{:<32}", model), row_style.fg(t::MUTED)),
-            Span::styled(format!("{:<10}", in_str), row_style.fg(t::TEXT)),
-            Span::styled(format!("{:<10}", out_str), row_style.fg(t::TEXT)),
-            Span::styled(time_str, row_style.fg(t::MUTED)),
+            Span::styled(format!("{:<6}", in_str), row_style.fg(t::TEXT)),
+            Span::styled(format!("{:<6}", out_str), row_style.fg(t::TEXT)),
+            Span::styled(format!("{:<8}", time_str), row_style.fg(t::MUTED)),
         ]));
     }
 
-    // Footer with count
     let footer = format!(" {} requests  [j/k] navigate  [q/Esc] close", entries.len());
     draw_footer(f, area, &footer);
 
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Embedded right-column panel: Messages (top) + Recent Requests (bottom).
+/// `messages_height` is set by the caller to `table_height + detail_height` so that
+/// the Recent Requests title aligns with By Provider on the left column.
+pub(super) fn draw_logs_panel(f: &mut Frame, app: &App, area: Rect, messages_height: u16) {
+    let block = Block::default()
+        .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+        .border_set(BORDER_INNER_DIVIDER)
+        .border_style(Style::default().fg(t::MUTED))
+        .padding(Padding::new(1, 1, 0, 0));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if inner.height < 4 {
+        return;
+    }
+
+    let splits = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(messages_height), Constraint::Min(0)])
+        .split(inner);
+    let (msg_area, req_area) = (splits[0], splits[1]);
+
+    draw_messages_content(f, app, msg_area);
+    draw_requests_content(f, app, req_area);
+}
+
+fn make_dash_title<'a>(title: &'static str, width: usize) -> Line<'a> {
+    let muted = Style::default().fg(t::MUTED);
+    let right = width.saturating_sub(TITLE_SIDE + 1 + title.len() + 1);
+    Line::from(vec![
+        Span::styled(DASH.repeat(TITLE_SIDE), muted),
+        Span::raw(" "),
+        Span::styled(
+            title,
+            Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(DASH.repeat(right), muted),
+    ])
+}
+
+/// Renders the Messages sub-panel (newest entry at the bottom).
+/// Format per line: `age  message` — age is right-aligned in 3 chars.
+fn draw_messages_content(f: &mut Frame, app: &App, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let muted = Style::default().fg(t::MUTED);
+    let width = area.width as usize;
+    let title_line = make_dash_title("Messages", width);
+
+    let visible_rows = area.height.saturating_sub(1) as usize; // minus title line
+    let total = app.message_log.len();
+    let skip = total.saturating_sub(visible_rows);
+
+    let mut lines: Vec<Line> = vec![title_line];
+
+    if total == 0 {
+        lines.push(Line::from(Span::styled("  no messages yet", muted)));
+    } else {
+        let msg_width = width.saturating_sub(6); // 3 age + 2 gap + 1 spare
+        for entry in app.message_log.iter().skip(skip) {
+            let age = format!("{:>3}", format_time(entry.time));
+            let text = truncate(&entry.text, msg_width);
+            let msg_style = match entry.kind {
+                MessageKind::Error => Style::default().fg(t::ERROR),
+                MessageKind::Success => Style::default().fg(t::SUCCESS),
+                MessageKind::Info => muted,
+            };
+            lines.push(Line::from(vec![
+                Span::styled(age, muted),
+                Span::raw("  "),
+                Span::styled(text, msg_style),
+            ]));
+        }
+    }
+
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+/// Renders the Recent Requests sub-panel.
+fn draw_requests_content(f: &mut Frame, app: &App, area: Rect) {
+    if area.height < 3 {
+        return;
+    }
+    let muted = Style::default().fg(t::MUTED);
+    let width = area.width as usize;
+    let title_line = make_dash_title("Recent Requests", width);
+
+    // title + header = 2 lines used
+    let visible_rows = area.height.saturating_sub(2) as usize;
+
+    let entries = match app.request_log.lock() {
+        Ok(log) => log
+            .entries()
+            .iter()
+            .rev()
+            .take(visible_rows)
+            .cloned()
+            .collect::<Vec<_>>(),
+        Err(_) => vec![],
+    };
+
+    if entries.is_empty() {
+        f.render_widget(
+            Paragraph::new(vec![
+                title_line,
+                Line::from(Span::styled("  no requests yet  (session only)", muted)),
+            ]),
+            area,
+        );
+        return;
+    }
+
+    let mut lines: Vec<Line> = vec![
+        title_line,
+        Line::from(vec![
+            Span::styled(
+                format!("{:<7}", "Status"),
+                muted.add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:<8}", "Latency"),
+                muted.add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:<18}", "Provider/Model"),
+                muted.add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:<7}", "Tokens"),
+                muted.add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Age", muted.add_modifier(Modifier::BOLD)),
+        ]),
+    ];
+
+    for entry in &entries {
+        let status_style = if entry.error.is_some() || entry.status >= 400 {
+            Style::default().fg(t::ERROR)
+        } else {
+            Style::default().fg(t::SUCCESS)
+        };
+        let provider_model = truncate(
+            &format!("{}/{}", entry.provider, shorten_model_name(&entry.model)),
+            17,
+        );
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<7}", entry.status), status_style),
+            Span::styled(
+                format!("{:<8}", fmt_latency(entry.latency_ms)),
+                Style::default().fg(t::TEXT),
+            ),
+            Span::styled(
+                format!("{:<18}", provider_model),
+                Style::default().fg(t::TEXT),
+            ),
+            Span::styled(
+                format!(
+                    "{:<7}",
+                    format_tokens(entry.input_tokens + entry.output_tokens)
+                ),
+                muted,
+            ),
+            Span::styled(format!("{:<3}", format_time(entry.timestamp)), muted),
+        ]));
+    }
+
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_footer(f: &mut Frame, area: Rect, text: &str) {
@@ -158,34 +319,14 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-fn format_latency(ms: u64) -> String {
-    if ms < 1000 {
-        format!("{ms}ms")
-    } else {
-        format!("{:.1}s", ms as f64 / 1000.0)
-    }
-}
-
-fn format_tokens(tokens: u64) -> String {
-    if tokens == 0 {
-        "—".to_string()
-    } else if tokens < 1000 {
-        format!("{tokens}")
-    } else if tokens < 1_000_000 {
-        format!("{:.1}k", tokens as f64 / 1000.0)
-    } else {
-        format!("{:.1}M", tokens as f64 / 1_000_000.0)
-    }
-}
-
 fn format_time(ts: std::time::SystemTime) -> String {
     let elapsed = ts.elapsed().unwrap_or_default();
     let secs = elapsed.as_secs();
     if secs < 60 {
-        format!("{secs}s ago")
+        format!("{secs}s")
     } else if secs < 3600 {
-        format!("{}m ago", secs / 60)
+        format!("{}m", secs / 60)
     } else {
-        format!("{}h ago", secs / 3600)
+        format!("{}h", secs / 3600)
     }
 }

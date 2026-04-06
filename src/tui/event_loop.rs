@@ -53,12 +53,44 @@ pub(super) fn start_db_watcher(app: &App) -> Option<(Receiver<()>, notify::Recom
 
 pub(crate) fn reload_metrics_from_db(app: &mut App) {
     let (fresh, fresh_models) = app.db.load_all();
-    if let Ok(mut m) = app.metrics.lock() {
+
+    // Snapshot current last_errors before releasing the lock.
+    let error_snapshot: Vec<(String, u16, String)> = if let Ok(mut m) = app.metrics.lock() {
         // Preserve last_error — it's ephemeral session state, not stored in DB.
         let saved_errors = std::mem::take(&mut m.last_error);
         *m = fresh;
         m.last_error = saved_errors;
+        m.last_error
+            .iter()
+            .map(|(p, e)| (p.clone(), e.status, e.message.clone()))
+            .collect()
+    } else {
+        vec![]
+    };
+
+    // If an error was cleared (successful request), forget its key so the next
+    // occurrence of the same error is logged again.
+    app.seen_provider_errors
+        .retain(|p, _| error_snapshot.iter().any(|(ep, _, _)| ep == p));
+
+    // Push newly seen or changed errors into the message log.
+    for (provider, status, message) in error_snapshot {
+        let key = format!("{status}:{message}");
+        if app
+            .seen_provider_errors
+            .get(&provider)
+            .is_none_or(|k| k != &key)
+        {
+            app.seen_provider_errors.insert(provider.clone(), key);
+            let text = if status == 0 {
+                format!("[{provider}] network error — {message}")
+            } else {
+                format!("[{provider}] HTTP {status} — {message}")
+            };
+            app.push_message_log(text, MessageKind::Error);
+        }
     }
+
     app.models.provider_models = fresh_models;
     // NOTE: models_scroll is intentionally NOT reset here.
     // draw_models already clamps scroll to max_scroll on every frame,

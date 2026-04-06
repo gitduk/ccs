@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc;
 
 /// Index of the Notes field inside `ProviderForm::fields`.
@@ -43,11 +43,18 @@ pub enum VimMode {
     Insert,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MessageKind {
     Info,
     Success,
     Error,
+}
+
+#[derive(Debug, Clone)]
+pub struct MessageEntry {
+    pub text: String,
+    pub kind: MessageKind,
+    pub time: std::time::SystemTime,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -153,6 +160,10 @@ pub struct App {
     pub models: ModelsState,
     pub request_log: SharedRequestLog,
     pub logs: LogsState,
+    /// Chronological message log shown in the Messages panel (newest last).
+    pub message_log: VecDeque<MessageEntry>,
+    /// Tracks last-seen error key per provider to avoid duplicate log entries.
+    pub seen_provider_errors: HashMap<String, String>,
     /// Pending first key of a two-key sequence in the Normal-mode provider list.
     pub pending_key: Option<(char, std::time::Instant)>,
 }

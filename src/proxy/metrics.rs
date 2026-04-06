@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
@@ -17,6 +18,9 @@ pub struct ProviderStats {
     pub output: u64,
     pub requests: u64,
     pub failures: u64,
+    /// Cumulative latency of successful requests (ms); divide by requests for avg.
+    /// Not persisted to DB — resets on restart.
+    pub latency_ms_total: u64,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -66,6 +70,7 @@ const REQUEST_LOG_CAPACITY: usize = 200;
 
 #[derive(Debug, Clone)]
 pub struct RequestLogEntry {
+    pub id: u64,
     pub timestamp: SystemTime,
     pub provider: String,
     pub model: String,
@@ -83,11 +88,28 @@ pub struct RequestLog {
 }
 
 impl RequestLog {
-    pub fn push(&mut self, entry: RequestLogEntry) {
+    /// Push an entry, assigning a unique ID. Returns the assigned ID for
+    /// later back-fill lookups.
+    pub fn push(&mut self, mut entry: RequestLogEntry) -> u64 {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        entry.id = id;
         if self.entries.len() >= REQUEST_LOG_CAPACITY {
             self.entries.pop_front();
         }
         self.entries.push_back(entry);
+        id
+    }
+
+    /// Find an entry by ID (reverse search — recent entries are near the back).
+    pub fn backfill(&mut self, id: u64, input: u64, output: u64, model: Option<&str>) {
+        if let Some(entry) = self.entries.iter_mut().rev().find(|e| e.id == id) {
+            entry.input_tokens = input;
+            entry.output_tokens = output;
+            if let Some(m) = model {
+                entry.model = m.to_string();
+            }
+        }
     }
 
     pub fn entries(&self) -> &VecDeque<RequestLogEntry> {

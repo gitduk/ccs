@@ -8,7 +8,7 @@ use futures::StreamExt;
 use super::SharedState;
 use crate::config::ApiFormat;
 use crate::error::AppError;
-use crate::proxy::metrics::RequestLogEntry;
+use crate::proxy::metrics::{RequestLogEntry, SharedRequestLog};
 use crate::proxy::{forwarder, transform};
 
 /// Bundles a provider's stable UUID and display name for passing through the request pipeline.
@@ -302,15 +302,20 @@ async fn try_providers(
             return Ok((status, [("content-type", "application/json")], error_body).into_response());
         }
 
+        let latency_ms = t0.elapsed().as_millis() as u64;
         if let Ok(mut m) = state.metrics.lock() {
             m.clear_error(provider_name);
+            m.by_provider
+                .entry(provider_name.clone())
+                .or_default()
+                .latency_ms_total += latency_ms;
         }
-        let latency_ms = t0.elapsed().as_millis() as u64;
         // Log successful requests — tokens will be filled in by the response handlers,
         // but we log the entry here for latency and provider info. For buffered responses,
         // handle_buffered_response updates the log entry with token counts.
-        if let Ok(mut log) = state.request_log.lock() {
+        let entry_id = if let Ok(mut log) = state.request_log.lock() {
             log.push(RequestLogEntry {
+                id: 0, // assigned by push()
                 timestamp: std::time::SystemTime::now(),
                 provider: provider_name.clone(),
                 model: req_model_hint.clone(),
@@ -320,10 +325,20 @@ async fn try_providers(
                 output_tokens: 0,
                 is_stream: ctx.is_stream,
                 error: None,
-            });
-        }
+            })
+        } else {
+            0
+        };
         return if ctx.is_stream {
-            handle_streaming_response(response, is_openai, state.db.clone(), pkey).await
+            handle_streaming_response(
+                response,
+                is_openai,
+                state.db.clone(),
+                pkey,
+                &state.request_log,
+                entry_id,
+            )
+            .await
         } else {
             handle_buffered_response(
                 response,
@@ -331,6 +346,7 @@ async fn try_providers(
                 state.db.clone(),
                 pkey,
                 &state.request_log,
+                entry_id,
             )
             .await
         };
@@ -340,6 +356,7 @@ async fn try_providers(
     let final_status = last_status.unwrap_or(StatusCode::BAD_GATEWAY);
     if let Ok(mut log) = state.request_log.lock() {
         log.push(RequestLogEntry {
+            id: 0, // assigned by push()
             timestamp: std::time::SystemTime::now(),
             provider: pool.first().map(|(n, _)| n.clone()).unwrap_or_default(),
             model: req_model_hint,
@@ -413,6 +430,7 @@ async fn handle_buffered_response(
     db: Repository,
     pkey: ProviderKey,
     request_log: &crate::proxy::metrics::SharedRequestLog,
+    entry_id: u64,
 ) -> Result<Response, AppError> {
     let ProviderKey {
         id: provider_id,
@@ -451,15 +469,9 @@ async fn handle_buffered_response(
         },
     );
 
-    // Back-fill token counts on the most recent log entry.
-    if let Ok(mut log) = request_log.lock()
-        && let Some(entry) = log.entries_mut().back_mut()
-    {
-        entry.input_tokens = input;
-        entry.output_tokens = output;
-        if let Some(m) = &model {
-            entry.model.clone_from(m);
-        }
+    // Back-fill token counts on the log entry we created before sending.
+    if let Ok(mut log) = request_log.lock() {
+        log.backfill(entry_id, input, output, model.as_deref());
     }
 
     Ok((
@@ -476,6 +488,8 @@ async fn handle_streaming_response(
     is_openai: bool,
     db: Repository,
     pkey: ProviderKey,
+    request_log: &SharedRequestLog,
+    entry_id: u64,
 ) -> Result<Response, AppError> {
     let raw_stream: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>> =
         if !is_openai {
@@ -489,7 +503,7 @@ async fn handle_streaming_response(
             Box::pin(transform::openai_stream_to_anthropic(response))
         };
 
-    let tracked = track_tokens_in_stream(raw_stream, db, pkey);
+    let tracked = track_tokens_in_stream(raw_stream, db, pkey, request_log.clone(), entry_id);
     let body = Body::from_stream(tracked);
 
     Response::builder()
@@ -506,6 +520,8 @@ fn track_tokens_in_stream(
     mut inner: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>>,
     db: Repository,
     pkey: ProviderKey,
+    request_log: SharedRequestLog,
+    entry_id: u64,
 ) -> impl futures::Stream<Item = std::io::Result<Bytes>> + Send {
     let provider_id = pkey.id;
     let provider_name = pkey.name;
@@ -572,6 +588,11 @@ fn track_tokens_in_stream(
                 ..Default::default()
             },
         );
+
+        // Back-fill token counts into the request log entry we created before streaming.
+        if let Ok(mut log) = request_log.lock() {
+            log.backfill(entry_id, input_tokens, output_tokens, model.as_deref());
+        }
     }
 }
 

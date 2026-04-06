@@ -9,11 +9,17 @@ use unicode_width::UnicodeWidthStr;
 
 use super::super::state::App;
 use super::super::theme::{self as t};
-use super::format::{format_tokens, max_content_width, strip_model_prefix};
+use super::format::{fmt_latency, format_tokens, max_content_width, strip_model_prefix};
+use super::layout::{DASH, SUFFIX_GAP, TITLE_SIDE};
 
-pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
+pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect, right_border: bool) {
+    let borders = if right_border {
+        Borders::LEFT | Borders::RIGHT | Borders::BOTTOM
+    } else {
+        Borders::LEFT | Borders::BOTTOM
+    };
     let block = Block::default()
-        .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+        .borders(borders)
         .border_style(Style::default().fg(t::MUTED))
         .padding(Padding::horizontal(1));
 
@@ -76,18 +82,39 @@ pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
         .unwrap_or(8)
         .max(8);
 
-    let dash_line = Line::from(Span::styled(
-        "╌".repeat(inner.width as usize),
-        Style::default().fg(t::MUTED),
-    ));
+    let make_title_line = |title: &'static str, suffix: &str| -> Line<'static> {
+        // Layout: ╌╌ Title ╌╌╌╌╌╌╌╌╌╌ suffix
+        let mid = (inner.width as usize).saturating_sub(
+            TITLE_SIDE
+                + 1
+                + title.len()
+                + 1
+                + if suffix.is_empty() {
+                    0
+                } else {
+                    SUFFIX_GAP + suffix.width()
+                },
+        );
+        let mut spans: Vec<Span> = vec![
+            Span::styled(DASH.repeat(TITLE_SIDE), muted),
+            Span::raw(" "),
+            Span::styled(
+                title,
+                Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(DASH.repeat(mid), muted),
+        ];
+        if !suffix.is_empty() {
+            spans.push(Span::raw(" ".repeat(SUFFIX_GAP)));
+            spans.push(Span::styled(suffix.to_string(), muted));
+        }
+        Line::from(spans)
+    };
 
     let mut lines: Vec<Line> = vec![
         Line::from(""),
-        dash_line.clone(),
-        Line::from(Span::styled(
-            "By Provider",
-            Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD),
-        )),
+        make_title_line("By Provider", ""),
         Line::from(""),
     ];
     lines.extend(provider_rows.iter().map(|(name, s)| {
@@ -141,25 +168,21 @@ pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect) {
                 };
                 Span::styled(text, style)
             },
+            Span::styled("  Avg ", muted),
+            {
+                let avg = if s.requests > 0 {
+                    fmt_latency(s.latency_ms_total / s.requests)
+                } else {
+                    "—".to_string()
+                };
+                Span::styled(avg, Style::default().fg(t::TEXT))
+            },
         ])
     }));
 
     // Model Usage section — horizontal stacked bar chart
     lines.push(Line::from(""));
-    lines.push(dash_line);
-    {
-        let title = "By Model";
-        let legend = "░ input  █ output";
-        let gap = (inner.width as usize).saturating_sub(title.len() + legend.width());
-        lines.push(Line::from(vec![
-            Span::styled(
-                title,
-                Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" ".repeat(gap)),
-            Span::styled(legend, Style::default().fg(t::MUTED)),
-        ]));
-    }
+    lines.push(make_title_line("By Model", "░ input  █ output ╌╌"));
     lines.push(Line::from(""));
 
     if model_entries.is_empty() {

@@ -58,6 +58,8 @@ impl App {
                 selected: 0,
                 scroll: 0,
             },
+            message_log: std::collections::VecDeque::new(),
+            seen_provider_errors: std::collections::HashMap::new(),
             pending_key: None,
         })
     }
@@ -140,8 +142,22 @@ impl App {
         Ok(())
     }
 
+    pub fn push_message_log(&mut self, text: String, kind: MessageKind) {
+        const MAX_MESSAGES: usize = 100;
+        self.message_log.push_back(super::MessageEntry {
+            text,
+            kind,
+            time: std::time::SystemTime::now(),
+        });
+        if self.message_log.len() > MAX_MESSAGES {
+            self.message_log.pop_front();
+        }
+    }
+
     pub fn set_message(&mut self, msg: impl Into<String>, kind: MessageKind) {
-        self.message = Some((msg.into(), kind, std::time::Instant::now()));
+        let msg = msg.into();
+        self.push_message_log(msg.clone(), kind.clone());
+        self.message = Some((msg, kind, std::time::Instant::now()));
     }
 
     /// Clear message if it has expired (after MESSAGE_TIMEOUT_SECS seconds).
