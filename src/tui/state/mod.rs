@@ -7,7 +7,7 @@ pub(super) const NOTES_FIELD_IDX: usize = 4;
 use ratatui::widgets::TableState;
 
 use crate::config::{AppConfig, Provider, RouteRule};
-use crate::proxy::metrics::SharedMetrics;
+use crate::proxy::metrics::{SharedMetrics, SharedRequestLog};
 use crate::repo::Repository;
 use crate::tester::TestResult;
 
@@ -30,6 +30,8 @@ pub enum Mode {
     Help,
     /// Models browser popup: search and browse all available models.
     Models,
+    /// Request log viewer: scrollable list of recent proxy requests.
+    Logs,
 }
 
 /// Vim-style sub-mode used inside the provider editor form.
@@ -127,6 +129,14 @@ pub struct ModelsState {
     pub pending_key: Option<(char, std::time::Instant)>,
 }
 
+/// Request log viewer state.
+pub struct LogsState {
+    /// Index of the highlighted entry (0 = most recent).
+    pub selected: usize,
+    /// Scroll offset (rows) for the log list.
+    pub scroll: u16,
+}
+
 pub struct App {
     pub config: AppConfig,
     pub mode: Mode,
@@ -141,6 +151,8 @@ pub struct App {
     pub db: Repository,
     pub bg_proxy_pid: Option<u32>,
     pub models: ModelsState,
+    pub request_log: SharedRequestLog,
+    pub logs: LogsState,
     /// Pending first key of a two-key sequence in the Normal-mode provider list.
     pub pending_key: Option<(char, std::time::Instant)>,
 }

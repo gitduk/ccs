@@ -30,6 +30,8 @@ pub(super) fn draw_help(f: &mut Frame, _app: &App) {
                 ("S", "Toggle background proxy"),
                 ("c", "Clear current provider usage data"),
                 ("C", "Clear all providers' usage data"),
+                ("L", "Open request log"),
+                ("m", "Browse models"),
                 ("q / Esc", "Quit (direct exit if bg proxy running)"),
                 ("h / ?", "Show this help"),
             ],

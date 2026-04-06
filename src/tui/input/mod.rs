@@ -1,6 +1,7 @@
 mod confirm;
 mod editor;
 mod insert;
+mod logs;
 mod models;
 mod normal;
 mod routes;
@@ -36,6 +37,14 @@ pub(super) fn handle_key(
         Mode::Help => {
             app.mode = Mode::Normal;
             Ok(())
+        }
+        Mode::Logs => {
+            let total = app
+                .request_log
+                .lock()
+                .map(|l| l.entries().len())
+                .unwrap_or(0);
+            logs::handle_logs_key(app, code, total)
         }
         Mode::Models => {
             // Build the flat filtered list + per-model line offsets.

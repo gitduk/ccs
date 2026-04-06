@@ -2,6 +2,7 @@ mod dialogs;
 mod form;
 mod format;
 mod layout;
+mod logs;
 mod route_editor;
 mod stats_panel;
 mod view;
@@ -30,6 +31,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Mode::Confirm => dialogs::draw_confirm(f, app),
         Mode::Help => dialogs::draw_help(f, app),
         Mode::Models => dialogs::draw_models(f, app),
+        Mode::Logs => logs::draw_logs(f, app),
         Mode::Normal => {}
     }
 }

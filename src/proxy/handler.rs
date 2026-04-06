@@ -8,6 +8,7 @@ use futures::StreamExt;
 use super::SharedState;
 use crate::config::ApiFormat;
 use crate::error::AppError;
+use crate::proxy::metrics::RequestLogEntry;
 use crate::proxy::{forwarder, transform};
 
 /// Bundles a provider's stable UUID and display name for passing through the request pipeline.
@@ -191,6 +192,8 @@ async fn try_providers(
         }
     };
 
+    let t0 = std::time::Instant::now();
+
     for (provider_name, provider) in pool.iter().cycle() {
         let pkey = ProviderKey {
             id: provider.id.clone(),
@@ -302,15 +305,55 @@ async fn try_providers(
         if let Ok(mut m) = state.metrics.lock() {
             m.clear_error(provider_name);
         }
+        let latency_ms = t0.elapsed().as_millis() as u64;
+        // Log successful requests — tokens will be filled in by the response handlers,
+        // but we log the entry here for latency and provider info. For buffered responses,
+        // handle_buffered_response updates the log entry with token counts.
+        if let Ok(mut log) = state.request_log.lock() {
+            log.push(RequestLogEntry {
+                timestamp: std::time::SystemTime::now(),
+                provider: provider_name.clone(),
+                model: req_model_hint.clone(),
+                status: status_u16,
+                latency_ms,
+                input_tokens: 0,
+                output_tokens: 0,
+                is_stream: ctx.is_stream,
+                error: None,
+            });
+        }
         return if ctx.is_stream {
             handle_streaming_response(response, is_openai, state.db.clone(), pkey).await
         } else {
-            handle_buffered_response(response, is_openai, state.db.clone(), pkey).await
+            handle_buffered_response(
+                response,
+                is_openai,
+                state.db.clone(),
+                pkey,
+                &state.request_log,
+            )
+            .await
         };
     }
 
+    // All providers failed — log the final failure.
+    let final_status = last_status.unwrap_or(StatusCode::BAD_GATEWAY);
+    if let Ok(mut log) = state.request_log.lock() {
+        log.push(RequestLogEntry {
+            timestamp: std::time::SystemTime::now(),
+            provider: pool.first().map(|(n, _)| n.clone()).unwrap_or_default(),
+            model: req_model_hint,
+            status: final_status.as_u16(),
+            latency_ms: t0.elapsed().as_millis() as u64,
+            input_tokens: 0,
+            output_tokens: 0,
+            is_stream: ctx.is_stream,
+            error: Some("all providers failed".into()),
+        });
+    }
+
     Ok((
-        last_status.unwrap_or(StatusCode::BAD_GATEWAY),
+        final_status,
         [("content-type", "application/json")],
         Bytes::from(r#"{"error":"all providers failed"}"#),
     )
@@ -369,6 +412,7 @@ async fn handle_buffered_response(
     is_openai: bool,
     db: Repository,
     pkey: ProviderKey,
+    request_log: &crate::proxy::metrics::SharedRequestLog,
 ) -> Result<Response, AppError> {
     let ProviderKey {
         id: provider_id,
@@ -406,6 +450,17 @@ async fn handle_buffered_response(
             ..Default::default()
         },
     );
+
+    // Back-fill token counts on the most recent log entry.
+    if let Ok(mut log) = request_log.lock()
+        && let Some(entry) = log.entries_mut().back_mut()
+    {
+        entry.input_tokens = input;
+        entry.output_tokens = output;
+        if let Some(m) = &model {
+            entry.model.clone_from(m);
+        }
+    }
 
     Ok((
         StatusCode::OK,

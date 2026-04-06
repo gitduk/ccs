@@ -178,6 +178,11 @@ pub(super) fn handle_normal_key(
             app.models.selected = 0;
             app.models.scroll = 0;
         }
+        KeyCode::Char('L') => {
+            app.mode = Mode::Logs;
+            app.logs.selected = 0;
+            app.logs.scroll = 0;
+        }
         _ => {}
     }
     Ok(())

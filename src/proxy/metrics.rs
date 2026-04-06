@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 #[derive(Debug, Clone)]
 pub struct LastRequestError {
@@ -58,3 +59,44 @@ impl TokenMetrics {
 }
 
 pub type SharedMetrics = Arc<Mutex<TokenMetrics>>;
+
+// ─── Request Log ─────────────────────────────────────────────────────────────
+
+const REQUEST_LOG_CAPACITY: usize = 200;
+
+#[derive(Debug, Clone)]
+pub struct RequestLogEntry {
+    pub timestamp: SystemTime,
+    pub provider: String,
+    pub model: String,
+    pub status: u16,
+    pub latency_ms: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub is_stream: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct RequestLog {
+    entries: VecDeque<RequestLogEntry>,
+}
+
+impl RequestLog {
+    pub fn push(&mut self, entry: RequestLogEntry) {
+        if self.entries.len() >= REQUEST_LOG_CAPACITY {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(entry);
+    }
+
+    pub fn entries(&self) -> &VecDeque<RequestLogEntry> {
+        &self.entries
+    }
+
+    pub fn entries_mut(&mut self) -> &mut VecDeque<RequestLogEntry> {
+        &mut self.entries
+    }
+}
+
+pub type SharedRequestLog = Arc<Mutex<RequestLog>>;

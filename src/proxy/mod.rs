@@ -15,12 +15,13 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::config::AppConfig;
 use crate::repo::Repository;
-use metrics::SharedMetrics;
+use metrics::{SharedMetrics, SharedRequestLog};
 
 pub struct AppState {
     pub config: Arc<RwLock<AppConfig>>,
     pub http_client: Client,
     pub metrics: SharedMetrics,
+    pub request_log: SharedRequestLog,
     pub db: Repository,
 }
 
@@ -65,6 +66,7 @@ pub async fn start_server(config: AppConfig) -> crate::error::Result<()> {
         config: shared_config.clone(),
         http_client: build_http_client(),
         metrics: Arc::new(std::sync::Mutex::new(metrics::TokenMetrics::default())),
+        request_log: Arc::new(std::sync::Mutex::new(metrics::RequestLog::default())),
         db,
     });
     let app = build_router(state);
@@ -108,6 +110,7 @@ pub async fn start_server_with_shutdown(
     shared_config: Arc<RwLock<AppConfig>>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     metrics: SharedMetrics,
+    request_log: SharedRequestLog,
     db: Repository,
 ) -> crate::error::Result<()> {
     let listen = shared_config.read().await.listen.clone();
@@ -115,6 +118,7 @@ pub async fn start_server_with_shutdown(
         config: shared_config,
         http_client: build_http_client(),
         metrics,
+        request_log,
         db,
     });
     let app = build_router(state);

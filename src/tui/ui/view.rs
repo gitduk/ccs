@@ -552,6 +552,7 @@ pub(super) fn draw_keybindings(f: &mut Frame, app: &App, area: Rect) {
         ("S", bg_label, t::PRIMARY, t::MUTED),
         ("c", "Clear", t::WARNING, t::MUTED),
         ("q", "Quit", t::WARNING, t::MUTED),
+        ("L", "Logs", t::PRIMARY, t::MUTED),
         ("yc", "Curl", t::MUTED, t::MUTED),
         ("h", "Help", t::MUTED, t::MUTED),
     ];

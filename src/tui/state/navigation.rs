@@ -5,7 +5,7 @@ use crate::config;
 use crate::error::Result;
 use crate::repo::Repository;
 
-use super::{App, MESSAGE_TIMEOUT_SECS, MessageKind, ModelsState, ProviderList};
+use super::{App, LogsState, MESSAGE_TIMEOUT_SECS, MessageKind, ModelsState, ProviderList};
 
 impl App {
     pub fn new() -> Result<Self> {
@@ -52,6 +52,11 @@ impl App {
                 selected: 0,
                 scroll: 0,
                 pending_key: None,
+            },
+            request_log: Arc::new(Mutex::new(crate::proxy::metrics::RequestLog::default())),
+            logs: LogsState {
+                selected: 0,
+                scroll: 0,
             },
             pending_key: None,
         })
