@@ -6,16 +6,6 @@ use crate::error::{AppError, Result};
 // Default model names
 const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
 
-/// Convert an Anthropic Messages API request to OpenAI format.
-/// Automatically detects and uses the appropriate format based on provider configuration.
-pub fn anthropic_to_openai_request(req: &Value, provider: &Provider) -> Result<Value> {
-    if provider.uses_responses_api() {
-        anthropic_to_openai_responses_request(req, provider)
-    } else {
-        anthropic_to_openai_chat_completions_request(req, provider)
-    }
-}
-
 /// Extract system text from Anthropic request
 fn extract_system_text(req: &Value) -> String {
     req.get("system")
@@ -31,42 +21,47 @@ fn extract_system_text(req: &Value) -> String {
         .unwrap_or_default()
 }
 
-/// Convert an Anthropic Messages API request to OpenAI Responses API format.
-pub fn anthropic_to_openai_responses_request(req: &Value, provider: &Provider) -> Result<Value> {
+/// Convert an Anthropic Messages API request to OpenAI format.
+/// Automatically detects and uses the appropriate format based on provider configuration.
+pub fn anthropic_to_openai_request(req: &Value, provider: &Provider) -> Result<Value> {
+    let is_responses = provider.uses_responses_api();
+
     let model = req
         .get("model")
         .and_then(|m| m.as_str())
         .unwrap_or(DEFAULT_MODEL);
     let mapped_model = provider.map_model(model);
 
-    // For Responses API, we need to build input array instead of messages
-    let mut input: Vec<Value> = Vec::new();
+    let mut converted_msgs: Vec<Value> = Vec::new();
 
-    // Convert system message using extracted helper
+    // System prompt → first message
     let system_text = extract_system_text(req);
     if !system_text.is_empty() {
-        input.push(json!({"role": "system", "content": system_text}));
+        converted_msgs.push(json!({"role": "system", "content": system_text}));
     }
 
-    // Convert messages for Responses API (same structure as Chat Completions)
+    // Convert messages (use call_id for Responses API, tool_call_id for Chat Completions)
     if let Some(msgs) = req.get("messages").and_then(|m| m.as_array()) {
         for msg in msgs {
             let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("user");
-            let converted = convert_message_to_openai_responses(role, msg)?;
-            input.extend(converted);
+            let converted = convert_message(role, msg, is_responses)?;
+            converted_msgs.extend(converted);
         }
     }
 
+    let is_stream = req.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
+
+    // Responses API uses "input"; Chat Completions uses "messages"
+    let msg_field = if is_responses { "input" } else { "messages" };
     let mut result = json!({
         "model": mapped_model,
-        "input": input,  // 使用 input 而不是 messages
-        "stream": req.get("stream").and_then(|s| s.as_bool()).unwrap_or(false),
+        msg_field: converted_msgs,
+        "stream": is_stream,
     });
 
-    // 复制其他参数
     copy_common_parameters(req, &mut result);
 
-    // tools → OpenAI tools format (Responses API 使用相同的工具格式)
+    // Tools
     if let Some(tools) = req.get("tools").and_then(|t| t.as_array()) {
         let openai_tools = convert_tools_to_openai(tools);
         if !openai_tools.is_empty() {
@@ -74,87 +69,27 @@ pub fn anthropic_to_openai_responses_request(req: &Value, provider: &Provider) -
         }
     }
 
-    // tool_choice (Responses API 使用相同的格式)
     if let Some(tool_choice) = req.get("tool_choice") {
         result["tool_choice"] = convert_tool_choice_to_openai(tool_choice);
     }
 
-    // thinking/extended thinking → reasoning (Responses API 特有)
+    // Thinking → reasoning
     if let Some(thinking) = req.get("thinking")
         && let Some(enabled) = thinking.get("enabled").and_then(|e| e.as_bool())
         && enabled
     {
-        result["reasoning_effort"] = json!("high");
+        // Responses API sets reasoning_effort unconditionally;
+        // Chat Completions only sets it when budget_tokens is present.
         if let Some(budget) = thinking.get("budget_tokens") {
+            result["reasoning_effort"] = json!("high");
             result["max_completion_tokens"] = budget.clone();
+        } else if is_responses {
+            result["reasoning_effort"] = json!("high");
         }
     }
 
-    Ok(result)
-}
-
-/// Convert an Anthropic Messages API request to OpenAI Chat Completions format.
-pub fn anthropic_to_openai_chat_completions_request(
-    req: &Value,
-    provider: &Provider,
-) -> Result<Value> {
-    let model = req
-        .get("model")
-        .and_then(|m| m.as_str())
-        .unwrap_or(DEFAULT_MODEL);
-    let mapped_model = provider.map_model(model);
-
-    let mut messages: Vec<Value> = Vec::new();
-
-    // Convert system message using extracted helper
-    let system_text = extract_system_text(req);
-    if !system_text.is_empty() {
-        messages.push(json!({"role": "system", "content": system_text}));
-    }
-
-    // Convert messages
-    if let Some(msgs) = req.get("messages").and_then(|m| m.as_array()) {
-        for msg in msgs {
-            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("user");
-            let converted = convert_message_to_openai(role, msg)?;
-            messages.extend(converted);
-        }
-    }
-
-    let mut result = json!({
-        "model": mapped_model,
-        "messages": messages,  // Chat Completions 使用 messages
-        "stream": req.get("stream").and_then(|s| s.as_bool()).unwrap_or(false),
-    });
-
-    // 复制其他参数
-    copy_common_parameters(req, &mut result);
-
-    // tools → OpenAI tools format
-    if let Some(tools) = req.get("tools").and_then(|t| t.as_array()) {
-        let openai_tools = convert_tools_to_openai(tools);
-        if !openai_tools.is_empty() {
-            result["tools"] = json!(openai_tools);
-        }
-    }
-
-    // tool_choice
-    if let Some(tool_choice) = req.get("tool_choice") {
-        result["tool_choice"] = convert_tool_choice_to_openai(tool_choice);
-    }
-
-    // thinking/extended thinking → reasoning (Chat Completions 兼容)
-    if let Some(thinking) = req.get("thinking")
-        && let Some(enabled) = thinking.get("enabled").and_then(|e| e.as_bool())
-        && enabled
-        && let Some(budget) = thinking.get("budget_tokens")
-    {
-        result["reasoning_effort"] = json!("high");
-        result["max_completion_tokens"] = budget.clone();
-    }
-
-    // Stream options for OpenAI Chat Completions
-    if req.get("stream").and_then(|s| s.as_bool()).unwrap_or(false) {
+    // Chat Completions needs stream_options for usage reporting
+    if !is_responses && is_stream {
         result["stream_options"] = json!({"include_usage": true});
     }
 
@@ -235,64 +170,25 @@ fn convert_tool_choice_to_openai(tool_choice: &Value) -> Value {
     }
 }
 
-/// Convert a single Anthropic message to OpenAI Responses API message(s).
-/// Key difference: uses "call_id" instead of "tool_call_id" for tool results.
-fn convert_message_to_openai_responses(role: &str, msg: &Value) -> Result<Vec<Value>> {
-    let content = msg.get("content");
-
-    match content {
-        Some(Value::String(text)) => {
-            let openai_role = match role {
-                "assistant" => "assistant",
-                _ => "user",
-            };
-            Ok(vec![json!({"role": openai_role, "content": text})])
-        }
-        Some(Value::Array(blocks)) => convert_content_blocks_to_openai_responses(role, blocks),
-        _ => Ok(vec![json!({"role": role, "content": ""})]),
-    }
-}
-
-/// Convert Anthropic content blocks to OpenAI messages.
-/// Uses "call_id" vs "tool_call_id" based on API version.
-fn convert_content_blocks_to_openai(
-    role: &str,
-    blocks: &[Value],
-    use_call_id: bool,
-) -> Result<Vec<Value>> {
-    match role {
-        "user" => convert_user_blocks_to_openai(blocks, use_call_id),
-        "assistant" => convert_assistant_blocks_to_openai(blocks), // Assistant blocks are the same for both APIs
-        _ => Ok(vec![json!({"role": role, "content": ""})]),
-    }
-}
-
-/// Convert Anthropic content blocks to OpenAI Responses API messages.
-/// Uses "call_id" instead of "tool_call_id" for tool results.
-fn convert_content_blocks_to_openai_responses(role: &str, blocks: &[Value]) -> Result<Vec<Value>> {
-    convert_content_blocks_to_openai(role, blocks, true) // use call_id
-}
-
 /// Convert a single Anthropic message to OpenAI message(s).
-fn convert_message_to_openai(role: &str, msg: &Value) -> Result<Vec<Value>> {
-    let content = msg.get("content");
-
-    match content {
+/// `use_call_id`: true for Responses API (`call_id`), false for Chat Completions (`tool_call_id`).
+fn convert_message(role: &str, msg: &Value, use_call_id: bool) -> Result<Vec<Value>> {
+    match msg.get("content") {
         Some(Value::String(text)) => {
-            let openai_role = match role {
-                "assistant" => "assistant",
-                _ => "user",
+            let openai_role = if role == "assistant" {
+                "assistant"
+            } else {
+                "user"
             };
             Ok(vec![json!({"role": openai_role, "content": text})])
         }
-        Some(Value::Array(blocks)) => convert_content_blocks_to_openai_original(role, blocks),
+        Some(Value::Array(blocks)) => match role {
+            "user" => convert_user_blocks_to_openai(blocks, use_call_id),
+            "assistant" => convert_assistant_blocks_to_openai(blocks),
+            _ => Ok(vec![json!({"role": role, "content": ""})]),
+        },
         _ => Ok(vec![json!({"role": role, "content": ""})]),
     }
-}
-
-/// Convert Anthropic content blocks to OpenAI messages.
-fn convert_content_blocks_to_openai_original(role: &str, blocks: &[Value]) -> Result<Vec<Value>> {
-    convert_content_blocks_to_openai(role, blocks, false) // use tool_call_id
 }
 
 fn convert_user_blocks_to_openai(blocks: &[Value], use_call_id: bool) -> Result<Vec<Value>> {
@@ -495,13 +391,6 @@ mod tests {
         provider_chat(Some(OpenAiApiVersion::ChatCompletions))
     }
 
-    fn _provider_anthropic() -> Provider {
-        Provider {
-            api_format: ApiFormat::Anthropic,
-            ..provider_chat(None)
-        }
-    }
-
     // ─── clean_schema ─────────────────────────────────────────────────────────
 
     #[test]
@@ -547,8 +436,7 @@ mod tests {
             "messages": [{"role": "user", "content": "Hello"}],
             "max_tokens": 100
         });
-        let out = anthropic_to_openai_chat_completions_request(&req, &provider_chat_completions())
-            .unwrap();
+        let out = anthropic_to_openai_request(&req, &provider_chat_completions()).unwrap();
         assert_eq!(out["model"], "claude-sonnet-4-20250514");
         assert_eq!(out["messages"][0]["role"], "user");
         assert_eq!(out["messages"][0]["content"], "Hello");
@@ -563,8 +451,7 @@ mod tests {
             "messages": [{"role": "user", "content": "Hi"}],
             "max_tokens": 50
         });
-        let out = anthropic_to_openai_chat_completions_request(&req, &provider_chat_completions())
-            .unwrap();
+        let out = anthropic_to_openai_request(&req, &provider_chat_completions()).unwrap();
         assert_eq!(out["messages"][0]["role"], "system");
         assert_eq!(out["messages"][0]["content"], "You are helpful.");
         assert_eq!(out["messages"][1]["role"], "user");
@@ -578,8 +465,7 @@ mod tests {
             "messages": [{"role": "user", "content": "Hi"}],
             "max_tokens": 10
         });
-        let out = anthropic_to_openai_chat_completions_request(&req, &provider_chat_completions())
-            .unwrap();
+        let out = anthropic_to_openai_request(&req, &provider_chat_completions()).unwrap();
         assert_eq!(out["messages"][0]["content"], "line1\nline2");
     }
 
@@ -595,7 +481,7 @@ mod tests {
             "messages": [{"role": "user", "content": "Hi"}],
             "max_tokens": 10
         });
-        let out = anthropic_to_openai_chat_completions_request(&req, &p).unwrap();
+        let out = anthropic_to_openai_request(&req, &p).unwrap();
         assert_eq!(out["model"], "openrouter/claude-sonnet-4");
     }
 
@@ -607,8 +493,7 @@ mod tests {
             "max_tokens": 10,
             "stop_sequences": ["END", "STOP"]
         });
-        let out = anthropic_to_openai_chat_completions_request(&req, &provider_chat_completions())
-            .unwrap();
+        let out = anthropic_to_openai_request(&req, &provider_chat_completions()).unwrap();
         assert_eq!(out["stop"], json!(["END", "STOP"]));
     }
 
@@ -620,8 +505,7 @@ mod tests {
             "max_tokens": 10,
             "stream": true
         });
-        let out = anthropic_to_openai_chat_completions_request(&req, &provider_chat_completions())
-            .unwrap();
+        let out = anthropic_to_openai_request(&req, &provider_chat_completions()).unwrap();
         assert_eq!(out["stream_options"]["include_usage"], true);
     }
 
@@ -640,8 +524,7 @@ mod tests {
                 }
             }]
         });
-        let out = anthropic_to_openai_chat_completions_request(&req, &provider_chat_completions())
-            .unwrap();
+        let out = anthropic_to_openai_request(&req, &provider_chat_completions()).unwrap();
         let tool = &out["tools"][0];
         assert_eq!(tool["type"], "function");
         assert_eq!(tool["function"]["name"], "get_weather");
@@ -657,8 +540,7 @@ mod tests {
             "tools": [{"name": "t", "description": "", "input_schema": {"type": "object"}}],
             "tool_choice": {"type": "any"}
         });
-        let out = anthropic_to_openai_chat_completions_request(&req, &provider_chat_completions())
-            .unwrap();
+        let out = anthropic_to_openai_request(&req, &provider_chat_completions()).unwrap();
         assert_eq!(out["tool_choice"], "required");
     }
 
@@ -671,8 +553,7 @@ mod tests {
             "tools": [{"name": "search", "description": "", "input_schema": {"type": "object"}}],
             "tool_choice": {"type": "tool", "name": "search"}
         });
-        let out = anthropic_to_openai_chat_completions_request(&req, &provider_chat_completions())
-            .unwrap();
+        let out = anthropic_to_openai_request(&req, &provider_chat_completions()).unwrap();
         assert_eq!(out["tool_choice"]["type"], "function");
         assert_eq!(out["tool_choice"]["function"]["name"], "search");
     }
@@ -685,8 +566,7 @@ mod tests {
             "max_tokens": 10,
             "thinking": {"enabled": true, "budget_tokens": 2000}
         });
-        let out = anthropic_to_openai_chat_completions_request(&req, &provider_chat_completions())
-            .unwrap();
+        let out = anthropic_to_openai_request(&req, &provider_chat_completions()).unwrap();
         assert_eq!(out["reasoning_effort"], "high");
         assert_eq!(out["max_completion_tokens"], 2000);
     }
@@ -706,8 +586,7 @@ mod tests {
             }],
             "max_tokens": 10
         });
-        let out = anthropic_to_openai_chat_completions_request(&req, &provider_chat_completions())
-            .unwrap();
+        let out = anthropic_to_openai_request(&req, &provider_chat_completions()).unwrap();
         let msg = &out["messages"][0];
         assert_eq!(msg["role"], "assistant");
         let tc = &msg["tool_calls"][0];
@@ -729,8 +608,7 @@ mod tests {
             }],
             "max_tokens": 10
         });
-        let out = anthropic_to_openai_chat_completions_request(&req, &provider_chat_completions())
-            .unwrap();
+        let out = anthropic_to_openai_request(&req, &provider_chat_completions()).unwrap();
         let msg = &out["messages"][0];
         assert_eq!(msg["role"], "tool");
         assert_eq!(msg["tool_call_id"], "call-1");
@@ -746,7 +624,7 @@ mod tests {
             "messages": [{"role": "user", "content": "Hi"}],
             "max_tokens": 10
         });
-        let out = anthropic_to_openai_responses_request(&req, &provider_responses()).unwrap();
+        let out = anthropic_to_openai_request(&req, &provider_responses()).unwrap();
         assert!(out.get("input").is_some(), "Responses API must use 'input'");
         assert!(out.get("messages").is_none());
     }
@@ -765,7 +643,7 @@ mod tests {
             }],
             "max_tokens": 10
         });
-        let out = anthropic_to_openai_responses_request(&req, &provider_responses()).unwrap();
+        let out = anthropic_to_openai_request(&req, &provider_responses()).unwrap();
         let msg = &out["input"][0];
         assert_eq!(msg["call_id"], "call-42");
         assert!(msg.get("tool_call_id").is_none());

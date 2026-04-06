@@ -203,32 +203,12 @@ impl StreamState {
         if let Some(reasoning) = delta.get("reasoning_content").and_then(|r| r.as_str())
             && !reasoning.is_empty()
         {
-            if self.current_block_type.as_ref() != Some(&BlockType::Thinking) {
-                // Close previous block if any
-                events.extend(self.close_current_block());
-                self.current_block_type = Some(BlockType::Thinking);
-                events.push(self.format_event(
-                    "content_block_start",
-                    &json!({
-                        "type": "content_block_start",
-                        "index": self.content_index,
-                        "content_block": {
-                            "type": "thinking",
-                            "thinking": "",
-                        }
-                    }),
-                ));
-            }
-            events.push(self.format_event(
-                "content_block_delta",
-                &json!({
-                    "type": "content_block_delta",
-                    "index": self.content_index,
-                    "delta": {
-                        "type": "thinking_delta",
-                        "thinking": reasoning,
-                    }
-                }),
+            events.extend(self.emit_content_block(
+                BlockType::Thinking,
+                "thinking",
+                "thinking_delta",
+                "thinking",
+                reasoning,
             ));
         }
 
@@ -236,31 +216,12 @@ impl StreamState {
         if let Some(content) = delta.get("content").and_then(|c| c.as_str())
             && !content.is_empty()
         {
-            if self.current_block_type.as_ref() != Some(&BlockType::Text) {
-                events.extend(self.close_current_block());
-                self.current_block_type = Some(BlockType::Text);
-                events.push(self.format_event(
-                    "content_block_start",
-                    &json!({
-                        "type": "content_block_start",
-                        "index": self.content_index,
-                        "content_block": {
-                            "type": "text",
-                            "text": "",
-                        }
-                    }),
-                ));
-            }
-            events.push(self.format_event(
-                "content_block_delta",
-                &json!({
-                    "type": "content_block_delta",
-                    "index": self.content_index,
-                    "delta": {
-                        "type": "text_delta",
-                        "text": content,
-                    }
-                }),
+            events.extend(self.emit_content_block(
+                BlockType::Text,
+                "text",
+                "text_delta",
+                "text",
+                content,
             ));
         }
 
@@ -333,6 +294,46 @@ impl StreamState {
             }
         }
 
+        events
+    }
+
+    /// Open a new content block if needed, then emit a delta event.
+    /// Handles the repeated pattern: check block type → close if different → open → delta.
+    fn emit_content_block(
+        &mut self,
+        block_type: BlockType,
+        block_type_str: &str,
+        delta_type: &str,
+        content_key: &str,
+        content_value: &str,
+    ) -> Vec<String> {
+        let mut events = Vec::new();
+        if self.current_block_type.as_ref() != Some(&block_type) {
+            events.extend(self.close_current_block());
+            self.current_block_type = Some(block_type);
+            events.push(self.format_event(
+                "content_block_start",
+                &json!({
+                    "type": "content_block_start",
+                    "index": self.content_index,
+                    "content_block": {
+                        "type": block_type_str,
+                        block_type_str: "",
+                    }
+                }),
+            ));
+        }
+        events.push(self.format_event(
+            "content_block_delta",
+            &json!({
+                "type": "content_block_delta",
+                "index": self.content_index,
+                "delta": {
+                    "type": delta_type,
+                    content_key: content_value,
+                }
+            }),
+        ));
         events
     }
 
