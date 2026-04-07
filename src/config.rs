@@ -115,10 +115,17 @@ pub struct AppConfig {
     pub fallback: bool,
     #[serde(default)]
     pub db_path: Option<String>,
+    /// Maximum number of recent requests shown in the TUI. Default: 100.
+    #[serde(default = "default_request_log_limit")]
+    pub request_log_limit: usize,
 }
 
 fn default_listen() -> String {
     "127.0.0.1:7896".to_string()
+}
+
+fn default_request_log_limit() -> usize {
+    100
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -340,6 +347,7 @@ fn default_config() -> AppConfig {
         providers: IndexMap::new(),
         fallback: false,
         db_path: None,
+        request_log_limit: default_request_log_limit(),
     }
 }
 

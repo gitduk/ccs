@@ -96,6 +96,17 @@ pub(crate) fn reload_metrics_from_db(app: &mut App) {
     // draw_models already clamps scroll to max_scroll on every frame,
     // so stale offsets are harmless. Resetting would jump the viewport
     // back to the top every time the DB watcher fires.
+
+    // In bg-proxy mode the proxy runs in a separate process and writes its own
+    // in-memory request log. Sync from DB so the TUI sees those entries.
+    if app.bg_proxy_pid.is_some() {
+        let logs = app
+            .db
+            .load_recent_request_logs(app.config.request_log_limit);
+        if let Ok(mut log) = app.request_log.lock() {
+            log.replace(logs);
+        }
+    }
 }
 
 pub(super) fn check_server_status(app: &mut App, server: &mut Option<ServerHandle>) {

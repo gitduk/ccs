@@ -1,4 +1,4 @@
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::config::{ApiFormat, Provider};
 use crate::tui::server::sync_proxy_config;
@@ -8,6 +8,7 @@ use crate::tui::{App, ServerHandle};
 pub(super) fn handle_normal_key(
     app: &mut App,
     code: KeyCode,
+    modifiers: KeyModifiers,
     server: &mut Option<ServerHandle>,
 ) -> crate::error::Result<()> {
     // Clear any status-bar message on next key press.
@@ -178,10 +179,13 @@ pub(super) fn handle_normal_key(
             app.models.selected = 0;
             app.models.scroll = 0;
         }
-        KeyCode::Char('l') => {
+        KeyCode::Char('l') if modifiers.is_empty() => {
             app.mode = Mode::Logs;
             app.logs.selected = 0;
             app.logs.scroll = 0;
+        }
+        KeyCode::Char('l') if modifiers == KeyModifiers::CONTROL => {
+            app.message_log.clear();
         }
         _ => {}
     }

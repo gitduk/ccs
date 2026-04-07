@@ -38,12 +38,13 @@ pub fn open_with_fallback(path: &str) -> SharedDb {
 fn init_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS provider_stats (
-            provider_id   TEXT PRIMARY KEY,
-            provider_name TEXT NOT NULL,
-            input         INTEGER NOT NULL DEFAULT 0,
-            output        INTEGER NOT NULL DEFAULT 0,
-            requests      INTEGER NOT NULL DEFAULT 0,
-            failures      INTEGER NOT NULL DEFAULT 0
+            provider_id       TEXT PRIMARY KEY,
+            provider_name     TEXT NOT NULL,
+            input             INTEGER NOT NULL DEFAULT 0,
+            output            INTEGER NOT NULL DEFAULT 0,
+            requests          INTEGER NOT NULL DEFAULT 0,
+            failures          INTEGER NOT NULL DEFAULT 0,
+            latency_total  INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS model_stats (
             provider_id   TEXT NOT NULL,
@@ -52,8 +53,25 @@ fn init_schema(conn: &Connection) -> Result<()> {
             input         INTEGER NOT NULL DEFAULT 0,
             output        INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (provider_id, model_name)
+        );
+        CREATE TABLE IF NOT EXISTS request_log (
+            id            INTEGER PRIMARY KEY,
+            timestamp_ms  INTEGER NOT NULL,
+            provider_name TEXT NOT NULL,
+            model         TEXT NOT NULL DEFAULT '',
+            status        INTEGER NOT NULL,
+            latency_ms    INTEGER NOT NULL DEFAULT 0,
+            input_tokens  INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            is_stream     INTEGER NOT NULL DEFAULT 0,
+            error         TEXT
         );",
     )?;
+    // Add latency_total column to existing DBs that predate this field.
+    conn.execute_batch(
+        "ALTER TABLE provider_stats ADD COLUMN latency_total INTEGER NOT NULL DEFAULT 0",
+    )
+    .ok(); // Ignore error — column already exists on fresh DBs.
     Ok(())
 }
 
@@ -130,12 +148,13 @@ fn do_migrate(conn: &mut Connection, name_to_id: &HashMap<String, String>) -> Re
         "DROP TABLE IF EXISTS provider_stats;
          DROP TABLE IF EXISTS model_stats;
          CREATE TABLE provider_stats (
-             provider_id   TEXT PRIMARY KEY,
-             provider_name TEXT NOT NULL,
-             input         INTEGER NOT NULL DEFAULT 0,
-             output        INTEGER NOT NULL DEFAULT 0,
-             requests      INTEGER NOT NULL DEFAULT 0,
-             failures      INTEGER NOT NULL DEFAULT 0
+             provider_id       TEXT PRIMARY KEY,
+             provider_name     TEXT NOT NULL,
+             input             INTEGER NOT NULL DEFAULT 0,
+             output            INTEGER NOT NULL DEFAULT 0,
+             requests          INTEGER NOT NULL DEFAULT 0,
+             failures          INTEGER NOT NULL DEFAULT 0,
+             latency_total  INTEGER NOT NULL DEFAULT 0
          );
          CREATE TABLE model_stats (
              provider_id   TEXT NOT NULL,
@@ -183,7 +202,7 @@ pub fn load_metrics(conn: &Connection) -> TokenMetrics {
     let mut metrics = TokenMetrics::default();
 
     if let Ok(mut stmt) =
-        conn.prepare("SELECT provider_name, input, output, requests, failures FROM provider_stats")
+        conn.prepare("SELECT provider_name, input, output, requests, failures, latency_total FROM provider_stats")
     {
         match stmt.query_map([], |row| {
             Ok((
@@ -192,6 +211,7 @@ pub fn load_metrics(conn: &Connection) -> TokenMetrics {
                 row.get::<_, u64>(2)?,
                 row.get::<_, u64>(3)?,
                 row.get::<_, u64>(4)?,
+                row.get::<_, u64>(5)?,
             ))
         }) {
             Ok(rows) => {
@@ -201,6 +221,7 @@ pub fn load_metrics(conn: &Connection) -> TokenMetrics {
                     s.output = row.2;
                     s.failures = row.4;
                     s.requests = row.3;
+                    s.latency_total = row.5;
                 }
             }
             Err(e) => tracing::warn!("Failed to load provider stats: {e}"),
@@ -231,33 +252,30 @@ pub fn load_metrics(conn: &Connection) -> TokenMetrics {
     metrics
 }
 
+/// Deltas passed to `upsert_provider`.
+pub(crate) struct ProviderDelta<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+    pub input: u64,
+    pub output: u64,
+    pub requests: u64,
+    pub failures: u64,
+    pub latency: u64,
+}
+
 /// Accumulate token/request/failure deltas for a provider.
-pub fn upsert_provider(
-    conn: &Connection,
-    provider_id: &str,
-    provider_name: &str,
-    input_delta: u64,
-    output_delta: u64,
-    req_delta: u64,
-    fail_delta: u64,
-) -> Result<()> {
+pub fn upsert_provider(conn: &Connection, d: &ProviderDelta<'_>) -> Result<()> {
     conn.execute(
-        "INSERT INTO provider_stats (provider_id, provider_name, input, output, requests, failures)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO provider_stats (provider_id, provider_name, input, output, requests, failures, latency_total)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(provider_id) DO UPDATE SET
-             provider_name = excluded.provider_name,
-             input    = provider_stats.input    + excluded.input,
-             output   = provider_stats.output   + excluded.output,
-             failures = provider_stats.failures + excluded.failures,
-             requests = provider_stats.requests + excluded.requests",
-        params![
-            provider_id,
-            provider_name,
-            input_delta,
-            output_delta,
-            req_delta,
-            fail_delta
-        ],
+             provider_name    = excluded.provider_name,
+             input            = provider_stats.input    + excluded.input,
+             output           = provider_stats.output   + excluded.output,
+             failures         = provider_stats.failures + excluded.failures,
+             requests         = provider_stats.requests + excluded.requests,
+             latency_total = provider_stats.latency_total + excluded.latency_total",
+        params![d.id, d.name, d.input, d.output, d.requests, d.failures, d.latency],
     )?;
     Ok(())
 }
@@ -332,7 +350,9 @@ pub fn upsert_provider_models(
 
 pub fn clear_all(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
-    tx.execute_batch("DELETE FROM provider_stats; DELETE FROM model_stats;")?;
+    tx.execute_batch(
+        "DELETE FROM provider_stats; DELETE FROM model_stats; DELETE FROM request_log;",
+    )?;
     tx.commit()
 }
 
@@ -349,8 +369,117 @@ pub fn clear_provider(conn: &mut Connection, provider_id: &str) -> Result<()> {
     tx.commit()
 }
 
-#[cfg(test)]
+// ─── Request Log ─────────────────────────────────────────────────────────────
+
+/// Insert a request log entry. Uses the entry's `id` as the primary key so that
+/// in-process and bg-proxy entries share the same ID space within a session.
+pub fn insert_request_log(
+    conn: &Connection,
+    entry: &crate::proxy::metrics::RequestLogEntry,
+) -> Result<()> {
+    let ts = entry
+        .timestamp
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    conn.execute(
+        "INSERT OR IGNORE INTO request_log
+             (id, timestamp_ms, provider_name, model, status, latency_ms,
+              input_tokens, output_tokens, is_stream, error)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            entry.id,
+            ts,
+            entry.provider,
+            entry.model,
+            entry.status,
+            entry.latency_ms,
+            entry.input_tokens,
+            entry.output_tokens,
+            entry.is_stream as i64,
+            entry.error.as_deref(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Update token counts and model name for a streaming request once the stream ends.
+pub fn update_request_log_tokens(
+    conn: &Connection,
+    id: u64,
+    input: u64,
+    output: u64,
+    model: Option<&str>,
+) -> Result<()> {
+    // Always update tokens; update model only when provided.
+    conn.execute(
+        "UPDATE request_log SET input_tokens = ?1, output_tokens = ?2,
+         model = COALESCE(?3, model) WHERE id = ?4",
+        params![input, output, model, id],
+    )?;
+    Ok(())
+}
+
+/// Load the most recent `limit` entries, ordered oldest-first (for TUI display).
+pub fn load_recent_request_logs(
+    conn: &Connection,
+    limit: usize,
+) -> Vec<crate::proxy::metrics::RequestLogEntry> {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT id, timestamp_ms, provider_name, model, status, latency_ms,
+                input_tokens, output_tokens, is_stream, error
+         FROM request_log
+         ORDER BY timestamp_ms DESC, id DESC
+         LIMIT ?1",
+    ) else {
+        return vec![];
+    };
+
+    let rows = stmt.query_map([limit as i64], |row| {
+        let ts_ms: i64 = row.get(1)?;
+        let is_stream: i64 = row.get(8)?;
+        let error: Option<String> = row.get(9)?;
+        Ok(crate::proxy::metrics::RequestLogEntry {
+            id: row.get(0)?,
+            timestamp: std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_millis(ts_ms as u64),
+            provider: row.get(2)?,
+            model: row.get(3)?,
+            status: row.get(4)?,
+            latency_ms: row.get(5)?,
+            input_tokens: row.get(6)?,
+            output_tokens: row.get(7)?,
+            is_stream: is_stream != 0,
+            error,
+        })
+    });
+
+    match rows {
+        Ok(iter) => {
+            let mut v: Vec<_> = iter.flatten().collect();
+            v.reverse(); // oldest-first for TUI
+            v
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load request logs: {e}");
+            vec![]
+        }
+    }
+}
+
+/// Remove old entries, keeping only the most recent `keep` rows.
+pub fn trim_request_log(conn: &Connection, keep: usize) -> Result<()> {
+    conn.execute(
+        "DELETE FROM request_log WHERE id NOT IN (
+             SELECT id FROM request_log ORDER BY timestamp_ms DESC LIMIT ?1
+         )",
+        [keep as i64],
+    )?;
+    Ok(())
+}
+
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
     #[test]
@@ -363,7 +492,19 @@ mod tests {
 
         // Simulate 5 record_failure calls: each should write requests=1, failures=1
         for _ in 0..5 {
-            upsert_provider(&conn, id, name, 0, 0, 1, 1).unwrap();
+            upsert_provider(
+                &conn,
+                &ProviderDelta {
+                    id,
+                    name,
+                    input: 0,
+                    output: 0,
+                    requests: 1,
+                    failures: 1,
+                    latency: 0,
+                },
+            )
+            .unwrap();
         }
 
         let (req, fail): (u64, u64) = conn
@@ -388,11 +529,35 @@ mod tests {
 
         // 3 failures (requests=1, failures=1 each)
         for _ in 0..3 {
-            upsert_provider(&conn, id, name, 0, 0, 1, 1).unwrap();
+            upsert_provider(
+                &conn,
+                &ProviderDelta {
+                    id,
+                    name,
+                    input: 0,
+                    output: 0,
+                    requests: 1,
+                    failures: 1,
+                    latency: 0,
+                },
+            )
+            .unwrap();
         }
         // 2 successes (requests=1, failures=0 each)
         for _ in 0..2 {
-            upsert_provider(&conn, id, name, 100, 50, 1, 0).unwrap();
+            upsert_provider(
+                &conn,
+                &ProviderDelta {
+                    id,
+                    name,
+                    input: 100,
+                    output: 50,
+                    requests: 1,
+                    failures: 0,
+                    latency: 0,
+                },
+            )
+            .unwrap();
         }
 
         let (req, fail, input, output): (u64, u64, u64, u64) = conn
@@ -418,13 +583,37 @@ mod tests {
         let name = "test-provider";
 
         // Accumulate some data
-        upsert_provider(&conn, id, name, 100, 50, 1, 0).unwrap();
+        upsert_provider(
+            &conn,
+            &ProviderDelta {
+                id,
+                name,
+                input: 100,
+                output: 50,
+                requests: 1,
+                failures: 0,
+                latency: 0,
+            },
+        )
+        .unwrap();
         // Clear
         clear_provider(&mut conn, id).unwrap();
 
         // Now simulate 5 failures on fresh state
         for _ in 0..5 {
-            upsert_provider(&conn, id, name, 0, 0, 1, 1).unwrap();
+            upsert_provider(
+                &conn,
+                &ProviderDelta {
+                    id,
+                    name,
+                    input: 0,
+                    output: 0,
+                    requests: 1,
+                    failures: 1,
+                    latency: 0,
+                },
+            )
+            .unwrap();
         }
 
         let (req, fail): (u64, u64) = conn

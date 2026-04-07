@@ -15,6 +15,7 @@ pub(crate) struct StatsDelta {
     pub output: u64,
     pub requests: u64,
     pub failures: u64,
+    pub latency: u64,
 }
 
 impl Repository {
@@ -47,12 +48,15 @@ impl Repository {
         let result = conn.transaction().and_then(|tx| {
             db::upsert_provider(
                 &tx,
-                provider_id,
-                provider_name,
-                delta.input,
-                delta.output,
-                delta.requests,
-                delta.failures,
+                &db::ProviderDelta {
+                    id: provider_id,
+                    name: provider_name,
+                    input: delta.input,
+                    output: delta.output,
+                    requests: delta.requests,
+                    failures: delta.failures,
+                    latency: delta.latency,
+                },
             )?;
             if let Some(model) = model_name {
                 db::upsert_model(
@@ -156,6 +160,65 @@ impl Repository {
             && let Err(e) = db::clear_provider(&mut conn, provider_id)
         {
             tracing::warn!("Failed to clear stats for provider {provider_id}: {e}");
+        }
+    }
+
+    // ─── Request Log ─────────────────────────────────────────────────────────
+
+    /// Fire-and-forget: persist a request log entry, then trim to `keep` rows.
+    /// `keep` should be at least as large as the TUI display limit; a minimum of
+    /// 200 is enforced so a small `request_log_limit` never truncates history too aggressively.
+    pub(crate) fn persist_request_log_async(
+        &self,
+        entry: crate::proxy::metrics::RequestLogEntry,
+        keep: usize,
+    ) {
+        let repo = self.clone();
+        let keep = keep.max(200);
+        tokio::task::spawn_blocking(move || {
+            if let Ok(conn) = repo.0.lock() {
+                if let Err(e) = db::insert_request_log(&conn, &entry) {
+                    tracing::warn!(
+                        provider = %entry.provider,
+                        model = %entry.model,
+                        "Failed to persist request log entry {}: {e}", entry.id
+                    );
+                }
+                db::trim_request_log(&conn, keep).ok();
+            }
+        });
+    }
+
+    /// Fire-and-forget: back-fill token counts for a streaming request.
+    pub(crate) fn update_request_log_tokens_async(
+        &self,
+        id: u64,
+        input: u64,
+        output: u64,
+        model: Option<String>,
+    ) {
+        let repo = self.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Ok(conn) = repo.0.lock()
+                && let Err(e) =
+                    db::update_request_log_tokens(&conn, id, input, output, model.as_deref())
+            {
+                tracing::warn!("Failed to update request log tokens for id {id}: {e}");
+            }
+        });
+    }
+
+    /// Load the most recent `limit` request log entries (oldest-first).
+    pub fn load_recent_request_logs(
+        &self,
+        limit: usize,
+    ) -> Vec<crate::proxy::metrics::RequestLogEntry> {
+        match self.0.lock() {
+            Ok(conn) => db::load_recent_request_logs(&conn, limit),
+            Err(_) => {
+                tracing::warn!("DB mutex poisoned in load_recent_request_logs");
+                vec![]
+            }
         }
     }
 }

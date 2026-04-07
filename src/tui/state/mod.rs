@@ -54,7 +54,6 @@ pub enum MessageKind {
 pub struct MessageEntry {
     pub text: String,
     pub kind: MessageKind,
-    pub time: std::time::SystemTime,
 }
 
 #[derive(Debug, Clone, PartialEq)]

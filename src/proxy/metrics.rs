@@ -19,8 +19,7 @@ pub struct ProviderStats {
     pub requests: u64,
     pub failures: u64,
     /// Cumulative latency of successful requests (ms); divide by requests for avg.
-    /// Not persisted to DB — resets on restart.
-    pub latency_ms_total: u64,
+    pub latency_total: u64,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -118,6 +117,11 @@ impl RequestLog {
 
     pub fn entries_mut(&mut self) -> &mut VecDeque<RequestLogEntry> {
         &mut self.entries
+    }
+
+    /// Replace all in-memory entries (used by TUI to sync from DB in bg-proxy mode).
+    pub fn replace(&mut self, entries: Vec<RequestLogEntry>) {
+        self.entries = entries.into_iter().collect();
     }
 }
 

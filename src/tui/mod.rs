@@ -49,7 +49,9 @@ pub fn run_tui() -> Result<()> {
 
     let (db_change_rx, _watcher) = start_db_watcher(&app).unzip();
 
-    start_server_background(&mut app, &mut server);
+    if app.bg_proxy_pid.is_none() {
+        start_server_background(&mut app, &mut server);
+    }
     start_background_tests(&mut app);
 
     let result = run_loop(&mut terminal, &mut app, &mut server, db_change_rx);

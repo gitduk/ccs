@@ -302,30 +302,41 @@ async fn try_providers(
             return Ok((status, [("content-type", "application/json")], error_body).into_response());
         }
 
-        let latency_ms = t0.elapsed().as_millis() as u64;
+        let latency = t0.elapsed().as_millis() as u64;
         if let Ok(mut m) = state.metrics.lock() {
             m.clear_error(provider_name);
             m.by_provider
                 .entry(provider_name.clone())
                 .or_default()
-                .latency_ms_total += latency_ms;
+                .latency_total += latency;
         }
         // Log successful requests — tokens will be filled in by the response handlers,
         // but we log the entry here for latency and provider info. For buffered responses,
         // handle_buffered_response updates the log entry with token counts.
+        let initial_entry = RequestLogEntry {
+            id: 0, // assigned by push()
+            timestamp: std::time::SystemTime::now(),
+            provider: provider_name.clone(),
+            model: req_model_hint.clone(),
+            status: status_u16,
+            latency_ms: latency,
+            input_tokens: 0,
+            output_tokens: 0,
+            is_stream: ctx.is_stream,
+            error: None,
+        };
         let entry_id = if let Ok(mut log) = state.request_log.lock() {
-            log.push(RequestLogEntry {
-                id: 0, // assigned by push()
-                timestamp: std::time::SystemTime::now(),
-                provider: provider_name.clone(),
-                model: req_model_hint.clone(),
-                status: status_u16,
-                latency_ms,
-                input_tokens: 0,
-                output_tokens: 0,
-                is_stream: ctx.is_stream,
-                error: None,
-            })
+            let id = log.push(initial_entry.clone());
+            if ctx.is_stream {
+                // For streaming, persist now with zero tokens; tokens are back-filled
+                // via update_request_log_tokens_async once the stream ends.
+                let mut persisted = initial_entry.clone();
+                persisted.id = id;
+                state.db.persist_request_log_async(persisted, 200);
+            }
+            // For buffered responses, the full entry (with tokens) is persisted inside
+            // handle_buffered_response — no two-phase write needed.
+            id
         } else {
             0
         };
@@ -337,6 +348,7 @@ async fn try_providers(
                 pkey,
                 &state.request_log,
                 entry_id,
+                latency,
             )
             .await
         } else {
@@ -346,7 +358,7 @@ async fn try_providers(
                 state.db.clone(),
                 pkey,
                 &state.request_log,
-                entry_id,
+                initial_entry,
             )
             .await
         };
@@ -354,19 +366,23 @@ async fn try_providers(
 
     // All providers failed — log the final failure.
     let final_status = last_status.unwrap_or(StatusCode::BAD_GATEWAY);
+    let failed_entry = RequestLogEntry {
+        id: 0,
+        timestamp: std::time::SystemTime::now(),
+        provider: pool.first().map(|(n, _)| n.clone()).unwrap_or_default(),
+        model: req_model_hint,
+        status: final_status.as_u16(),
+        latency_ms: t0.elapsed().as_millis() as u64,
+        input_tokens: 0,
+        output_tokens: 0,
+        is_stream: ctx.is_stream,
+        error: Some("all providers failed".into()),
+    };
     if let Ok(mut log) = state.request_log.lock() {
-        log.push(RequestLogEntry {
-            id: 0, // assigned by push()
-            timestamp: std::time::SystemTime::now(),
-            provider: pool.first().map(|(n, _)| n.clone()).unwrap_or_default(),
-            model: req_model_hint,
-            status: final_status.as_u16(),
-            latency_ms: t0.elapsed().as_millis() as u64,
-            input_tokens: 0,
-            output_tokens: 0,
-            is_stream: ctx.is_stream,
-            error: Some("all providers failed".into()),
-        });
+        let id = log.push(failed_entry.clone());
+        let mut persisted = failed_entry;
+        persisted.id = id;
+        state.db.persist_request_log_async(persisted, 200);
     }
 
     Ok((
@@ -430,8 +446,9 @@ async fn handle_buffered_response(
     db: Repository,
     pkey: ProviderKey,
     request_log: &crate::proxy::metrics::SharedRequestLog,
-    entry_id: u64,
+    mut log_entry: RequestLogEntry,
 ) -> Result<Response, AppError> {
+    let entry_id = log_entry.id;
     let ProviderKey {
         id: provider_id,
         name: provider_name,
@@ -465,6 +482,7 @@ async fn handle_buffered_response(
             requests: 1,
             input,
             output,
+            latency: log_entry.latency_ms,
             ..Default::default()
         },
     );
@@ -472,6 +490,16 @@ async fn handle_buffered_response(
     // Back-fill token counts on the log entry we created before sending.
     if let Ok(mut log) = request_log.lock() {
         log.backfill(entry_id, input, output, model.as_deref());
+    }
+    // Persist the complete entry in one shot — no two-phase write, no race condition.
+    if entry_id != 0 {
+        log_entry.id = entry_id;
+        log_entry.input_tokens = input;
+        log_entry.output_tokens = output;
+        if let Some(ref m) = model {
+            log_entry.model = m.clone();
+        }
+        db.persist_request_log_async(log_entry, 200);
     }
 
     Ok((
@@ -490,6 +518,7 @@ async fn handle_streaming_response(
     pkey: ProviderKey,
     request_log: &SharedRequestLog,
     entry_id: u64,
+    latency: u64,
 ) -> Result<Response, AppError> {
     let raw_stream: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>> =
         if !is_openai {
@@ -503,7 +532,8 @@ async fn handle_streaming_response(
             Box::pin(transform::openai_stream_to_anthropic(response))
         };
 
-    let tracked = track_tokens_in_stream(raw_stream, db, pkey, request_log.clone(), entry_id);
+    let tracked =
+        track_tokens_in_stream(raw_stream, db, pkey, request_log.clone(), entry_id, latency);
     let body = Body::from_stream(tracked);
 
     Response::builder()
@@ -522,6 +552,7 @@ fn track_tokens_in_stream(
     pkey: ProviderKey,
     request_log: SharedRequestLog,
     entry_id: u64,
+    latency: u64,
 ) -> impl futures::Stream<Item = std::io::Result<Bytes>> + Send {
     let provider_id = pkey.id;
     let provider_name = pkey.name;
@@ -585,6 +616,7 @@ fn track_tokens_in_stream(
                 requests: 1,
                 input: input_tokens,
                 output: output_tokens,
+                latency,
                 ..Default::default()
             },
         );
@@ -592,6 +624,9 @@ fn track_tokens_in_stream(
         // Back-fill token counts into the request log entry we created before streaming.
         if let Ok(mut log) = request_log.lock() {
             log.backfill(entry_id, input_tokens, output_tokens, model.as_deref());
+        }
+        if entry_id != 0 {
+            db.update_request_log_tokens_async(entry_id, input_tokens, output_tokens, model);
         }
     }
 }

@@ -39,35 +39,15 @@ pub(super) fn draw_logs(f: &mut Frame, app: &mut App) {
     let mut lines: Vec<Line> = Vec::new();
 
     // Header — col widths: Status(8) Latency(10) Provider(11) Model(32) In(8) Out(8) Time(8)
+    let hdr = Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD);
     lines.push(Line::from(vec![
-        Span::styled(
-            format!("{:<7}", "Status"),
-            Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{:<10}", "Latency"),
-            Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{:<11}", "Provider"),
-            Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{:<32}", "Model"),
-            Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{:<6}", "In"),
-            Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{:<6}", "Out"),
-            Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "Age",
-            Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(format!("{:<7}", "Status"), hdr),
+        Span::styled(format!("{:<10}", "Latency"), hdr),
+        Span::styled(format!("{:<11}", "Provider"), hdr),
+        Span::styled(format!("{:<32}", "Model"), hdr),
+        Span::styled(format!("{:<6}", "In"), hdr),
+        Span::styled(format!("{:<6}", "Out"), hdr),
+        Span::styled("Age", hdr),
     ]));
 
     let viewport_height = inner.height.saturating_sub(1) as usize; // minus header
@@ -169,7 +149,7 @@ fn make_dash_title<'a>(title: &'static str, width: usize) -> Line<'a> {
 }
 
 /// Renders the Messages sub-panel (newest entry at the bottom).
-/// Format per line: `age  message` — age is right-aligned in 3 chars.
+/// Long messages wrap onto continuation lines with a 2-space indent.
 fn draw_messages_content(f: &mut Frame, app: &App, area: Rect) {
     if area.height == 0 {
         return;
@@ -178,30 +158,35 @@ fn draw_messages_content(f: &mut Frame, app: &App, area: Rect) {
     let width = area.width as usize;
     let title_line = make_dash_title("Messages", width);
 
+    let msg_width = width;
     let visible_rows = area.height.saturating_sub(1) as usize; // minus title line
-    let total = app.message_log.len();
-    let skip = total.saturating_sub(visible_rows);
 
     let mut lines: Vec<Line> = vec![title_line];
 
-    if total == 0 {
-        lines.push(Line::from(Span::styled("  no messages yet", muted)));
+    if app.message_log.is_empty() {
+        lines.push(Line::from(Span::styled("no messages yet", muted)));
     } else {
-        let msg_width = width.saturating_sub(6); // 3 age + 2 gap + 1 spare
-        for entry in app.message_log.iter().skip(skip) {
-            let age = format!("{:>3}", format_time(entry.time));
-            let text = truncate(&entry.text, msg_width);
+        // Build wrapped lines from newest-last, keeping only what fits.
+        // We iterate in reverse to fill from the bottom up, then reverse the result.
+        let mut collected: Vec<Line> = Vec::new();
+        'outer: for entry in app.message_log.iter().rev() {
             let msg_style = match entry.kind {
                 MessageKind::Error => Style::default().fg(t::ERROR),
                 MessageKind::Success => Style::default().fg(t::SUCCESS),
                 MessageKind::Info => muted,
             };
-            lines.push(Line::from(vec![
-                Span::styled(age, muted),
-                Span::raw("  "),
-                Span::styled(text, msg_style),
-            ]));
+            // Split text into chunks of msg_width characters.
+            let chunks = wrap_text(&entry.text, msg_width);
+            // Walk chunks in reverse (last chunk first) so we can break early.
+            for (_ci, chunk) in chunks.iter().enumerate().rev() {
+                if collected.len() >= visible_rows {
+                    break 'outer;
+                }
+                collected.push(Line::from(vec![Span::styled(chunk.clone(), msg_style)]));
+            }
         }
+        collected.reverse();
+        lines.extend(collected);
     }
 
     f.render_widget(Paragraph::new(lines), area);
@@ -317,6 +302,31 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         format!("{}…", &s[..max.saturating_sub(1)])
     }
+}
+
+/// Split `s` into lines of at most `max` bytes, breaking on char boundaries.
+fn wrap_text(s: &str, max: usize) -> Vec<String> {
+    if max == 0 {
+        return vec![s.to_string()];
+    }
+    let mut chunks = Vec::new();
+    let mut remaining = s;
+    while !remaining.is_empty() {
+        // Find the largest char-boundary split point within `max` bytes.
+        let split = if remaining.len() <= max {
+            remaining.len()
+        } else {
+            // Walk back from max until we land on a char boundary.
+            let mut pos = max;
+            while !remaining.is_char_boundary(pos) {
+                pos -= 1;
+            }
+            pos
+        };
+        chunks.push(remaining[..split].to_string());
+        remaining = &remaining[split..];
+    }
+    chunks
 }
 
 fn format_time(ts: std::time::SystemTime) -> String {

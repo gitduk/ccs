@@ -171,11 +171,11 @@ pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect, right_borde
             Span::styled("  Avg ", muted),
             {
                 let avg = if s.requests > 0 {
-                    fmt_latency(s.latency_ms_total / s.requests)
+                    fmt_latency(s.latency_total / s.requests)
                 } else {
                     "—".to_string()
                 };
-                Span::styled(avg, Style::default().fg(t::TEXT))
+                Span::styled(format!("{:>6}", avg), Style::default().fg(t::TEXT))
             },
         ])
     }));

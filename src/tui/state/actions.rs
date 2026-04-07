@@ -185,6 +185,12 @@ impl App {
         if let Ok(mut m) = self.metrics.lock() {
             m.last_error.clear();
         }
+        // Clear in-process request log (bg proxy mode syncs via reload_metrics_from_db below).
+        if self.bg_proxy_pid.is_none()
+            && let Ok(mut log) = self.request_log.lock()
+        {
+            log.replace(vec![]);
+        }
         // Reload immediately so the TUI reflects the cleared state right away
         // instead of waiting up to ~1s for the next periodic reload.
         crate::tui::event_loop::reload_metrics_from_db(self);

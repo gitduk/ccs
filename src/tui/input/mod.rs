@@ -31,7 +31,7 @@ pub(super) fn handle_key(
     server: &mut Option<ServerHandle>,
 ) -> crate::error::Result<()> {
     match &app.mode {
-        Mode::Normal => normal::handle_normal_key(app, code, server),
+        Mode::Normal => normal::handle_normal_key(app, code, modifiers, server),
         Mode::Editing => editor::handle_editing_key(app, code, modifiers, server),
         Mode::Confirm => confirm::handle_confirm_key(app, code, server),
         Mode::Help => {

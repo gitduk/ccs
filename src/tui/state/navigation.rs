@@ -144,11 +144,8 @@ impl App {
 
     pub fn push_message_log(&mut self, text: String, kind: MessageKind) {
         const MAX_MESSAGES: usize = 100;
-        self.message_log.push_back(super::MessageEntry {
-            text,
-            kind,
-            time: std::time::SystemTime::now(),
-        });
+        self.message_log
+            .push_back(super::MessageEntry { text, kind });
         if self.message_log.len() > MAX_MESSAGES {
             self.message_log.pop_front();
         }

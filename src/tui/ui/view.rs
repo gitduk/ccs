@@ -270,16 +270,15 @@ pub(super) fn draw_provider_table(f: &mut Frame, app: &mut App, area: Rect, righ
         .max("Name".width());
     let name_col = (max_name_len + 2 + 4) as u16;
 
+    let hdr = Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD);
     let mut header_cells = vec![
-        Cell::from("Name").style(Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD)),
-        Cell::from("Format").style(Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD)),
-        Cell::from("Base URL").style(Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD)),
-        Cell::from("API Key").style(Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD)),
+        Cell::from("Name").style(hdr),
+        Cell::from("Format").style(hdr),
+        Cell::from("Base URL").style(hdr),
+        Cell::from("API Key").style(hdr),
     ];
     if has_notes {
-        header_cells.push(
-            Cell::from("Notes").style(Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD)),
-        );
+        header_cells.push(Cell::from("Notes").style(hdr));
     }
     let header = Row::new(header_cells).height(1);
 
