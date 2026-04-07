@@ -6,6 +6,8 @@ use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 
 use super::super::state::{App, MessageKind};
 use super::super::theme::{self as t};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
 use super::format::{fmt_latency, format_tokens, shorten_model_name};
 use super::layout::{BORDER_INNER_DIVIDER, DASH, TITLE_SIDE, centered_rect};
 
@@ -238,7 +240,7 @@ fn draw_requests_content(f: &mut Frame, app: &App, area: Rect) {
                 muted.add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("{:<18}", "Provider/Model"),
+                format!("{:<15}", "Provider/Model"),
                 muted.add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -257,7 +259,7 @@ fn draw_requests_content(f: &mut Frame, app: &App, area: Rect) {
         };
         let provider_model = truncate(
             &format!("{}/{}", entry.provider, shorten_model_name(&entry.model)),
-            17,
+            14,
         );
         lines.push(Line::from(vec![
             Span::styled(format!("{:<7}", entry.status), status_style),
@@ -266,7 +268,7 @@ fn draw_requests_content(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(t::TEXT),
             ),
             Span::styled(
-                format!("{:<18}", provider_model),
+                format!("{:<15}", provider_model),
                 Style::default().fg(t::TEXT),
             ),
             Span::styled(
@@ -296,15 +298,30 @@ fn draw_footer(f: &mut Frame, area: Rect, text: &str) {
     );
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max.saturating_sub(1)])
-    }
+/// Display column width of `s`, using the same unicode-width table ratatui uses.
+fn display_width(s: &str) -> usize {
+    s.width()
 }
 
-/// Split `s` into lines of at most `max` bytes, breaking on char boundaries.
+fn truncate(s: &str, max: usize) -> String {
+    if display_width(s) <= max {
+        return s.to_string();
+    }
+    // Take chars until adding the next one would exceed max-1 (leaving room for '…').
+    let mut w = 0usize;
+    let mut end = 0usize;
+    for (i, ch) in s.char_indices() {
+        let cw = ch.width().unwrap_or(0);
+        if w + cw > max.saturating_sub(1) {
+            break;
+        }
+        w += cw;
+        end = i + ch.len_utf8();
+    }
+    format!("{}…", &s[..end])
+}
+
+/// Split `s` into lines of at most `max` display columns, matching ratatui's rendering.
 fn wrap_text(s: &str, max: usize) -> Vec<String> {
     if max == 0 {
         return vec![s.to_string()];
@@ -312,17 +329,21 @@ fn wrap_text(s: &str, max: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut remaining = s;
     while !remaining.is_empty() {
-        // Find the largest char-boundary split point within `max` bytes.
-        let split = if remaining.len() <= max {
-            remaining.len()
-        } else {
-            // Walk back from max until we land on a char boundary.
-            let mut pos = max;
-            while !remaining.is_char_boundary(pos) {
-                pos -= 1;
+        if display_width(remaining) <= max {
+            chunks.push(remaining.to_string());
+            break;
+        }
+        // Accumulate chars until adding the next would exceed `max` display columns.
+        let mut w = 0usize;
+        let mut split = remaining.len();
+        for (i, ch) in remaining.char_indices() {
+            let cw = ch.width().unwrap_or(0);
+            if w + cw > max {
+                split = i;
+                break;
             }
-            pos
-        };
+            w += cw;
+        }
         chunks.push(remaining[..split].to_string());
         remaining = &remaining[split..];
     }

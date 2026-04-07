@@ -95,7 +95,7 @@ fn detail_panel_height(app: &App, route_avail: usize) -> u16 {
 }
 
 pub(super) fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
-    const LOGS_PANEL_WIDTH: u16 = 47;
+    const LOGS_PANEL_WIDTH: u16 = 44;
     const MIN_WIDTH_FOR_SPLIT: u16 = 120;
     let split = area.width >= MIN_WIDTH_FOR_SPLIT;
 
