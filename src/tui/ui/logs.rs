@@ -1,5 +1,5 @@
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
@@ -110,8 +110,6 @@ pub(super) fn draw_logs(f: &mut Frame, app: &mut App) {
 }
 
 /// Embedded right-column panel: Messages (top) + Recent Requests (bottom).
-/// `messages_height` is set by the caller to `table_height + detail_height` so that
-/// the Recent Requests title aligns with By Provider on the left column.
 pub(super) fn draw_logs_panel(f: &mut Frame, app: &App, area: Rect, messages_height: u16) {
     let block = Block::default()
         .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
@@ -125,14 +123,13 @@ pub(super) fn draw_logs_panel(f: &mut Frame, app: &App, area: Rect, messages_hei
         return;
     }
 
-    let splits = Layout::default()
-        .direction(Direction::Vertical)
+    let chunks = ratatui::layout::Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
         .constraints([Constraint::Length(messages_height), Constraint::Min(0)])
         .split(inner);
-    let (msg_area, req_area) = (splits[0], splits[1]);
 
-    draw_messages_content(f, app, msg_area);
-    draw_requests_content(f, app, req_area);
+    draw_messages_content(f, app, chunks[0]);
+    draw_requests_content(f, app, chunks[1]);
 }
 
 fn make_dash_title<'a>(title: &'static str, width: usize) -> Line<'a> {
@@ -232,19 +229,15 @@ fn draw_requests_content(f: &mut Frame, app: &App, area: Rect) {
         title_line,
         Line::from(vec![
             Span::styled(
-                format!("{:<7}", "Status"),
+                format!("{:<11}", "Response"),
                 muted.add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("{:<8}", "Latency"),
+                format!("{:<18}", "Provider/Model"),
                 muted.add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("{:<15}", "Provider/Model"),
-                muted.add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{:<7}", "Tokens"),
+                format!("{:<8}", "Tokens"),
                 muted.add_modifier(Modifier::BOLD),
             ),
             Span::styled("Age", muted.add_modifier(Modifier::BOLD)),
@@ -257,23 +250,23 @@ fn draw_requests_content(f: &mut Frame, app: &App, area: Rect) {
         } else {
             Style::default().fg(t::SUCCESS)
         };
+        let response = truncate(
+            &format!("{} {}", entry.status, fmt_latency(entry.latency_ms)),
+            11,
+        );
         let provider_model = truncate(
             &format!("{}/{}", entry.provider, shorten_model_name(&entry.model)),
-            14,
+            16,
         );
         lines.push(Line::from(vec![
-            Span::styled(format!("{:<7}", entry.status), status_style),
+            Span::styled(format!("{:<11}", response), status_style),
             Span::styled(
-                format!("{:<8}", fmt_latency(entry.latency_ms)),
-                Style::default().fg(t::TEXT),
-            ),
-            Span::styled(
-                format!("{:<15}", provider_model),
+                format!("{:<18}", provider_model),
                 Style::default().fg(t::TEXT),
             ),
             Span::styled(
                 format!(
-                    "{:<7}",
+                    "{:<8}",
                     format_tokens(entry.input_tokens + entry.output_tokens)
                 ),
                 muted,

@@ -610,6 +610,7 @@ mod tests {
             providers: map,
             fallback: false,
             db_path: None,
+            request_log_limit: 100,
         }
     }
 

@@ -1,5 +1,5 @@
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Padding, Paragraph, Row, Table};
@@ -10,7 +10,7 @@ use super::super::theme::{self as t};
 use super::format::fmt_latency;
 use super::format::truncate_error;
 use super::format::{api_key_display_len, col_width, config_path_display, masked_api_key};
-use super::layout::{BORDER_DASHED_TOP, ROUTE_LABEL_WIDTH, pack_routes};
+use super::layout::{BORDER_DASHED_TOP, PanelId, ROUTE_LABEL_WIDTH, pack_routes, plan_main_screen};
 use super::logs::draw_logs_panel;
 use super::stats_panel::draw_stats_panel;
 use crate::tester::TestStatus;
@@ -58,141 +58,20 @@ fn make_table_titles(app: &App) -> (Line<'static>, Line<'static>) {
     (left, right)
 }
 
-/// Compute the height (in lines) needed by the detail panel.
-///
-/// This mirrors the line-building logic in [`draw_detail_panel`] so that
-/// `draw_main` can allocate an exact `Constraint::Length`.  When adding new
-/// lines to the detail panel, update this function as well.
-fn detail_panel_height(app: &App, route_avail: usize) -> u16 {
-    // No provider selected: blank + "Info" title = 2
-    if app.providers.names.is_empty() {
-        return 2;
-    }
-
-    // Base lines present for every provider:
-    //   1  blank line
-    //   1  "Info" title
-    //   1  Status / "Press [t]" line
-    let base: u16 = 3;
-
-    // Route lines only — errors and toasts moved to the Messages panel.
-    let max_routes: u16 = app
-        .config
-        .providers
-        .values()
-        .map(|p| {
-            let enabled: Vec<_> = p.routes.iter().filter(|r| r.enabled).collect();
-            if enabled.is_empty() {
-                0u16
-            } else {
-                pack_routes(&enabled, route_avail).len() as u16
-            }
-        })
-        .max()
-        .unwrap_or(0);
-
-    base + max_routes
-}
-
 pub(super) fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
-    const LOGS_PANEL_WIDTH: u16 = 44;
-    const MIN_WIDTH_FOR_SPLIT: u16 = 120;
-    let split = area.width >= MIN_WIDTH_FOR_SPLIT;
+    let plan = plan_main_screen(app, area);
 
-    // Left column is narrower when the right logs panel is visible.
-    let left_width = if split {
-        area.width.saturating_sub(LOGS_PANEL_WIDTH) as usize
-    } else {
-        area.width as usize
-    };
-
-    let table_height = (app.providers.names.len() as u16 + 2)
-        .max(3)
-        .min(area.height * 2 / 3);
-    // detail panel: LEFT+RIGHT border (2) + horizontal padding (2) = 4 overhead
-    let detail_inner_width = left_width.saturating_sub(4);
-    let route_avail = detail_inner_width.saturating_sub(ROUTE_LABEL_WIDTH);
-    let detail_height = detail_panel_height(app, route_avail);
-    // stats: blank + title + N provider rows + bottom border
-    let n_providers = app.providers.names.len() as u16;
-    let stats_min_height = 3 + n_providers;
-    // model: blank + title + N active rows + inactive grid rows + bottom border
-    // Single lock acquisition; single pass over provider_models — no String clones.
-    let (n_active, n_inactive): (u16, u16) = {
-        if let Ok(m) = app.metrics.lock() {
-            let n_active = m
-                .by_model
-                .values()
-                .filter(|s| s.input + s.output > 0)
-                .count() as u16;
-
-            // One pass: count inactive models (unique by name) and find max width.
-            let mut inactive: std::collections::HashSet<&str> = std::collections::HashSet::new();
-            let mut max_name = 1usize;
-            for name in app.models.provider_models.values().flat_map(|v| v.iter()) {
-                let w = name.width();
-                if w > max_name {
-                    max_name = w;
-                }
-                if !m.by_model.contains_key(name.as_str()) {
-                    inactive.insert(name.as_str());
-                }
-            }
-
-            // Estimate grid rows: inactive models laid out with max_name+2 cell width.
-            let cols = (left_width.saturating_sub(4) / (max_name + 2)).max(1);
-            let n_inactive = inactive.len().div_ceil(cols) as u16;
-            (n_active, n_inactive)
-        } else {
-            (0, 0)
+    for placement in &plan.left {
+        match placement.id {
+            PanelId::Providers => draw_provider_table(f, app, placement.area, !plan.split),
+            PanelId::Detail => draw_detail_panel(f, app, placement.area, !plan.split),
+            PanelId::Stats => draw_stats_panel(f, app, placement.area, !plan.split),
+            PanelId::Logs => {}
         }
-    };
-    let model_min_height = (3 + n_active + if n_inactive > 0 { n_inactive + 1 } else { 0 }).max(3);
-
-    let leftover = area.height.saturating_sub(table_height + detail_height);
-    let show_stats = leftover >= stats_min_height;
-
-    let mut left_constraints = vec![
-        Constraint::Length(table_height),
-        Constraint::Length(detail_height),
-    ];
-    if show_stats {
-        left_constraints.push(Constraint::Min(stats_min_height + model_min_height));
-    } else {
-        left_constraints.push(Constraint::Min(0));
     }
 
-    if split {
-        // Horizontal split at the top level so the right column spans the full height.
-        let lr = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(0), Constraint::Length(LOGS_PANEL_WIDTH)])
-            .split(area);
-
-        let left_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(left_constraints)
-            .split(lr[0]);
-
-        draw_provider_table(f, app, left_chunks[0], false);
-        draw_detail_panel(f, app, left_chunks[1], false);
-        if show_stats {
-            draw_stats_panel(f, app, left_chunks[2], false);
-        }
-        // When stats are visible, +1 accounts for the blank line before "By Provider".
-        let align_bonus = if show_stats { 1 } else { 0 };
-        draw_logs_panel(f, app, lr[1], table_height + detail_height + align_bonus);
-    } else {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(left_constraints)
-            .split(area);
-
-        draw_provider_table(f, app, chunks[0], true);
-        draw_detail_panel(f, app, chunks[1], true);
-        if show_stats {
-            draw_stats_panel(f, app, chunks[2], true);
-        }
+    if let Some(logs) = plan.logs {
+        draw_logs_panel(f, app, logs.area, plan.top_height);
     }
 }
 
