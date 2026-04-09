@@ -352,12 +352,15 @@ async fn try_providers(
             handle_streaming_response(
                 response,
                 is_openai,
-                state.db.clone(),
-                pkey,
-                &state.request_log,
-                entry_id,
-                latency,
-                request_log_limit,
+                StreamTrackingCtx {
+                    db: state.db.clone(),
+                    provider_id: pkey.id,
+                    provider_name: pkey.name,
+                    request_log: state.request_log.clone(),
+                    entry_id,
+                    latency,
+                    request_log_limit,
+                },
             )
             .await
         } else {
@@ -521,16 +524,10 @@ async fn handle_buffered_response(
 }
 
 /// Handle streaming response.
-#[allow(clippy::too_many_arguments)]
 async fn handle_streaming_response(
     response: reqwest::Response,
     is_openai: bool,
-    db: Repository,
-    pkey: ProviderKey,
-    request_log: &SharedRequestLog,
-    entry_id: u64,
-    latency: u64,
-    request_log_limit: usize,
+    ctx: StreamTrackingCtx,
 ) -> Result<Response, AppError> {
     let raw_stream: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>> =
         if !is_openai {
@@ -544,18 +541,7 @@ async fn handle_streaming_response(
             Box::pin(transform::openai_stream_to_anthropic(response))
         };
 
-    let tracked = track_tokens_in_stream(
-        raw_stream,
-        StreamTrackingCtx {
-            db,
-            provider_id: pkey.id,
-            provider_name: pkey.name,
-            request_log: request_log.clone(),
-            entry_id,
-            latency,
-            request_log_limit,
-        },
-    );
+    let tracked = track_tokens_in_stream(raw_stream, ctx);
     let body = Body::from_stream(tracked);
 
     Response::builder()

@@ -18,7 +18,7 @@ use super::state::{App, ConfirmAction, MessageKind, Mode, QuotaStatus};
 use super::theme::{self as t};
 use super::ui::format::{
     api_key_display_len, col_width, config_path_display, fmt_latency, masked_api_key,
-    truncate_error,
+    truncate_chars, truncate_error,
 };
 use super::ui::layout::{BORDER_DASHED_TOP, ROUTE_LABEL_WIDTH, pack_routes};
 use super::{ServerHandle, server};
@@ -606,7 +606,7 @@ fn render_quota_cell(
     let compact = available_width < 120;
 
     match quota_status.get(provider_id) {
-        None | Some(QuotaStatus::NotConfigured) => Cell::from(""),
+        None => Cell::from(""),
         Some(QuotaStatus::Running) => {
             let text = if compact { "[...]" } else { "[running...]" };
             Cell::from(text).style(Style::default().fg(t::MUTED))
@@ -614,26 +614,19 @@ fn render_quota_cell(
         Some(QuotaStatus::Success(result)) => {
             let text = super::quota_command::cell_text(result);
             let text = if compact {
-                truncate_display(&text, 10)
+                truncate_chars(&text, 10)
             } else {
-                truncate_display(&text, 18)
+                truncate_chars(&text, 18)
             };
             Cell::from(text).style(Style::default().fg(t::SUCCESS))
         }
-        Some(QuotaStatus::Error(_)) => {
-            let text = if compact { "[err]" } else { "[error]" };
+        Some(QuotaStatus::Error(msg)) => {
+            let text = if compact {
+                truncate_chars(msg, 10)
+            } else {
+                truncate_chars(msg, 18)
+            };
             Cell::from(text).style(Style::default().fg(t::ERROR))
         }
-    }
-}
-
-fn truncate_display(s: &str, max_chars: usize) -> String {
-    let count = s.chars().count();
-    if count <= max_chars {
-        s.to_string()
-    } else {
-        let mut out: String = s.chars().take(max_chars).collect();
-        out.push('…');
-        out
     }
 }

@@ -4,6 +4,17 @@ use ratatui::widgets::Cell;
 
 use super::super::theme::{self as t};
 
+/// Truncate a string to `max` characters, appending `…` if truncated.
+pub(crate) fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max).collect();
+        out.push('…');
+        out
+    }
+}
+
 pub(crate) fn truncate_error(e: &str) -> String {
     const MAX: usize = 30;
 
@@ -21,12 +32,7 @@ pub(crate) fn truncate_error(e: &str) -> String {
         .last()
         .unwrap_or_else(|| e.split(':').next().unwrap_or(e));
 
-    if msg.chars().count() > MAX {
-        let truncated: String = msg.chars().take(MAX).collect();
-        format!("{}…", truncated)
-    } else {
-        msg.to_string()
-    }
+    truncate_chars(msg, MAX)
 }
 
 pub(crate) fn fmt_latency(ms: u64) -> String {

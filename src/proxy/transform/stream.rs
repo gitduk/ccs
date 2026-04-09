@@ -439,6 +439,15 @@ impl StreamState {
                     ));
                 }
             }
+            "response.output_item.done" => {
+                // Close the current tool_use block when the item finishes,
+                // rather than waiting for the next item or finalize.
+                if let Some(item) = chunk.get("item")
+                    && item.get("type").and_then(|v| v.as_str()) == Some("function_call")
+                {
+                    events.extend(self.close_current_block());
+                }
+            }
             "response.completed" => {
                 let status = response
                     .get("status")
@@ -448,6 +457,7 @@ impl StreamState {
                     "incomplete" => "max_tokens".to_string(),
                     _ => "end_turn".to_string(),
                 });
+                self.response_tool_calls.clear();
             }
             _ => {}
         }
@@ -862,6 +872,55 @@ mod tests {
         assert_eq!(delta["delta"]["stop_reason"], "end_turn");
         assert_eq!(delta["usage"]["input_tokens"], 9);
         assert_eq!(delta["usage"]["output_tokens"], 3);
+    }
+
+    #[test]
+    fn responses_multiple_tool_calls_get_distinct_indices() {
+        let mut state = StreamState::new();
+        state.process_chunk(&json!({
+            "type": "response.created",
+            "response": {"id": "resp_tc", "model": "gpt-5.1-codex"}
+        }));
+        // First tool call
+        let events1 = state.process_chunk(&json!({
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "id": "item_1",
+                "call_id": "call_1",
+                "name": "read_file"
+            }
+        }));
+        let parsed1 = parse_events(&events1);
+        let start1 = parsed1
+            .iter()
+            .find(|(t, _)| t == "content_block_start")
+            .unwrap();
+        let idx1 = start1.1["index"].as_u64().unwrap();
+
+        // Second tool call — close_current_block closes the first, then opens the second
+        let events2 = state.process_chunk(&json!({
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "id": "item_2",
+                "call_id": "call_2",
+                "name": "write_file"
+            }
+        }));
+        let parsed2 = parse_events(&events2);
+        // Second tool call should emit: content_block_stop(0), content_block_start(1)
+        let stop = parsed2
+            .iter()
+            .find(|(t, _)| t == "content_block_stop")
+            .expect("second tool call must close the first block");
+        assert_eq!(stop.1["index"].as_u64().unwrap(), idx1);
+        let start2 = parsed2
+            .iter()
+            .find(|(t, _)| t == "content_block_start")
+            .unwrap();
+        let idx2 = start2.1["index"].as_u64().unwrap();
+        assert_eq!(idx2, idx1 + 1, "second tool_call must have next index");
     }
 
     // ─── finish_reason mapping ────────────────────────────────────────────────

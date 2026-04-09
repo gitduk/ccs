@@ -3,9 +3,10 @@
 //! This module runs the saved shell command and converts its output into the
 //! compact text shown in the provider table and quota preview panel.
 
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use crate::tui::state::QuotaResult;
+use crate::tui::ui::format::truncate_chars;
 
 /// Execute the stored Quota shell command and return a preview payload.
 pub async fn run(command: &str) -> Result<QuotaResult, String> {
@@ -43,7 +44,6 @@ pub async fn run(command: &str) -> Result<QuotaResult, String> {
 
     Ok(QuotaResult {
         output: output_text,
-        timestamp: SystemTime::now(),
     })
 }
 
@@ -56,14 +56,4 @@ pub fn cell_text(result: &QuotaResult) -> String {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| "<empty>".to_string())
-}
-
-fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let mut out: String = s.chars().take(max).collect();
-        out.push_str("...");
-        out
-    }
 }

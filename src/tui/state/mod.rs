@@ -154,18 +154,14 @@ pub struct LogsState {
 #[derive(Debug, Clone)]
 pub struct QuotaResult {
     pub output: String,
-    #[allow(dead_code)]
-    pub timestamp: std::time::SystemTime,
 }
 
 /// Quota status for a provider.
 #[derive(Debug, Clone)]
 pub enum QuotaStatus {
-    #[allow(dead_code)]
-    NotConfigured,
     Running,
     Success(QuotaResult),
-    Error(#[allow(dead_code)] String),
+    Error(String),
 }
 
 pub struct App {

@@ -34,9 +34,10 @@ pub fn anthropic_to_openai_request(req: &Value, provider: &Provider) -> Result<V
 
     let mut converted_msgs: Vec<Value> = Vec::new();
 
-    // System prompt → first message
     let system_text = extract_system_text(req);
-    if !system_text.is_empty() {
+
+    if !is_responses && !system_text.is_empty() {
+        // Chat Completions: system prompt as first message
         converted_msgs.push(json!({"role": "system", "content": system_text}));
     }
 
@@ -58,6 +59,11 @@ pub fn anthropic_to_openai_request(req: &Value, provider: &Provider) -> Result<V
         msg_field: converted_msgs,
         "stream": is_stream,
     });
+
+    // Responses API: system prompt goes to top-level "instructions" field
+    if is_responses && !system_text.is_empty() {
+        result["instructions"] = Value::String(system_text);
+    }
 
     copy_common_parameters(req, &mut result, is_responses);
 
@@ -607,6 +613,38 @@ mod tests {
         assert_eq!(out["messages"][0]["role"], "system");
         assert_eq!(out["messages"][0]["content"], "You are helpful.");
         assert_eq!(out["messages"][1]["role"], "user");
+    }
+
+    #[test]
+    fn responses_system_prompt_becomes_instructions_field() {
+        let req = json!({
+            "model": "claude-opus-4",
+            "system": "You are helpful.",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 50
+        });
+        let out = anthropic_to_openai_request(&req, &provider_responses()).unwrap();
+        assert_eq!(out["instructions"], "You are helpful.");
+        // system prompt must NOT appear in the input array
+        let input = out["input"].as_array().unwrap();
+        assert!(
+            input
+                .iter()
+                .all(|m| m.get("role").and_then(|r| r.as_str()) != Some("system")),
+            "Responses API input must not contain role=system"
+        );
+    }
+
+    #[test]
+    fn responses_system_content_blocks_become_instructions() {
+        let req = json!({
+            "model": "m",
+            "system": [{"type": "text", "text": "line1"}, {"type": "text", "text": "line2"}],
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 10
+        });
+        let out = anthropic_to_openai_request(&req, &provider_responses()).unwrap();
+        assert_eq!(out["instructions"], "line1\nline2");
     }
 
     #[test]
