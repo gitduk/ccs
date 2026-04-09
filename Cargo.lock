@@ -273,7 +273,7 @@ dependencies = [
 
 [[package]]
 name = "ccs"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "async-stream",
  "axum",
@@ -284,6 +284,7 @@ dependencies = [
  "dirs",
  "futures",
  "indexmap",
+ "jsonpath-rust",
  "notify",
  "ratatui",
  "reqwest",
@@ -1292,6 +1293,19 @@ dependencies = [
  "futures-util",
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "jsonpath-rust"
+version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c00ae348f9f8fd2d09f82a98ca381c60df9e0820d8d79fce43e649b4dc3128b"
+dependencies = [
+ "pest",
+ "pest_derive",
+ "regex",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

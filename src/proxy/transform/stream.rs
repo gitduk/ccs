@@ -95,6 +95,8 @@ struct StreamState {
     stop_reason: Option<String>,
     // Track tool call state
     tool_calls: std::collections::HashMap<usize, ToolCallState>,
+    // Track Responses API function calls by output item id.
+    response_tool_calls: std::collections::HashMap<String, ToolCallState>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -128,10 +130,20 @@ impl StreamState {
             current_block_type: None,
             stop_reason: None,
             tool_calls: std::collections::HashMap::new(),
+            response_tool_calls: std::collections::HashMap::new(),
         }
     }
 
     fn process_chunk(&mut self, chunk: &Value) -> Vec<String> {
+        if let Some(event_type) = chunk.get("type").and_then(|t| t.as_str())
+            && event_type.starts_with("response.")
+        {
+            return self.process_responses_event(chunk, event_type);
+        }
+        self.process_chat_completions_chunk(chunk)
+    }
+
+    fn process_chat_completions_chunk(&mut self, chunk: &Value) -> Vec<String> {
         let mut events = Vec::new();
 
         // Extract model info
@@ -151,28 +163,8 @@ impl StreamState {
             }
         }
 
-        // Emit message_start on first chunk
-        if !self.started {
-            self.started = true;
-            events.push(self.format_event(
-                "message_start",
-                &json!({
-                    "type": "message_start",
-                    "message": {
-                        "id": self.message_id,
-                        "type": "message",
-                        "role": "assistant",
-                        "model": self.model,
-                        "content": [],
-                        "stop_reason": null,
-                        "stop_sequence": null,
-                        "usage": {
-                            "input_tokens": self.input_tokens,
-                            "output_tokens": 0,
-                        }
-                    }
-                }),
-            ));
+        if let Some(start) = self.emit_message_start() {
+            events.push(start);
         }
 
         let choice = match chunk
@@ -295,6 +287,198 @@ impl StreamState {
         }
 
         events
+    }
+
+    fn process_responses_event(&mut self, chunk: &Value, event_type: &str) -> Vec<String> {
+        let mut events = Vec::new();
+
+        let response = chunk.get("response").unwrap_or(chunk);
+        if let Some(id) = response.get("id").and_then(|v| v.as_str()) {
+            self.message_id = id.to_string();
+        }
+        if let Some(model) = response.get("model").and_then(|v| v.as_str())
+            && self.model.is_empty()
+        {
+            self.model = model.to_string();
+        }
+        if let Some(usage) = response.get("usage") {
+            if let Some(it) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
+                self.input_tokens = it;
+            }
+            if let Some(ot) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
+                self.output_tokens = ot;
+            }
+        }
+
+        match event_type {
+            "response.created" | "response.in_progress" => {
+                if let Some(start) = self.emit_message_start() {
+                    events.push(start);
+                }
+            }
+            "response.output_text.delta" => {
+                if let Some(start) = self.emit_message_start() {
+                    events.push(start);
+                }
+                if let Some(delta) = chunk.get("delta").and_then(|v| v.as_str())
+                    && !delta.is_empty()
+                {
+                    events.extend(self.emit_content_block(
+                        BlockType::Text,
+                        "text",
+                        "text_delta",
+                        "text",
+                        delta,
+                    ));
+                }
+            }
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                if let Some(start) = self.emit_message_start() {
+                    events.push(start);
+                }
+                if let Some(delta) = chunk.get("delta").and_then(|v| v.as_str())
+                    && !delta.is_empty()
+                {
+                    events.extend(self.emit_content_block(
+                        BlockType::Thinking,
+                        "thinking",
+                        "thinking_delta",
+                        "thinking",
+                        delta,
+                    ));
+                }
+            }
+            "response.output_item.added" => {
+                if let Some(start) = self.emit_message_start() {
+                    events.push(start);
+                }
+                if let Some(item) = chunk.get("item")
+                    && item.get("type").and_then(|v| v.as_str()) == Some("function_call")
+                {
+                    let item_id = item
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let item_id_key = item_id.clone();
+                    let call_id = item
+                        .get("call_id")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| item.get("id").and_then(|v| v.as_str()))
+                        .unwrap_or("")
+                        .to_string();
+                    let name = item
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    events.extend(self.close_current_block());
+                    self.current_block_type = Some(BlockType::ToolUse);
+                    let content_index = self.content_index;
+                    self.response_tool_calls.insert(
+                        item_id,
+                        ToolCallState {
+                            id: call_id.clone(),
+                            name: name.clone(),
+                            arguments_buffer: String::new(),
+                            content_index,
+                        },
+                    );
+                    events.push(self.format_event(
+                        "content_block_start",
+                        &json!({
+                            "type": "content_block_start",
+                            "index": content_index,
+                            "content_block": {
+                                "type": "tool_use",
+                                "id": call_id,
+                                "name": name,
+                                "input": {},
+                            }
+                        }),
+                    ));
+
+                    if let Some(args) = item.get("arguments").and_then(|v| v.as_str())
+                        && !args.is_empty()
+                    {
+                        if let Some(tc) = self.response_tool_calls.get_mut(&item_id_key) {
+                            tc.arguments_buffer.push_str(args);
+                        }
+                        events.push(self.format_event(
+                            "content_block_delta",
+                            &json!({
+                                "type": "content_block_delta",
+                                "index": content_index,
+                                "delta": {
+                                    "type": "input_json_delta",
+                                    "partial_json": args,
+                                }
+                            }),
+                        ));
+                    }
+                }
+            }
+            "response.function_call_arguments.delta" => {
+                if let Some(item_id) = chunk.get("item_id").and_then(|v| v.as_str())
+                    && let Some(delta) = chunk.get("delta").and_then(|v| v.as_str())
+                    && !delta.is_empty()
+                    && let Some(tc) = self.response_tool_calls.get_mut(item_id)
+                {
+                    let content_index = tc.content_index;
+                    tc.arguments_buffer.push_str(delta);
+                    events.push(self.format_event(
+                        "content_block_delta",
+                        &json!({
+                            "type": "content_block_delta",
+                            "index": content_index,
+                            "delta": {
+                                "type": "input_json_delta",
+                                "partial_json": delta,
+                            }
+                        }),
+                    ));
+                }
+            }
+            "response.completed" => {
+                let status = response
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("completed");
+                self.stop_reason = Some(match status {
+                    "incomplete" => "max_tokens".to_string(),
+                    _ => "end_turn".to_string(),
+                });
+            }
+            _ => {}
+        }
+
+        events
+    }
+
+    fn emit_message_start(&mut self) -> Option<String> {
+        if self.started {
+            return None;
+        }
+        self.started = true;
+        Some(self.format_event(
+            "message_start",
+            &json!({
+                "type": "message_start",
+                "message": {
+                    "id": self.message_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "model": self.model,
+                    "content": [],
+                    "stop_reason": null,
+                    "stop_sequence": null,
+                    "usage": {
+                        "input_tokens": self.input_tokens,
+                        "output_tokens": 0,
+                    }
+                }
+            }),
+        ))
     }
 
     /// Open a new content block if needed, then emit a delta event.
@@ -637,6 +821,47 @@ mod tests {
             .unwrap();
         assert_eq!(delta["delta"]["type"], "input_json_delta");
         assert_eq!(delta["delta"]["partial_json"], "{\"q\":\"rust\"}");
+    }
+
+    // ─── responses stream events ─────────────────────────────────────────────
+
+    #[test]
+    fn responses_output_text_delta_emits_text_block() {
+        let mut state = StreamState::new();
+        let created = json!({
+            "type": "response.created",
+            "response": {"id": "resp_1", "model": "gpt-4.1"}
+        });
+        let delta = json!({
+            "type": "response.output_text.delta",
+            "delta": "hello"
+        });
+        state.process_chunk(&created);
+        let events = parse_events(&state.process_chunk(&delta));
+        let (_, data) = events
+            .iter()
+            .find(|(t, _)| t == "content_block_delta")
+            .unwrap();
+        assert_eq!(data["delta"]["type"], "text_delta");
+        assert_eq!(data["delta"]["text"], "hello");
+    }
+
+    #[test]
+    fn responses_completed_updates_usage_and_stop_reason() {
+        let mut state = StreamState::new();
+        let completed = json!({
+            "type": "response.completed",
+            "response": {
+                "status": "completed",
+                "usage": {"input_tokens": 9, "output_tokens": 3}
+            }
+        });
+        state.process_chunk(&completed);
+        let events = parse_events(&state.finalize());
+        let (_, delta) = events.iter().find(|(t, _)| t == "message_delta").unwrap();
+        assert_eq!(delta["delta"]["stop_reason"], "end_turn");
+        assert_eq!(delta["usage"]["input_tokens"], 9);
+        assert_eq!(delta["usage"]["output_tokens"], 3);
     }
 
     // ─── finish_reason mapping ────────────────────────────────────────────────

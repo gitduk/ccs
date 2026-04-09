@@ -7,12 +7,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use super::super::state::App;
-use super::super::theme::{self as t};
-use super::format::{fmt_latency, format_tokens, max_content_width, strip_model_prefix};
-use super::layout::{DASH, SUFFIX_GAP, TITLE_SIDE};
+use super::state::App;
+use super::theme::{self as t};
+use super::ui::format::{fmt_latency, format_tokens, max_content_width, strip_model_prefix};
+use super::ui::layout::{DASH, SUFFIX_GAP, TITLE_SIDE};
 
-pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect, right_border: bool) {
+pub(super) fn draw_panel(f: &mut Frame, app: &App, area: Rect, right_border: bool) {
     let borders = if right_border {
         Borders::LEFT | Borders::RIGHT | Borders::BOTTOM
     } else {
@@ -31,8 +31,6 @@ pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect, right_borde
     }
 
     let Ok(m) = app.metrics.lock() else { return };
-    // Collect (name, stats) pairs, then sort by failure rate ascending so the
-    // most reliable providers appear at the top.
     let mut provider_rows: Vec<(&str, crate::proxy::metrics::ProviderStats)> = app
         .providers
         .names
@@ -52,17 +50,13 @@ pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect, right_borde
         .collect();
     drop(m);
 
-    // Sort by failure rate ascending (providers with fewer failures first).
-    // Providers with no requests sort to the bottom (rate treated as 1.0).
     provider_rows.sort_by(|(_, a), (_, b)| {
         let rate = |s: &crate::proxy::metrics::ProviderStats| {
             if s.failures == 0 && s.requests == 0 {
-                // Never used — sort to bottom.
                 f64::MAX
             } else if s.requests > 0 {
                 s.failures as f64 / s.requests as f64
             } else {
-                // failures > 0 but requests == 0: corrupted data, treat as 100%.
                 1.0
             }
         };
@@ -83,7 +77,6 @@ pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect, right_borde
         .max(8);
 
     let make_title_line = |title: &'static str, suffix: &str| -> Line<'static> {
-        // Layout: ╌╌ Title ╌╌╌╌╌╌╌╌╌╌ suffix
         let mid = (inner.width as usize).saturating_sub(
             TITLE_SIDE
                 + 1
@@ -130,17 +123,26 @@ pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect, right_borde
             ),
             Span::styled("  In ", muted),
             Span::styled(
-                format!("{:>7}", format_tokens(s.input)),
+                format!("{:>8}", format_tokens(s.input)),
                 Style::default().fg(color),
             ),
             Span::styled("  Out ", muted),
             Span::styled(
-                format!("{:>7}", format_tokens(s.output)),
+                format!("{:>8}", format_tokens(s.output)),
                 Style::default().fg(color),
             ),
+            Span::styled("  Avg ", muted),
+            {
+                let avg = if s.requests > 0 {
+                    fmt_latency(s.latency_total / s.requests)
+                } else {
+                    "—".to_string()
+                };
+                Span::styled(format!("{:>7}", avg), Style::default().fg(t::TEXT))
+            },
             Span::styled("  Req ", muted),
             Span::styled(
-                format!("{:>4}", s.requests),
+                format!("{:>5}", s.requests),
                 Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD),
             ),
             Span::styled("  Fail ", muted),
@@ -150,7 +152,6 @@ pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect, right_borde
                 } else if s.requests > 0 {
                     s.failures as f64 / s.requests as f64
                 } else {
-                    // failures > 0 but requests == 0: corrupted data.
                     1.0
                 };
                 let high = rate > 0.5;
@@ -164,23 +165,13 @@ pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect, right_borde
                 let text = if high {
                     format!("{:>4} ({:.0}%)", s.failures, rate * 100.0)
                 } else {
-                    format!("{:>4}", s.failures)
+                    s.failures.to_string()
                 };
-                Span::styled(text, style)
-            },
-            Span::styled("  Avg ", muted),
-            {
-                let avg = if s.requests > 0 {
-                    fmt_latency(s.latency_total / s.requests)
-                } else {
-                    "—".to_string()
-                };
-                Span::styled(format!("{:>6}", avg), Style::default().fg(t::TEXT))
+                Span::styled(format!("{:>10}", text), style)
             },
         ])
     }));
 
-    // Model Usage section — horizontal stacked bar chart
     lines.push(Line::from(""));
     lines.push(make_title_line("By Model", "░ input  █ output ╌╌"));
     lines.push(Line::from(""));
@@ -188,36 +179,30 @@ pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect, right_borde
     if model_entries.is_empty() {
         lines.push(Line::from(Span::styled("  No data yet", muted)));
     } else {
-        // Determine display name per model: strip the `org/` prefix unless two
-        // different full names share the same suffix (collision), in which case
-        // keep the full name to disambiguate.
-        let suffixes: Vec<&str> = model_entries
+        let suffixes: Vec<String> = model_entries
             .iter()
-            .map(|(k, _, _)| strip_model_prefix(k.as_str()))
+            .map(|(k, _, _)| strip_model_prefix(k.as_str()).to_string())
             .collect();
-        let mut suffix_count: HashMap<&str, usize> = HashMap::with_capacity(suffixes.len());
+        let mut suffix_count: HashMap<String, usize> = HashMap::with_capacity(suffixes.len());
         for s in &suffixes {
-            *suffix_count.entry(*s).or_insert(0) += 1;
+            *suffix_count.entry(s.clone()).or_insert(0) += 1;
         }
-        let display_names: Vec<&str> = model_entries
+        let display_names: Vec<String> = model_entries
             .iter()
             .zip(suffixes.iter())
             .map(|((full, _, _), s)| {
-                if suffix_count[s] > 1 {
-                    full.as_str()
+                if suffix_count.get(s).copied().unwrap_or(0) > 1 {
+                    full.clone()
                 } else {
-                    *s
+                    s.clone()
                 }
             })
             .collect();
 
-        // Cap label width at 30 chars to leave room for bars
         let model_col_width =
             max_content_width(display_names.iter().map(|s| s.chars().count()), 10, 30);
-        let value_width = 8usize; // "  1234.5K"
+        let value_width = 8usize;
         let bar_area = (inner.width as usize).saturating_sub(model_col_width + 2 + value_width);
-        // Mix weight: 0.0 = pure log (small values always visible),
-        //             1.0 = pure linear (proportionally accurate).
         const LINEAR_WEIGHT: f64 = 0.8;
 
         let max_total = model_entries
@@ -254,19 +239,18 @@ pub(super) fn draw_stats_panel(f: &mut Frame, app: &App, area: Rect, right_borde
                     .collect();
                 format!("{}…", truncated)
             } else {
-                format!("{:<width$}", display_name, width = model_col_width)
+                format!("{:<width$}", display_name.as_str(), width = model_col_width)
             };
 
-            let label_color = t::TEXT;
             lines.push(Line::from(vec![
-                Span::styled(label, Style::default().fg(label_color)),
+                Span::styled(label, Style::default().fg(t::TEXT)),
                 Span::raw("  "),
                 Span::styled("░".repeat(input_bar), Style::default().fg(t::TEXT)),
                 Span::styled("█".repeat(output_bar), Style::default().fg(t::TEXT)),
                 Span::raw(" ".repeat(empty)),
                 Span::styled(
                     format!("  {:>6}", format_tokens(total)),
-                    Style::default().fg(label_color),
+                    Style::default().fg(t::TEXT),
                 ),
             ]));
         }

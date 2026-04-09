@@ -32,6 +32,8 @@ pub enum Mode {
     Models,
     /// Request log viewer: scrollable list of recent proxy requests.
     Logs,
+    /// Quota configuration editor for the selected provider.
+    QuotaConfig,
 }
 
 /// Vim-style sub-mode used inside the provider editor form.
@@ -88,6 +90,11 @@ pub(super) enum TestEvent {
         provider: String,
         result: TestResult,
     },
+    /// Quota query completed.
+    QuotaCompleted {
+        provider_id: String,
+        result: Result<QuotaResult, String>,
+    },
 }
 
 pub struct TestState {
@@ -143,9 +150,29 @@ pub struct LogsState {
     pub scroll: u16,
 }
 
+/// Command execution result shown in the Quota column.
+#[derive(Debug, Clone)]
+pub struct QuotaResult {
+    pub output: String,
+    #[allow(dead_code)]
+    pub timestamp: std::time::SystemTime,
+}
+
+/// Quota status for a provider.
+#[derive(Debug, Clone)]
+pub enum QuotaStatus {
+    #[allow(dead_code)]
+    NotConfigured,
+    Running,
+    Success(QuotaResult),
+    Error(#[allow(dead_code)] String),
+}
+
 pub struct App {
     pub config: AppConfig,
     pub mode: Mode,
+    /// Whether the terminal pane/window is currently focused.
+    pub terminal_focused: bool,
     pub providers: ProviderList,
     pub form: Option<ProviderForm>,
     pub message: Option<(String, MessageKind, std::time::Instant)>,
@@ -165,6 +192,10 @@ pub struct App {
     pub seen_provider_errors: HashMap<String, String>,
     /// Pending first key of a two-key sequence in the Normal-mode provider list.
     pub pending_key: Option<(char, std::time::Instant)>,
+    /// Quota status for each provider (provider_id -> status).
+    pub quota_status: HashMap<String, QuotaStatus>,
+    /// Quota configuration form for the selected provider.
+    pub quota_form: Option<QuotaForm>,
 }
 
 // ─── Provider editor form ─────────────────────────────────────────────────────
@@ -202,6 +233,27 @@ pub struct ProviderForm {
     /// Pending first key of a two-key sequence (`ZZ`, `ZQ`, `dd`) inside the form.
     pub pending_key: Option<(char, std::time::Instant)>,
     pub error: Option<String>,
+}
+
+// ─── Quota configuration form ─────────────────────────────────────────────────
+
+pub struct QuotaForm {
+    /// Provider name being configured.
+    pub provider_name: String,
+    /// Raw curl command editor field.
+    pub curl_field: FormField,
+    /// Current Vim sub-mode for the form.
+    pub vim_mode: VimMode,
+    /// Pending first key of a two-key sequence.
+    pub pending_key: Option<(char, std::time::Instant)>,
+    /// Last error from parsing/sending the preview request.
+    pub error: Option<String>,
+    /// Last response preview text (status + body snippet).
+    pub preview: Option<String>,
+    /// True while sending preview request.
+    pub preview_loading: bool,
+    /// Vertical scroll offset for response preview.
+    pub preview_scroll: u16,
 }
 
 pub struct FormField {
@@ -540,6 +592,24 @@ impl ProviderForm {
             self.reset_route_editing();
             // Same reason as focus_next: reset vim_mode on entering Routes.
             self.vim_mode = VimMode::Normal;
+        }
+    }
+}
+
+// ─── QuotaForm helpers ────────────────────────────────────────────────────────
+
+impl QuotaForm {
+    /// Create a new quota preview form for a provider.
+    pub(super) fn new(provider_name: &str, saved_curl: Option<&str>) -> Self {
+        Self {
+            provider_name: provider_name.to_string(),
+            curl_field: FormField::multiline("cURL", saved_curl.unwrap_or("")),
+            vim_mode: VimMode::Normal,
+            pending_key: None,
+            error: None,
+            preview: None,
+            preview_loading: false,
+            preview_scroll: 0,
         }
     }
 }

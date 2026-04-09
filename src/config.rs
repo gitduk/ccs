@@ -26,8 +26,8 @@ fn default_true() -> bool {
 // ─── Route Rules ─────────────────────────────────────────────────────────────
 
 /// A single model-routing rule attached to a provider.
-/// When enabled and the incoming model name matches `pattern`, this provider
-/// is selected ahead of the global `current` setting.
+/// When enabled and the incoming model name matches `pattern`, the request
+/// model is rewritten to `target` before sending to the selected provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteRule {
     /// Stable UUID for this route rule.
@@ -35,8 +35,8 @@ pub struct RouteRule {
     /// Glob pattern matched against the request `model` field.
     /// Supports `*` as wildcard (e.g. `"claude-sonnet*"`, `"*opus*"`).
     pub pattern: String,
-    /// Model name sent to the upstream when this rule matches.
-    /// Empty string = forward the original model name unchanged.
+    /// Model name sent to upstream when this rule matches.
+    /// Empty string = do not rewrite model (passthrough).
     #[serde(default)]
     pub target: String,
     /// When false this rule is skipped during routing.
@@ -128,6 +128,60 @@ fn default_request_log_limit() -> usize {
     100
 }
 
+/// Quota request method.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum QuotaMethod {
+    #[serde(rename = "get")]
+    #[default]
+    Get,
+    #[serde(rename = "post")]
+    Post,
+}
+
+impl QuotaMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
+        }
+    }
+
+    pub fn from_form_value(value: &str) -> Self {
+        if value.eq_ignore_ascii_case("post") {
+            Self::Post
+        } else {
+            Self::Get
+        }
+    }
+}
+
+/// Legacy quota configuration for a provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuotaConfig {
+    /// URL to query quota information.
+    pub url: String,
+    /// HTTP method for quota request. Default: GET.
+    #[serde(default)]
+    pub method: QuotaMethod,
+    /// Optional request body for quota query (used by POST APIs).
+    #[serde(default)]
+    pub body: String,
+    /// JSONPath to extract total quota (e.g., "$.results[0].quota.daily_quota").
+    pub total_path: String,
+    /// JSONPath to extract used quota (e.g., "$.results[0].quota.daily_total_spent").
+    pub used_path: String,
+    /// Optional headers (format: "Key: Value", supports {api_key} variable).
+    #[serde(default)]
+    pub headers: Vec<String>,
+    /// Cache TTL in seconds. Default: 300 (5 minutes).
+    #[serde(default = "default_quota_cache_ttl")]
+    pub cache_ttl: u64,
+}
+
+fn default_quota_cache_ttl() -> u64 {
+    300
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provider {
     /// Stable UUID — assigned on first save, never changes even if name is renamed.
@@ -150,6 +204,12 @@ pub struct Provider {
     /// Only effective when api_format = OpenAI. See [`OpenAiApiVersion`] for variants.
     #[serde(default)]
     pub api_version: Option<OpenAiApiVersion>,
+    /// Quota configuration for this provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quota: Option<QuotaConfig>,
+    /// Shell command used by the Quota panel and main-table Quota column.
+    #[serde(default, alias = "quota_curl", skip_serializing_if = "Option::is_none")]
+    pub quota_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -501,6 +561,8 @@ mod tests {
             routes: Vec::new(),
             enabled: true,
             api_version: None,
+            quota: None,
+            quota_command: None,
         }
     }
 

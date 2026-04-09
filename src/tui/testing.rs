@@ -8,6 +8,7 @@ pub(super) fn test_selected(app: &mut App) {
         return;
     };
     test_provider_by_name(app, &name);
+    run_quota_for_name(app, &name);
 }
 
 pub(super) fn test_provider_by_name(app: &mut App, name: &str) {
@@ -157,6 +158,43 @@ pub(super) fn start_background_tests(app: &mut App) {
     for name in names {
         test_provider_by_name(app, &name);
     }
+
+    // Also run quota commands for providers that have them configured
+    start_quota_queries(app);
+}
+
+/// Run quota commands for all providers that have one configured.
+fn start_quota_queries(app: &mut App) {
+    let names: Vec<String> = app.config.providers.keys().cloned().collect();
+    for name in names {
+        run_quota_for_name(app, &name);
+    }
+}
+
+pub(super) fn run_quota_for_name(app: &mut App, name: &str) {
+    use super::state::QuotaStatus;
+
+    let Some(provider) = app.config.providers.get(name) else {
+        return;
+    };
+    let Some(command) = &provider.quota_command else {
+        return;
+    };
+
+    let provider_id = provider.id.clone();
+    let command = command.clone();
+    let tx = app.tests.tx.clone();
+
+    app.quota_status
+        .insert(provider_id.clone(), QuotaStatus::Running);
+
+    tokio::spawn(async move {
+        let result = super::quota_command::run(&command).await;
+        let _ = tx.send(TestEvent::QuotaCompleted {
+            provider_id,
+            result,
+        });
+    });
 }
 
 /// Pick a model from a non-empty slice using a module-level counter so

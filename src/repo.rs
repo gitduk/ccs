@@ -196,14 +196,18 @@ impl Repository {
         input: u64,
         output: u64,
         model: Option<String>,
+        keep: usize,
     ) {
         let repo = self.clone();
+        let keep = keep.max(200);
         tokio::task::spawn_blocking(move || {
-            if let Ok(conn) = repo.0.lock()
-                && let Err(e) =
+            if let Ok(conn) = repo.0.lock() {
+                if let Err(e) =
                     db::update_request_log_tokens(&conn, id, input, output, model.as_deref())
-            {
-                tracing::warn!("Failed to update request log tokens for id {id}: {e}");
+                {
+                    tracing::warn!("Failed to update request log tokens for id {id}: {e}");
+                }
+                db::trim_request_log(&conn, keep).ok();
             }
         });
     }

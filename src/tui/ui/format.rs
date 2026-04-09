@@ -4,7 +4,7 @@ use ratatui::widgets::Cell;
 
 use super::super::theme::{self as t};
 
-pub(super) fn truncate_error(e: &str) -> String {
+pub(crate) fn truncate_error(e: &str) -> String {
     const MAX: usize = 30;
 
     // HTML/XML body returned instead of JSON — not useful to display verbatim.
@@ -29,7 +29,7 @@ pub(super) fn truncate_error(e: &str) -> String {
     }
 }
 
-pub(super) fn fmt_latency(ms: u64) -> String {
+pub(crate) fn fmt_latency(ms: u64) -> String {
     if ms >= 1000 {
         format!("{:.1}s", ms as f64 / 1000.0)
     } else {
@@ -37,7 +37,7 @@ pub(super) fn fmt_latency(ms: u64) -> String {
     }
 }
 
-pub(super) fn format_tokens(n: u64) -> String {
+pub(crate) fn format_tokens(n: u64) -> String {
     if n == 0 {
         "—".to_string()
     } else if n >= 100_000 {
@@ -50,7 +50,7 @@ pub(super) fn format_tokens(n: u64) -> String {
 }
 
 /// Max content width with a fallback default and an upper cap.
-pub(super) fn max_content_width(
+pub(crate) fn max_content_width(
     content_lens: impl Iterator<Item = usize>,
     default: usize,
     cap: usize,
@@ -59,11 +59,11 @@ pub(super) fn max_content_width(
 }
 
 /// Column width = max(header length, max content length) + 4 gap.
-pub(super) fn col_width(header: &str, content_lens: impl Iterator<Item = usize>) -> u16 {
+pub(crate) fn col_width(header: &str, content_lens: impl Iterator<Item = usize>) -> u16 {
     (max_content_width(content_lens, 0, usize::MAX).max(header.len()) + 4) as u16
 }
 
-pub(super) fn api_key_display_len(key: &str) -> usize {
+pub(crate) fn api_key_display_len(key: &str) -> usize {
     if key.is_empty() {
         "(not set)".len()
     } else if key.starts_with('$') {
@@ -77,7 +77,7 @@ pub(super) fn api_key_display_len(key: &str) -> usize {
 
 /// Mask a raw API key for display: `abcd···wxyz` (long) or `····` (short).
 /// Returns the key unchanged if it is empty or starts with `$` (env-var ref).
-pub(super) fn mask_api_key_str(key: &str) -> Option<String> {
+pub(crate) fn mask_api_key_str(key: &str) -> Option<String> {
     if key.is_empty() || key.starts_with('$') {
         return None;
     }
@@ -91,7 +91,7 @@ pub(super) fn mask_api_key_str(key: &str) -> Option<String> {
     })
 }
 
-pub(super) fn masked_api_key(key: &str) -> Cell<'static> {
+pub(crate) fn masked_api_key(key: &str) -> Cell<'static> {
     match mask_api_key_str(key) {
         Some(masked) => Cell::from(Span::styled(masked, Style::default().fg(t::MUTED))),
         None if key.is_empty() => {
@@ -104,7 +104,7 @@ pub(super) fn masked_api_key(key: &str) -> Cell<'static> {
     }
 }
 
-pub(super) fn config_path_display() -> String {
+pub(crate) fn config_path_display() -> String {
     crate::config::config_path()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "~/.ccs/config.json".to_string())
@@ -116,7 +116,7 @@ pub(super) fn config_path_display() -> String {
 /// Examples:
 ///   `qwen/qwen3.6-plus-preview:free` → `qwen3.6-plus-preview:free`
 ///   `claude-sonnet-4.6`              → `claude-sonnet-4.6`
-pub(super) fn strip_model_prefix(model: &str) -> &str {
+pub(crate) fn strip_model_prefix(model: &str) -> &str {
     model.rfind('/').map_or(model, |i| &model[i + 1..])
 }
 
@@ -130,7 +130,7 @@ pub(super) fn strip_model_prefix(model: &str) -> &str {
 ///   `claude-haiku-3.5`            → `haiku-3.5`
 ///   `gpt-4o`                      → `gpt-4o`
 ///   `qwen/qwen3-plus:free`        → `qwen3-plus:free`
-pub(super) fn shorten_model_name(model: &str) -> &str {
+pub(crate) fn shorten_model_name(model: &str) -> &str {
     let stripped = strip_model_prefix(model);
     stripped.strip_prefix("claude-").unwrap_or(stripped)
 }

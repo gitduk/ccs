@@ -35,6 +35,7 @@ impl App {
         Ok(Self {
             config,
             mode: super::Mode::Normal,
+            terminal_focused: true,
             providers: ProviderList { table_state, names },
             form: None,
             message: None,
@@ -61,6 +62,8 @@ impl App {
             message_log: std::collections::VecDeque::new(),
             seen_provider_errors: std::collections::HashMap::new(),
             pending_key: None,
+            quota_status: std::collections::HashMap::new(),
+            quota_form: None,
         })
     }
 

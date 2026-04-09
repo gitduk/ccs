@@ -1,0 +1,639 @@
+//! Provider list and detail panels.
+//!
+//! This module owns the main provider table, its detail panel, and the
+//! Normal-mode key handling that acts on the selected provider.
+
+use crossterm::event::{KeyCode, KeyModifiers};
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Cell, Padding, Paragraph, Row, Table};
+use unicode_width::UnicodeWidthStr;
+
+use crate::config::{ApiFormat, Provider};
+use crate::tester::TestStatus;
+
+use super::state::{App, ConfirmAction, MessageKind, Mode, QuotaStatus};
+use super::theme::{self as t};
+use super::ui::format::{
+    api_key_display_len, col_width, config_path_display, fmt_latency, masked_api_key,
+    truncate_error,
+};
+use super::ui::layout::{BORDER_DASHED_TOP, ROUTE_LABEL_WIDTH, pack_routes};
+use super::{ServerHandle, server};
+
+pub(super) fn handle_key(
+    app: &mut App,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    server_handle: &mut Option<ServerHandle>,
+) -> crate::error::Result<()> {
+    if app.message.is_some() {
+        app.message = None;
+    }
+
+    let prev = super::input::insert::consume_pending_key(&mut app.pending_key);
+
+    if let Some(pk) = prev {
+        match (pk, &code) {
+            ('d', KeyCode::Char('d')) => {
+                if let Some(name) = app.selected_name().map(|s| s.to_string()) {
+                    app.confirm(ConfirmAction::Delete(name));
+                }
+                return Ok(());
+            }
+            ('g', KeyCode::Char('g')) => {
+                if !app.providers.names.is_empty() {
+                    app.providers.table_state.select(Some(0));
+                }
+                return Ok(());
+            }
+            ('y', KeyCode::Char('y')) => {
+                if let Some(provider) = app
+                    .selected_name()
+                    .and_then(|name| app.config.providers.get(name))
+                {
+                    let url = provider.base_url.clone();
+                    if super::input::copy_to_clipboard(&url) {
+                        app.set_message("Copied base URL", MessageKind::Success);
+                    } else {
+                        app.set_message("Copy failed (wl-copy not found?)", MessageKind::Error);
+                    }
+                }
+                return Ok(());
+            }
+            ('y', KeyCode::Char('c')) => {
+                if let Some(name) = app.selected_name().map(|s| s.to_string())
+                    && let Some(provider) = app.config.providers.get(&name)
+                {
+                    let supported = app.models.provider_models.get(&name);
+                    let model = supported
+                        .filter(|s| !s.is_empty())
+                        .and_then(|models| {
+                            app.metrics
+                                .lock()
+                                .ok()
+                                .and_then(|m| {
+                                    models
+                                        .iter()
+                                        .max_by_key(|mdl| {
+                                            m.by_model.get(*mdl).map_or(0, |s| s.input + s.output)
+                                        })
+                                        .filter(|mdl| m.by_model.contains_key(*mdl))
+                                        .map(|s| s.to_string())
+                                })
+                                .or_else(|| models.first().map(|s| s.to_string()))
+                        })
+                        .unwrap_or_default();
+
+                    match build_test_curl(provider, &model) {
+                        Ok(cmd) => {
+                            if super::input::copy_to_clipboard(&cmd) {
+                                app.set_message("Copied curl command", MessageKind::Success);
+                            } else {
+                                app.set_message(
+                                    "Copy failed (wl-copy not found?)",
+                                    MessageKind::Error,
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            app.set_message(format!("Cannot build curl: {e}"), MessageKind::Error);
+                        }
+                    }
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
+    match code {
+        KeyCode::Char('q') | KeyCode::Esc => {
+            if app.bg_proxy_pid.is_some() {
+                app.should_quit = true;
+            } else {
+                app.confirm(ConfirmAction::Quit);
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => app.select_prev(),
+        KeyCode::Down | KeyCode::Char('j') => app.select_next(),
+        KeyCode::Char('G') => {
+            if !app.providers.names.is_empty() {
+                let last = app.providers.names.len() - 1;
+                app.providers.table_state.select(Some(last));
+            }
+        }
+        KeyCode::Char('g') => {
+            app.pending_key = Some(('g', std::time::Instant::now()));
+        }
+        KeyCode::Char('d') => {
+            app.pending_key = Some(('d', std::time::Instant::now()));
+        }
+        KeyCode::Char('y') => {
+            app.pending_key = Some(('y', std::time::Instant::now()));
+        }
+        KeyCode::Char('s') => {
+            app.switch_to_selected()?;
+            server::sync_proxy_config(app, server_handle);
+        }
+        KeyCode::Char('a' | 'o') => app.add(),
+        KeyCode::Enter | KeyCode::Char('e') => {
+            if app.selected_name().is_some() {
+                app.start_edit();
+            }
+        }
+        KeyCode::Char('p') => {
+            app.toggle_provider_enabled()?;
+            server::sync_proxy_config(app, server_handle);
+        }
+        KeyCode::Char('t') => super::testing::test_selected(app),
+        KeyCode::Char('u') => {
+            if let Some(name) = app.selected_name().map(|s| s.to_string()) {
+                let saved = app
+                    .config
+                    .providers
+                    .get(&name)
+                    .and_then(|p| p.quota_command.as_deref());
+                app.quota_form = Some(super::state::QuotaForm::new(&name, saved));
+                app.mode = Mode::QuotaConfig;
+            }
+        }
+        KeyCode::Char('K') => {
+            let _ = app.move_provider_up();
+        }
+        KeyCode::Char('J') => {
+            let _ = app.move_provider_down();
+        }
+        KeyCode::Char('f') => {
+            let _ = app.toggle_fallback();
+            server::sync_proxy_config(app, server_handle);
+        }
+        KeyCode::Char('r') => {
+            let _ = app.reload_config();
+            server::sync_proxy_config(app, server_handle);
+        }
+        KeyCode::Char('S') => {
+            server::toggle_bg_proxy(app, server_handle);
+        }
+        KeyCode::Char('c') => app.confirm(ConfirmAction::ClearCurrent),
+        KeyCode::Char('C') => app.confirm(ConfirmAction::Clear),
+        KeyCode::Char('h' | '?') => {
+            app.mode = Mode::Help;
+        }
+        KeyCode::Char('m') => {
+            app.mode = Mode::Models;
+            app.models.search_active = true;
+            app.models.selected = 0;
+            app.models.scroll = 0;
+        }
+        KeyCode::Char('l') if modifiers.is_empty() => {
+            app.mode = Mode::Logs;
+            app.logs.selected = 0;
+            app.logs.scroll = 0;
+        }
+        KeyCode::Char('l') if modifiers == KeyModifiers::CONTROL => {
+            app.message_log.clear();
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect, right_border: bool) {
+    let table_borders = if right_border {
+        Borders::TOP | Borders::LEFT | Borders::RIGHT
+    } else {
+        Borders::TOP | Borders::LEFT
+    };
+    let (title_left, title_right) = make_table_titles(app);
+    if app.providers.names.is_empty() {
+        let empty = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "  No providers configured",
+                Style::default().fg(t::MUTED),
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  Press ", Style::default().fg(t::MUTED)),
+                Span::styled(
+                    "a",
+                    Style::default().fg(t::WARNING).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " to add a provider, or edit ",
+                    Style::default().fg(t::MUTED),
+                ),
+                Span::styled(config_path_display(), Style::default().fg(t::PRIMARY)),
+            ]),
+        ])
+        .block(
+            Block::default()
+                .borders(table_borders)
+                .border_set(BORDER_DASHED_TOP)
+                .border_style(Style::default().fg(t::MUTED))
+                .title_top(title_left)
+                .title_top(title_right),
+        );
+        f.render_widget(empty, area);
+        return;
+    }
+
+    let url_col = col_width(
+        "Base URL",
+        app.config.providers.values().map(|p| p.base_url.len()),
+    );
+    let key_col = col_width(
+        "API Key",
+        app.config
+            .providers
+            .values()
+            .map(|p| api_key_display_len(&p.api_key)),
+    );
+    let notes_widths: Vec<usize> = app
+        .config
+        .providers
+        .values()
+        .map(|p| p.notes.lines().next().unwrap_or("").width())
+        .collect();
+    let has_notes = notes_widths.iter().any(|&w| w > 0);
+    let notes_col = if has_notes {
+        col_width("Notes", notes_widths.into_iter()).min(30)
+    } else {
+        0
+    };
+    let has_quota = app
+        .config
+        .providers
+        .values()
+        .any(|p| p.quota_command.is_some())
+        || !app.quota_status.is_empty();
+    let max_name_len = app
+        .providers
+        .names
+        .iter()
+        .map(|name| name.width())
+        .max()
+        .unwrap_or(0)
+        .max("Name".width());
+    let name_col = (max_name_len + 2 + 4) as u16;
+
+    let hdr = Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD);
+    let mut header_cells = vec![
+        Cell::from("Name").style(hdr),
+        Cell::from("Format").style(hdr),
+        Cell::from("Base URL").style(hdr),
+        Cell::from("API Key").style(hdr),
+    ];
+    if has_quota {
+        header_cells.push(Cell::from("Quota").style(hdr));
+    }
+    if has_notes {
+        header_cells.push(Cell::from("Notes").style(hdr));
+    }
+    let header = Row::new(header_cells).height(1);
+
+    let selected = app.providers.table_state.selected();
+    let terminal_width = area.width;
+    let quota_status = &app.quota_status;
+
+    let rows: Vec<Row> = app
+        .providers
+        .names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let provider = &app.config.providers[name];
+            let is_current = name == &app.config.current;
+            let is_selected = selected == Some(i);
+
+            let (indicator, indicator_style) = if is_selected && app.terminal_focused {
+                (
+                    " ◀",
+                    Style::default()
+                        .fg(t::provider_color(name))
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                ("  ", Style::default())
+            };
+            let disabled = !provider.enabled;
+            let name_style = if disabled {
+                Style::default().fg(t::MUTED)
+            } else if is_current {
+                Style::default()
+                    .fg(t::provider_color(name))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(t::TEXT)
+            };
+            let detail_style = if disabled || !is_current {
+                Style::default().fg(t::MUTED)
+            } else {
+                Style::default().fg(t::provider_color(name))
+            };
+            let name_display_width = name.width();
+            let padding = max_name_len.saturating_sub(name_display_width);
+            let padded_name = format!("{}{}", name.as_str(), " ".repeat(padding));
+            let name_cell = Cell::from(Line::from(vec![
+                Span::styled(padded_name, name_style),
+                Span::styled(indicator, indicator_style),
+            ]));
+
+            let notes_first_line = provider.notes.lines().next().unwrap_or("");
+            let notes_text = if notes_first_line.width() > notes_col as usize {
+                format!(
+                    "{}…",
+                    &notes_first_line[..notes_first_line
+                        .char_indices()
+                        .map(|(i, _)| i)
+                        .nth(notes_col.saturating_sub(1) as usize)
+                        .unwrap_or(notes_first_line.len())]
+                )
+            } else {
+                notes_first_line.to_string()
+            };
+            let mut cells = vec![
+                name_cell,
+                Cell::from(Span::styled(provider.api_format.to_string(), detail_style)),
+                Cell::from(Span::styled(provider.base_url.as_str(), detail_style)),
+                masked_api_key(&provider.api_key),
+            ];
+            if has_quota {
+                cells.push(render_quota_cell(
+                    quota_status,
+                    &provider.id,
+                    terminal_width,
+                ));
+            }
+            if has_notes {
+                cells.push(Cell::from(Span::styled(notes_text, detail_style)));
+            }
+            Row::new(cells)
+        })
+        .collect();
+
+    let mut col_constraints = vec![
+        Constraint::Length(name_col),
+        Constraint::Length(12),
+        Constraint::Length(url_col),
+        Constraint::Length(key_col),
+    ];
+    if has_quota {
+        col_constraints.push(Constraint::Length(20));
+    }
+    if has_notes {
+        col_constraints.push(Constraint::Length(notes_col));
+    }
+    let table = Table::new(rows, col_constraints)
+        .header(header)
+        .block(
+            Block::default()
+                .borders(table_borders)
+                .border_set(BORDER_DASHED_TOP)
+                .border_style(Style::default().fg(t::MUTED))
+                .padding(Padding::horizontal(1))
+                .title_top(title_left)
+                .title_top(title_right),
+        )
+        .row_highlight_style(Style::default());
+
+    f.render_stateful_widget(table, area, &mut app.providers.table_state);
+}
+
+pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect, right_border: bool) {
+    let border_style = Style::default().fg(t::MUTED);
+    let detail_borders = if right_border {
+        Borders::LEFT | Borders::RIGHT
+    } else {
+        Borders::LEFT
+    };
+    let block = Block::default()
+        .borders(detail_borders)
+        .border_style(border_style)
+        .padding(Padding::horizontal(1));
+
+    let label = Style::default().fg(t::MUTED);
+    let title_line = Line::from(Span::styled(
+        "Info",
+        Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD),
+    ));
+
+    let Some(name) = app
+        .providers
+        .table_state
+        .selected()
+        .and_then(|i| app.providers.names.get(i))
+    else {
+        f.render_widget(
+            Paragraph::new(vec![Line::from(""), title_line]).block(block),
+            area,
+        );
+        return;
+    };
+
+    let mut lines = vec![Line::from(""), title_line];
+    if app.tests.pending.contains(name.as_str()) {
+        let prev = app.tests.results.get(name.as_str());
+        let latency_str = prev
+            .map(|r| fmt_latency(r.latency_ms))
+            .unwrap_or_else(|| "—".to_string());
+        let models_str = prev
+            .and_then(|r| r.model_count)
+            .map(|n| format!("{n} models"))
+            .unwrap_or_else(|| "—".to_string());
+        let testing_model = app
+            .tests
+            .testing_model
+            .get(name.as_str())
+            .map(|m| format!(" ({m})"))
+            .unwrap_or_default();
+        lines.push(Line::from(vec![
+            Span::styled("Status ", label),
+            Span::styled(
+                format!("Testing{testing_model}"),
+                Style::default().fg(t::MUTED).add_modifier(Modifier::ITALIC),
+            ),
+            Span::styled("   Latency ", label),
+            Span::styled(latency_str, Style::default().fg(t::MUTED)),
+            Span::styled("   Models ", label),
+            Span::styled(models_str, Style::default().fg(t::MUTED)),
+        ]));
+    } else if let Some(r) = app.tests.results.get(name.as_str()) {
+        let (status_str, status_style) = match &r.status {
+            TestStatus::Ok => (
+                "✓ OK".to_string(),
+                Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD),
+            ),
+            TestStatus::AuthFailed => (
+                "✗ Auth failed".to_string(),
+                Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD),
+            ),
+            TestStatus::Error(e) => (truncate_error(e), Style::default().fg(t::ERROR)),
+        };
+        let models_str = match r.model_count {
+            Some(n) => Span::styled(format!("{n} models"), Style::default().fg(t::TEXT)),
+            None => Span::styled("—", Style::default().fg(t::MUTED)),
+        };
+        let mut status_spans = vec![
+            Span::styled("Status ", label),
+            Span::styled(status_str, status_style),
+        ];
+        if matches!(r.status, TestStatus::Ok) && !r.used_model.is_empty() {
+            status_spans.push(Span::styled(
+                format!(" ({})", r.used_model),
+                Style::default().fg(t::MUTED),
+            ));
+        }
+        status_spans.extend([
+            Span::styled("   Latency ", label),
+            Span::styled(fmt_latency(r.latency_ms), Style::default().fg(t::TEXT)),
+            Span::styled("   Models ", label),
+            models_str,
+        ]);
+        lines.push(Line::from(status_spans));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("Press ", Style::default().fg(t::MUTED)),
+            Span::styled(
+                "[t]",
+                Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" to test connectivity", Style::default().fg(t::MUTED)),
+        ]));
+    }
+
+    let provider = app.config.providers.get(name.as_str());
+    let enabled_routes: Vec<&crate::config::RouteRule> = provider
+        .map(|p| p.routes.iter().filter(|r| r.enabled).collect())
+        .unwrap_or_default();
+    if !enabled_routes.is_empty() {
+        let avail = (area.width as usize).saturating_sub(4 + ROUTE_LABEL_WIDTH);
+        for (row_idx, group) in pack_routes(&enabled_routes, avail).into_iter().enumerate() {
+            let mut spans: Vec<Span> = vec![if row_idx == 0 {
+                Span::styled("Routes ", label)
+            } else {
+                Span::raw("       ")
+            }];
+            for (i, route) in group.iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::raw("  "));
+                }
+                spans.push(Span::styled(&route.pattern, Style::default().fg(t::TEXT)));
+                spans.push(Span::styled(" → ", Style::default().fg(t::MUTED)));
+                spans.push(Span::styled(
+                    &route.target,
+                    Style::default().fg(t::route_target_color(&route.target)),
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
+    }
+
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn make_table_titles(app: &App) -> (Line<'static>, Line<'static>) {
+    let left = Line::from(vec![
+        Span::styled(
+            " Claude Code Switcher",
+            Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  v{} ", env!("CARGO_PKG_VERSION")),
+            Style::default().fg(t::MUTED),
+        ),
+    ]);
+    let listen = app.config.listen.to_string();
+    let fallback_label = if app.config.fallback {
+        "Fallback on"
+    } else {
+        "Fallback off"
+    };
+    let right = Line::from(vec![
+        Span::styled("╌╌ ", Style::default().fg(t::MUTED)),
+        Span::styled(
+            listen,
+            if app.bg_proxy_pid.is_some() {
+                Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(t::MUTED)
+            },
+        ),
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            fallback_label,
+            if app.config.fallback {
+                Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(t::MUTED)
+            },
+        ),
+        Span::styled(" ╌╌ ", Style::default().fg(t::MUTED)),
+    ])
+    .right_aligned();
+    (left, right)
+}
+
+fn build_test_curl(provider: &Provider, model: &str) -> Result<String, String> {
+    let api_key = provider.resolve_api_key().map_err(|e| e.to_string())?;
+    let (url, body) = provider.chat_url_and_body(model);
+
+    let mut cmd = format!("curl -s -X POST '{url}' \\\n  -H 'Content-Type: application/json' \\\n");
+
+    match provider.api_format {
+        ApiFormat::Anthropic => {
+            cmd.push_str(&format!(
+                "  -H 'x-api-key: {api_key}' \\\n  -H 'anthropic-version: 2023-06-01' \\\n"
+            ));
+        }
+        ApiFormat::OpenAI => {
+            cmd.push_str(&format!("  -H 'Authorization: Bearer {api_key}' \\\n"));
+        }
+    }
+
+    cmd.push_str(&format!("  -d '{body}'"));
+    Ok(cmd)
+}
+
+fn render_quota_cell(
+    quota_status: &std::collections::HashMap<String, QuotaStatus>,
+    provider_id: &str,
+    available_width: u16,
+) -> Cell<'static> {
+    let compact = available_width < 120;
+
+    match quota_status.get(provider_id) {
+        None | Some(QuotaStatus::NotConfigured) => Cell::from(""),
+        Some(QuotaStatus::Running) => {
+            let text = if compact { "[...]" } else { "[running...]" };
+            Cell::from(text).style(Style::default().fg(t::MUTED))
+        }
+        Some(QuotaStatus::Success(result)) => {
+            let text = super::quota_command::cell_text(result);
+            let text = if compact {
+                truncate_display(&text, 10)
+            } else {
+                truncate_display(&text, 18)
+            };
+            Cell::from(text).style(Style::default().fg(t::SUCCESS))
+        }
+        Some(QuotaStatus::Error(_)) => {
+            let text = if compact { "[err]" } else { "[error]" };
+            Cell::from(text).style(Style::default().fg(t::ERROR))
+        }
+    }
+}
+
+fn truncate_display(s: &str, max_chars: usize) -> String {
+    let count = s.chars().count();
+    if count <= max_chars {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max_chars).collect();
+        out.push('…');
+        out
+    }
+}

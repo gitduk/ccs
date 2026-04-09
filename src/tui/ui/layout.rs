@@ -224,36 +224,36 @@ pub(super) fn plan_main_screen(app: &App, area: Rect) -> ScreenPlan {
     }
 }
 
-pub(super) const ROUTE_LABEL_WIDTH: usize = 7; // "Routes "
+pub(crate) const ROUTE_LABEL_WIDTH: usize = 7; // "Routes "
 
 // ── Shared spacing tokens ──────────────────────────────────────────
 // These keep border characters, title dash counts, and gap widths in
 // sync across view.rs, logs.rs, and stats_panel.rs.
 
 /// Horizontal dash character for title separators and dashed borders.
-pub(super) const DASH: &str = "╌";
+pub(crate) const DASH: &str = "╌";
 
 /// Number of dash chars flanking a section title (e.g. "╌╌ Title ╌╌╌").
-pub(super) const TITLE_SIDE: usize = 2;
+pub(crate) const TITLE_SIDE: usize = 2;
 
 /// Gap (spaces) between dash fill and suffix text in title lines.
-pub(super) const SUFFIX_GAP: usize = 1;
+pub(crate) const SUFFIX_GAP: usize = 1;
 
 /// Border set: dashed `╌` on top, solid everywhere else.
-pub(super) const BORDER_DASHED_TOP: border::Set = border::Set {
+pub(crate) const BORDER_DASHED_TOP: border::Set = border::Set {
     horizontal_top: DASH,
     ..border::PLAIN
 };
 
 /// Border set: dashed `╎` on the left (inner column divider), solid elsewhere.
-pub(super) const BORDER_INNER_DIVIDER: border::Set = border::Set {
+pub(crate) const BORDER_INNER_DIVIDER: border::Set = border::Set {
     vertical_left: "╎",
     ..border::PLAIN
 };
 
 /// Pack enabled routes into wrapped lines given the available text width.
 /// Returns groups of routes, each group rendered on one line.
-pub(super) fn pack_routes<'a>(
+pub(crate) fn pack_routes<'a>(
     routes: &[&'a RouteRule],
     avail_width: usize,
 ) -> Vec<Vec<&'a RouteRule>> {
@@ -281,7 +281,7 @@ pub(super) fn pack_routes<'a>(
     result
 }
 
-pub(super) fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -301,7 +301,7 @@ pub(super) fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
-pub(super) fn centered_fixed(percent_x: u16, height: u16, r: Rect) -> Rect {
+pub(crate) fn centered_fixed(percent_x: u16, height: u16, r: Rect) -> Rect {
     let height = height.min(r.height);
     let v_margin = (r.height - height) / 2;
     let vert = Layout::default()

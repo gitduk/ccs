@@ -5,6 +5,13 @@ use crate::error::{AppError, Result};
 
 /// Convert OpenAI Chat Completion response to Anthropic Messages response.
 pub fn openai_to_anthropic_response(resp: &Value) -> Result<Value> {
+    if resp.get("choices").is_some() {
+        return openai_chat_to_anthropic(resp);
+    }
+    openai_responses_to_anthropic(resp)
+}
+
+fn openai_chat_to_anthropic(resp: &Value) -> Result<Value> {
     let choice = resp
         .get("choices")
         .and_then(|c| c.as_array())
@@ -91,6 +98,109 @@ pub fn openai_to_anthropic_response(resp: &Value) -> Result<Value> {
         .unwrap_or(0);
     let output_tokens = usage
         .and_then(|u| u.get("completion_tokens"))
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0);
+
+    let model = resp
+        .get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or("unknown");
+    let id = resp
+        .get("id")
+        .and_then(|i| i.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| format!("msg_{}", Uuid::new_v4()));
+
+    Ok(json!({
+        "id": id,
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": content_blocks,
+        "stop_reason": stop_reason,
+        "stop_sequence": null,
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        }
+    }))
+}
+
+fn openai_responses_to_anthropic(resp: &Value) -> Result<Value> {
+    let output = resp
+        .get("output")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| AppError::Transform("No output in OpenAI Responses response".into()))?;
+
+    let mut content_blocks: Vec<Value> = Vec::new();
+
+    for item in output {
+        match item.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+            "message" => {
+                if let Some(parts) = item.get("content").and_then(|c| c.as_array()) {
+                    for part in parts {
+                        let part_type = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                        if (part_type == "output_text" || part_type == "text")
+                            && let Some(text) = part.get("text").and_then(|t| t.as_str())
+                            && !text.is_empty()
+                        {
+                            content_blocks.push(json!({
+                                "type": "text",
+                                "text": text,
+                            }));
+                        }
+                    }
+                }
+            }
+            "function_call" => {
+                let id = item
+                    .get("call_id")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| item.get("id").and_then(|v| v.as_str()))
+                    .unwrap_or("");
+                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let args_str = item
+                    .get("arguments")
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("{}");
+                let input: Value = serde_json::from_str(args_str).unwrap_or_else(|e| {
+                    tracing::warn!(
+                        "Failed to parse function_call arguments for '{name}': {e}; using empty input"
+                    );
+                    json!({})
+                });
+                content_blocks.push(json!({
+                    "type": "tool_use",
+                    "id": id,
+                    "name": name,
+                    "input": input,
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    if content_blocks.is_empty() {
+        content_blocks.push(json!({"type": "text", "text": ""}));
+    }
+
+    let status = resp
+        .get("status")
+        .and_then(|s| s.as_str())
+        .unwrap_or("completed");
+    let stop_reason = match status {
+        "completed" => "end_turn",
+        "incomplete" => "max_tokens",
+        other => other,
+    };
+
+    let usage = resp.get("usage");
+    let input_tokens = usage
+        .and_then(|u| u.get("input_tokens"))
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0);
+    let output_tokens = usage
+        .and_then(|u| u.get("output_tokens"))
         .and_then(|t| t.as_u64())
         .unwrap_or(0);
 
@@ -356,6 +466,50 @@ mod tests {
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0]["type"], "text");
         assert_eq!(blocks[0]["text"], "");
+    }
+
+    // ─── responses api ───────────────────────────────────────────────────────
+
+    #[test]
+    fn responses_api_text_output_converted() {
+        let resp = json!({
+            "id": "resp_123",
+            "model": "gpt-4.1",
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": "hello from responses"}]
+            }],
+            "usage": {"input_tokens": 11, "output_tokens": 22}
+        });
+        let out = openai_to_anthropic_response(&resp).unwrap();
+        assert_eq!(out["id"], "resp_123");
+        assert_eq!(out["model"], "gpt-4.1");
+        assert_eq!(out["content"][0]["type"], "text");
+        assert_eq!(out["content"][0]["text"], "hello from responses");
+        assert_eq!(out["usage"]["input_tokens"], 11);
+        assert_eq!(out["usage"]["output_tokens"], 22);
+        assert_eq!(out["stop_reason"], "end_turn");
+    }
+
+    #[test]
+    fn responses_api_function_call_converted_to_tool_use() {
+        let resp = json!({
+            "id": "resp_fc",
+            "model": "gpt-4.1",
+            "status": "completed",
+            "output": [{
+                "type": "function_call",
+                "call_id": "call_abc",
+                "name": "search",
+                "arguments": "{\"q\":\"rust\"}"
+            }]
+        });
+        let out = openai_to_anthropic_response(&resp).unwrap();
+        assert_eq!(out["content"][0]["type"], "tool_use");
+        assert_eq!(out["content"][0]["id"], "call_abc");
+        assert_eq!(out["content"][0]["name"], "search");
+        assert_eq!(out["content"][0]["input"]["q"], "rust");
     }
 
     // ─── error cases ─────────────────────────────────────────────────────────

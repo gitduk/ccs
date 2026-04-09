@@ -1,17 +1,56 @@
+//! Request log popup and embedded log side panel.
+//!
+//! This module renders both the request log viewer and the right-column
+//! logs/messages panel on the main screen.
+
+use crossterm::event::KeyCode;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
-
-use super::super::state::{App, MessageKind};
-use super::super::theme::{self as t};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::format::{fmt_latency, format_tokens, shorten_model_name};
-use super::layout::{BORDER_INNER_DIVIDER, DASH, TITLE_SIDE, centered_rect};
+use super::state::{App, MessageKind, Mode};
+use super::theme::{self as t};
+use super::ui::format::{fmt_latency, format_tokens, shorten_model_name};
+use super::ui::layout::{BORDER_INNER_DIVIDER, DASH, TITLE_SIDE, centered_rect};
 
-pub(super) fn draw_logs(f: &mut Frame, app: &mut App) {
+pub(super) fn handle_key(app: &mut App, code: KeyCode) -> crate::error::Result<()> {
+    let total = app
+        .request_log
+        .lock()
+        .map(|l| l.entries().len())
+        .unwrap_or(0);
+
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.mode = Mode::Normal;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if app.logs.selected > 0 {
+                app.logs.selected -= 1;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if total > 0 && app.logs.selected < total - 1 {
+                app.logs.selected += 1;
+            }
+        }
+        KeyCode::Char('G') => {
+            if total > 0 {
+                app.logs.selected = total - 1;
+            }
+        }
+        KeyCode::Char('g') => {
+            app.logs.selected = 0;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+pub(super) fn draw_popup(f: &mut Frame, app: &mut App) {
     let area = centered_rect(90, 80, f.area());
     f.render_widget(Clear, area);
 
@@ -39,8 +78,6 @@ pub(super) fn draw_logs(f: &mut Frame, app: &mut App) {
     }
 
     let mut lines: Vec<Line> = Vec::new();
-
-    // Header — col widths: Status(8) Latency(10) Provider(11) Model(32) In(8) Out(8) Time(8)
     let hdr = Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD);
     lines.push(Line::from(vec![
         Span::styled(format!("{:<7}", "Status"), hdr),
@@ -52,7 +89,7 @@ pub(super) fn draw_logs(f: &mut Frame, app: &mut App) {
         Span::styled("Age", hdr),
     ]));
 
-    let viewport_height = inner.height.saturating_sub(1) as usize; // minus header
+    let viewport_height = inner.height.saturating_sub(1) as usize;
     let selected = app.logs.selected.min(entries.len().saturating_sub(1));
 
     let scroll = if selected < app.logs.scroll as usize {
@@ -109,8 +146,7 @@ pub(super) fn draw_logs(f: &mut Frame, app: &mut App) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-/// Embedded right-column panel: Messages (top) + Recent Requests (bottom).
-pub(super) fn draw_logs_panel(f: &mut Frame, app: &App, area: Rect, messages_height: u16) {
+pub(super) fn draw_panel(f: &mut Frame, app: &App, area: Rect, messages_height: u16) {
     let block = Block::default()
         .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
         .border_set(BORDER_INNER_DIVIDER)
@@ -147,8 +183,6 @@ fn make_dash_title<'a>(title: &'static str, width: usize) -> Line<'a> {
     ])
 }
 
-/// Renders the Messages sub-panel (newest entry at the bottom).
-/// Long messages wrap onto continuation lines with a 2-space indent.
 fn draw_messages_content(f: &mut Frame, app: &App, area: Rect) {
     if area.height == 0 {
         return;
@@ -158,15 +192,13 @@ fn draw_messages_content(f: &mut Frame, app: &App, area: Rect) {
     let title_line = make_dash_title("Messages", width);
 
     let msg_width = width;
-    let visible_rows = area.height.saturating_sub(1) as usize; // minus title line
+    let visible_rows = area.height.saturating_sub(1) as usize;
 
     let mut lines: Vec<Line> = vec![title_line];
 
     if app.message_log.is_empty() {
         lines.push(Line::from(Span::styled("no messages yet", muted)));
     } else {
-        // Build wrapped lines from newest-last, keeping only what fits.
-        // We iterate in reverse to fill from the bottom up, then reverse the result.
         let mut collected: Vec<Line> = Vec::new();
         'outer: for entry in app.message_log.iter().rev() {
             let msg_style = match entry.kind {
@@ -174,10 +206,8 @@ fn draw_messages_content(f: &mut Frame, app: &App, area: Rect) {
                 MessageKind::Success => Style::default().fg(t::SUCCESS),
                 MessageKind::Info => muted,
             };
-            // Split text into chunks of msg_width characters.
             let chunks = wrap_text(&entry.text, msg_width);
-            // Walk chunks in reverse (last chunk first) so we can break early.
-            for (_ci, chunk) in chunks.iter().enumerate().rev() {
+            for chunk in chunks.iter().rev() {
                 if collected.len() >= visible_rows {
                     break 'outer;
                 }
@@ -191,7 +221,6 @@ fn draw_messages_content(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines), area);
 }
 
-/// Renders the Recent Requests sub-panel.
 fn draw_requests_content(f: &mut Frame, app: &App, area: Rect) {
     if area.height < 3 {
         return;
@@ -199,8 +228,6 @@ fn draw_requests_content(f: &mut Frame, app: &App, area: Rect) {
     let muted = Style::default().fg(t::MUTED);
     let width = area.width as usize;
     let title_line = make_dash_title("Recent Requests", width);
-
-    // title + header = 2 lines used
     let visible_rows = area.height.saturating_sub(2) as usize;
 
     let entries = match app.request_log.lock() {
@@ -291,7 +318,6 @@ fn draw_footer(f: &mut Frame, area: Rect, text: &str) {
     );
 }
 
-/// Display column width of `s`, using the same unicode-width table ratatui uses.
 fn display_width(s: &str) -> usize {
     s.width()
 }
@@ -300,7 +326,6 @@ fn truncate(s: &str, max: usize) -> String {
     if display_width(s) <= max {
         return s.to_string();
     }
-    // Take chars until adding the next one would exceed max-1 (leaving room for '…').
     let mut w = 0usize;
     let mut end = 0usize;
     for (i, ch) in s.char_indices() {
@@ -314,7 +339,6 @@ fn truncate(s: &str, max: usize) -> String {
     format!("{}…", &s[..end])
 }
 
-/// Split `s` into lines of at most `max` display columns, matching ratatui's rendering.
 fn wrap_text(s: &str, max: usize) -> Vec<String> {
     if max == 0 {
         return vec![s.to_string()];
@@ -326,7 +350,6 @@ fn wrap_text(s: &str, max: usize) -> Vec<String> {
             chunks.push(remaining.to_string());
             break;
         }
-        // Accumulate chars until adding the next would exceed `max` display columns.
         let mut w = 0usize;
         let mut split = remaining.len();
         for (i, ch) in remaining.char_indices() {

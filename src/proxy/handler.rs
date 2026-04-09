@@ -163,10 +163,14 @@ async fn try_providers(
     do_cycle: bool,
     ctx: &RequestCtx<'_>,
 ) -> Result<Response, AppError> {
+    let request_log_limit = state.config.read().await.request_log_limit;
     let round_size = pool.len();
     let max_failures = round_size * 3;
+    let max_auth_failures = round_size.max(1);
     let mut consecutive_failures = 0usize;
+    let mut auth_failures = 0usize;
     let mut last_status = None;
+    let mut last_error_body: Option<Bytes> = None;
     let req_model_hint = ctx
         .req_json
         .and_then(|v| v.get("model").and_then(|m| m.as_str()))
@@ -264,6 +268,7 @@ async fn try_providers(
             record_failure(state, &pkey);
             record_error_metric(state, provider_name, status_u16, &preview);
             last_status = Some(status);
+            last_error_body = Some(error_body);
             consecutive_failures += 1;
             if !do_cycle || consecutive_failures >= max_failures {
                 break;
@@ -283,8 +288,9 @@ async fn try_providers(
             record_failure(state, &pkey);
             record_error_metric(state, provider_name, status_u16, &preview);
             last_status = Some(status);
-            consecutive_failures += 1;
-            if !do_cycle || consecutive_failures >= max_failures {
+            last_error_body = Some(error_body.clone());
+            auth_failures += 1;
+            if !do_cycle || auth_failures >= max_auth_failures {
                 return Ok(
                     (status, [("content-type", "application/json")], error_body).into_response()
                 );
@@ -332,7 +338,9 @@ async fn try_providers(
                 // via update_request_log_tokens_async once the stream ends.
                 let mut persisted = initial_entry.clone();
                 persisted.id = id;
-                state.db.persist_request_log_async(persisted, 200);
+                state
+                    .db
+                    .persist_request_log_async(persisted, request_log_limit);
             }
             // For buffered responses, the full entry (with tokens) is persisted inside
             // handle_buffered_response — no two-phase write needed.
@@ -349,6 +357,7 @@ async fn try_providers(
                 &state.request_log,
                 entry_id,
                 latency,
+                request_log_limit,
             )
             .await
         } else {
@@ -359,6 +368,7 @@ async fn try_providers(
                 pkey,
                 &state.request_log,
                 initial_entry,
+                request_log_limit,
             )
             .await
         };
@@ -382,15 +392,14 @@ async fn try_providers(
         let id = log.push(failed_entry.clone());
         let mut persisted = failed_entry;
         persisted.id = id;
-        state.db.persist_request_log_async(persisted, 200);
+        state
+            .db
+            .persist_request_log_async(persisted, request_log_limit);
     }
 
-    Ok((
-        final_status,
-        [("content-type", "application/json")],
-        Bytes::from(r#"{"error":"all providers failed"}"#),
-    )
-        .into_response())
+    let body =
+        last_error_body.unwrap_or_else(|| Bytes::from(r#"{"error":"all providers failed"}"#));
+    Ok((final_status, [("content-type", "application/json")], body).into_response())
 }
 
 /// Main handler for POST /v1/messages.
@@ -447,6 +456,7 @@ async fn handle_buffered_response(
     pkey: ProviderKey,
     request_log: &crate::proxy::metrics::SharedRequestLog,
     mut log_entry: RequestLogEntry,
+    request_log_limit: usize,
 ) -> Result<Response, AppError> {
     let entry_id = log_entry.id;
     let ProviderKey {
@@ -499,7 +509,7 @@ async fn handle_buffered_response(
         if let Some(ref m) = model {
             log_entry.model = m.clone();
         }
-        db.persist_request_log_async(log_entry, 200);
+        db.persist_request_log_async(log_entry, request_log_limit);
     }
 
     Ok((
@@ -511,6 +521,7 @@ async fn handle_buffered_response(
 }
 
 /// Handle streaming response.
+#[allow(clippy::too_many_arguments)]
 async fn handle_streaming_response(
     response: reqwest::Response,
     is_openai: bool,
@@ -519,6 +530,7 @@ async fn handle_streaming_response(
     request_log: &SharedRequestLog,
     entry_id: u64,
     latency: u64,
+    request_log_limit: usize,
 ) -> Result<Response, AppError> {
     let raw_stream: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>> =
         if !is_openai {
@@ -532,8 +544,18 @@ async fn handle_streaming_response(
             Box::pin(transform::openai_stream_to_anthropic(response))
         };
 
-    let tracked =
-        track_tokens_in_stream(raw_stream, db, pkey, request_log.clone(), entry_id, latency);
+    let tracked = track_tokens_in_stream(
+        raw_stream,
+        StreamTrackingCtx {
+            db,
+            provider_id: pkey.id,
+            provider_name: pkey.name,
+            request_log: request_log.clone(),
+            entry_id,
+            latency,
+            request_log_limit,
+        },
+    );
     let body = Body::from_stream(tracked);
 
     Response::builder()
@@ -544,18 +566,32 @@ async fn handle_streaming_response(
         .map_err(|e| AppError::Transform(e.to_string()))
 }
 
+/// Context for tracking tokens in a streaming response.
+struct StreamTrackingCtx {
+    db: Repository,
+    provider_id: String,
+    provider_name: String,
+    request_log: SharedRequestLog,
+    entry_id: u64,
+    latency: u64,
+    request_log_limit: usize,
+}
+
 /// Wrap a byte stream to extract token usage from anthropic SSE events.
 /// Passes all bytes through unchanged; records metrics when the stream ends.
 fn track_tokens_in_stream(
     mut inner: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>>,
-    db: Repository,
-    pkey: ProviderKey,
-    request_log: SharedRequestLog,
-    entry_id: u64,
-    latency: u64,
+    ctx: StreamTrackingCtx,
 ) -> impl futures::Stream<Item = std::io::Result<Bytes>> + Send {
-    let provider_id = pkey.id;
-    let provider_name = pkey.name;
+    let StreamTrackingCtx {
+        db,
+        provider_id,
+        provider_name,
+        request_log,
+        entry_id,
+        latency,
+        request_log_limit,
+    } = ctx;
     async_stream::stream! {
         const LINE_BUF_MAX: usize = 1024 * 1024; // 1 MB safety cap
         let mut input_tokens = 0u64;
@@ -626,7 +662,7 @@ fn track_tokens_in_stream(
             log.backfill(entry_id, input_tokens, output_tokens, model.as_deref());
         }
         if entry_id != 0 {
-            db.update_request_log_tokens_async(entry_id, input_tokens, output_tokens, model);
+            db.update_request_log_tokens_async(entry_id, input_tokens, output_tokens, model, request_log_limit);
         }
     }
 }
