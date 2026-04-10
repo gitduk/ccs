@@ -6,10 +6,13 @@ use bytes::Bytes;
 use futures::StreamExt;
 
 use super::SharedState;
-use crate::config::{ApiFormat, OpenAiApiVersion};
+use crate::config::ApiFormat;
 use crate::error::AppError;
+use crate::proxy::executor::{
+    ProviderRequestOutcome, execute_provider_request, extract_error_message,
+};
 use crate::proxy::metrics::{RequestLogEntry, SharedRequestLog};
-use crate::proxy::{forwarder, transform};
+use crate::proxy::transform;
 
 /// Bundles a provider's stable UUID and display name for passing through the request pipeline.
 #[derive(Clone)]
@@ -155,96 +158,6 @@ struct RequestCtx<'a> {
     route_pattern: &'a str,
 }
 
-#[derive(Debug)]
-pub(crate) struct ProviderRequestOutcome {
-    pub response: Option<reqwest::Response>,
-    pub error_status: Option<StatusCode>,
-    pub error_body: Option<Bytes>,
-    pub latency_ms: u64,
-}
-
-async fn execute_provider_request(
-    client: &reqwest::Client,
-    provider: &crate::config::Provider,
-    api_key: &str,
-    body: &Bytes,
-    req_json: Option<&serde_json::Value>,
-    headers: &HeaderMap,
-) -> Result<ProviderRequestOutcome, AppError> {
-    let t0 = std::time::Instant::now();
-    let is_openai = provider.api_format == ApiFormat::OpenAI;
-    let request_json = if is_openai {
-        Some(req_json.ok_or_else(|| AppError::Transform("Invalid JSON body".into()))?)
-    } else {
-        None
-    };
-    let make_openai_body = |api_version: OpenAiApiVersion| -> Result<Bytes, AppError> {
-        let transformed = transform::anthropic_to_openai_request_with_api_version(
-            request_json.expect("OpenAI request JSON should exist"),
-            provider,
-            api_version,
-        )?;
-        Ok(Bytes::from(serde_json::to_vec(&transformed)?))
-    };
-
-    let initial_api_version = provider.openai_api_version_enum();
-    let upstream_body = if is_openai {
-        make_openai_body(initial_api_version.clone())?
-    } else {
-        body.clone()
-    };
-
-    let mut response = forwarder::forward_request(
-        client,
-        provider,
-        api_key,
-        upstream_body,
-        headers,
-        if is_openai {
-            Some(initial_api_version.clone())
-        } else {
-            None
-        },
-    )
-    .await?;
-
-    if is_openai
-        && matches!(initial_api_version, OpenAiApiVersion::Responses)
-        && response.status() == StatusCode::NOT_FOUND
-    {
-        let not_found_body = response.bytes().await?;
-        if should_fallback_from_responses_404(&not_found_body) {
-            tracing::warn!(
-                "Provider {} returned endpoint-style 404 for /v1/responses, retrying /v1/chat/completions",
-                provider.base_url
-            );
-            response = forwarder::forward_request(
-                client,
-                provider,
-                api_key,
-                make_openai_body(OpenAiApiVersion::ChatCompletions)?,
-                headers,
-                Some(OpenAiApiVersion::ChatCompletions),
-            )
-            .await?;
-        } else {
-            return Ok(ProviderRequestOutcome {
-                response: None,
-                error_status: Some(StatusCode::NOT_FOUND),
-                error_body: Some(not_found_body),
-                latency_ms: t0.elapsed().as_millis() as u64,
-            });
-        }
-    }
-
-    Ok(ProviderRequestOutcome {
-        response: Some(response),
-        error_status: None,
-        error_body: None,
-        latency_ms: t0.elapsed().as_millis() as u64,
-    })
-}
-
 /// Try each provider in the pool; cycle on retryable errors (5xx, 429, auth).
 /// Returns the first successful response or a final error response.
 async fn try_providers(
@@ -334,28 +247,16 @@ async fn try_providers(
             }
         };
 
-        let status = if let Some(status) = outcome.error_status {
-            status
-        } else {
-            outcome
-                .response
-                .as_ref()
-                .expect("successful provider outcome must have a response")
-                .status()
-        };
+        let status = outcome.status();
         let status_u16 = status.as_u16();
 
         // 5xx or 429: try next provider
         if status_u16 >= 500 || status_u16 == 429 {
-            let error_body = if let Some(body) = outcome.error_body {
-                body
-            } else {
-                outcome
-                    .response
-                    .expect("error response body missing upstream response")
-                    .bytes()
-                    .await
-                    .unwrap_or_default()
+            let error_body = match outcome {
+                ProviderRequestOutcome::UpstreamError { body, .. } => body,
+                ProviderRequestOutcome::Success { response, .. } => {
+                    response.bytes().await.unwrap_or_default()
+                }
             };
             let preview = extract_error_message(&error_body);
             tracing::warn!(
@@ -375,15 +276,11 @@ async fn try_providers(
 
         // 401/403/404: auth error or model not found — try next provider in fallback mode
         if status_u16 == 401 || status_u16 == 403 || status_u16 == 404 {
-            let error_body = if let Some(body) = outcome.error_body {
-                body
-            } else {
-                outcome
-                    .response
-                    .expect("auth/not-found response missing upstream response")
-                    .bytes()
-                    .await
-                    .unwrap_or_default()
+            let error_body = match outcome {
+                ProviderRequestOutcome::UpstreamError { body, .. } => body,
+                ProviderRequestOutcome::Success { response, .. } => {
+                    response.bytes().await.unwrap_or_default()
+                }
             };
             let preview = extract_error_message(&error_body);
             tracing::warn!(
@@ -406,15 +303,11 @@ async fn try_providers(
 
         // Other 4xx: client error (bad request format etc.), return immediately
         if !status.is_success() {
-            let error_body = if let Some(body) = outcome.error_body {
-                body
-            } else {
-                outcome
-                    .response
-                    .expect("client error response missing upstream response")
-                    .bytes()
-                    .await
-                    .unwrap_or_default()
+            let error_body = match outcome {
+                ProviderRequestOutcome::UpstreamError { body, .. } => body,
+                ProviderRequestOutcome::Success { response, .. } => {
+                    response.bytes().await.unwrap_or_default()
+                }
             };
             let preview = extract_error_message(&error_body);
             tracing::warn!("Upstream returned {status}: {preview}");
@@ -423,12 +316,13 @@ async fn try_providers(
             return Ok((status, [("content-type", "application/json")], error_body).into_response());
         }
 
+        let latency_ms = outcome.latency_ms();
         if let Ok(mut m) = state.metrics.lock() {
             m.clear_error(provider_name);
             m.by_provider
                 .entry(provider_name.clone())
                 .or_default()
-                .latency_total += outcome.latency_ms;
+                .latency_total += latency_ms;
         }
         // Log successful requests — tokens will be filled in by the response handlers,
         // but we log the entry here for latency and provider info. For buffered responses,
@@ -439,7 +333,7 @@ async fn try_providers(
             provider: provider_name.clone(),
             model: req_model_hint.clone(),
             status: status_u16,
-            latency_ms: outcome.latency_ms,
+            latency_ms,
             input_tokens: 0,
             output_tokens: 0,
             is_stream: ctx.is_stream,
@@ -462,9 +356,12 @@ async fn try_providers(
         } else {
             0
         };
-        let response = outcome
-            .response
-            .expect("successful provider outcome must carry response body");
+        let response = match outcome {
+            ProviderRequestOutcome::Success { response, .. } => response,
+            ProviderRequestOutcome::UpstreamError { .. } => {
+                unreachable!("successful status must come from a response outcome")
+            }
+        };
         return if ctx.is_stream {
             handle_streaming_response(
                 response,
@@ -475,7 +372,7 @@ async fn try_providers(
                     provider_name: pkey.name,
                     request_log: state.request_log.clone(),
                     entry_id,
-                    latency: outcome.latency_ms,
+                    latency: latency_ms,
                     request_log_limit,
                 },
             )
@@ -768,73 +665,4 @@ fn track_tokens_in_stream(
             db.update_request_log_tokens_async(entry_id, input_tokens, output_tokens, model, request_log_limit);
         }
     }
-}
-
-/// Extract a short human-readable error summary from an upstream error body.
-/// Tries to parse `error.message` from JSON; falls back to raw text preview.
-pub(crate) async fn probe_provider_message(
-    client: &reqwest::Client,
-    provider: &crate::config::Provider,
-    api_key: &str,
-    req_json: &serde_json::Value,
-) -> Result<(StatusCode, u64), AppError> {
-    let body = Bytes::from(serde_json::to_vec(req_json)?);
-    let headers = HeaderMap::new();
-    let outcome =
-        execute_provider_request(client, provider, api_key, &body, Some(req_json), &headers)
-            .await?;
-    let status = outcome
-        .error_status
-        .or_else(|| outcome.response.as_ref().map(|r| r.status()))
-        .expect("probe outcome must contain a status");
-    Ok((status, outcome.latency_ms))
-}
-
-fn should_fallback_from_responses_404(body: &[u8]) -> bool {
-    let message = extract_error_message(body).to_ascii_lowercase();
-    if message.is_empty() {
-        return false;
-    }
-
-    let deny = [
-        "model",
-        "deployment",
-        "resource",
-        "permission",
-        "api key",
-        "unauthorized",
-        "forbidden",
-    ];
-    if deny.iter().any(|term| message.contains(term)) {
-        return false;
-    }
-
-    let allow = [
-        "endpoint not found",
-        "unknown endpoint",
-        "path not found",
-        "route not found",
-        "unsupported route",
-        "does not support /v1/responses",
-        "/v1/responses not found",
-    ];
-    allow.iter().any(|term| message.contains(term))
-}
-
-fn extract_error_message(body: &[u8]) -> String {
-    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
-        if let Some(msg) = v
-            .get("error")
-            .and_then(|e| e.get("message"))
-            .and_then(|m| m.as_str())
-        {
-            return msg.chars().take(120).collect();
-        }
-        if let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
-            return msg.chars().take(120).collect();
-        }
-    }
-    String::from_utf8_lossy(&body[..body.len().min(120)])
-        .trim()
-        .to_string()
 }

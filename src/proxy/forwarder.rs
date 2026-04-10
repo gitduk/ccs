@@ -22,17 +22,15 @@ pub async fn forward_request(
     api_key: &str,
     body: Bytes,
     incoming_headers: &HeaderMap,
-    openai_api_version: Option<OpenAiApiVersion>,
+    openai_api_version: OpenAiApiVersion,
 ) -> Result<reqwest::Response> {
     let base = provider.base_url.trim_end_matches('/');
     let url = match provider.api_format {
         ApiFormat::Anthropic => format!("{base}/v1/messages"),
-        ApiFormat::OpenAI => {
-            match openai_api_version.unwrap_or_else(|| provider.openai_api_version_enum()) {
-                OpenAiApiVersion::ChatCompletions => format!("{base}/v1/chat/completions"),
-                OpenAiApiVersion::Responses => format!("{base}/v1/responses"),
-            }
-        }
+        ApiFormat::OpenAI => match openai_api_version {
+            OpenAiApiVersion::ChatCompletions => format!("{base}/v1/chat/completions"),
+            OpenAiApiVersion::Responses => format!("{base}/v1/responses"),
+        },
     };
     let (auth_key, auth_val) = provider.auth_header(api_key);
 

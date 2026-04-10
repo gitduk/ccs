@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 
 use crate::config::{ApiFormat, Provider};
-use crate::proxy::handler::probe_provider_message;
+use crate::proxy::executor::probe_provider_message;
 
 const TEST_TIMEOUT_SECS: u64 = 10;
 
