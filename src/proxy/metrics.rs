@@ -119,9 +119,19 @@ impl RequestLog {
         &mut self.entries
     }
 
-    /// Replace all in-memory entries (used by TUI to sync from DB in bg-proxy mode).
+    /// Replace all in-memory entries, keeping only the newest `REQUEST_LOG_CAPACITY`.
     pub fn replace(&mut self, entries: Vec<RequestLogEntry>) {
-        self.entries = entries.into_iter().collect();
+        let mut deque = VecDeque::from(entries);
+        while deque.len() > REQUEST_LOG_CAPACITY {
+            deque.pop_front();
+        }
+        self.entries = deque;
+    }
+
+    pub fn from_entries(entries: Vec<RequestLogEntry>) -> Self {
+        let mut log = Self::default();
+        log.replace(entries);
+        log
     }
 }
 

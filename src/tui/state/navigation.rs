@@ -31,6 +31,11 @@ impl App {
         let (metrics_data, provider_models) = db.load_all();
         let metrics = Arc::new(Mutex::new(metrics_data));
 
+        let initial_logs = db.load_recent_request_logs(config.request_log_limit);
+        let request_log = Arc::new(Mutex::new(crate::proxy::metrics::RequestLog::from_entries(
+            initial_logs,
+        )));
+
         let bg_proxy_pid = super::bg_proxy::load_bg_proxy_pid();
         Ok(Self {
             config,
@@ -54,7 +59,7 @@ impl App {
                 scroll: 0,
                 pending_key: None,
             },
-            request_log: Arc::new(Mutex::new(crate::proxy::metrics::RequestLog::default())),
+            request_log,
             logs: LogsState {
                 selected: 0,
                 scroll: 0,
