@@ -258,14 +258,16 @@ impl Provider {
 
     /// Get the actual OpenAI API version (defaults to Responses API)
     pub fn openai_api_version(&self) -> &str {
-        match self
-            .api_version
-            .as_ref()
-            .unwrap_or(&OpenAiApiVersion::Responses)
-        {
+        match self.openai_api_version_enum() {
             OpenAiApiVersion::ChatCompletions => "chat_completions",
             OpenAiApiVersion::Responses => "responses",
         }
+    }
+
+    pub fn openai_api_version_enum(&self) -> OpenAiApiVersion {
+        self.api_version
+            .clone()
+            .unwrap_or(OpenAiApiVersion::Responses)
     }
 
     /// Check if this provider should use Responses API format
@@ -274,9 +276,9 @@ impl Provider {
             && !matches!(self.api_version, Some(OpenAiApiVersion::ChatCompletions))
     }
 
-    /// Return the (endpoint URL, JSON body string) for a minimal chat request
-    /// using the correct API format and version for this provider. Single source
-    /// of truth shared by the live request path and curl-command generation.
+    /// Return the (endpoint URL, JSON body string) for a minimal probe request
+    /// using this provider's configured API format and version. Used for curl
+    /// preview/debug output; live proxy requests use the transform/forwarder path.
     pub fn chat_url_and_body(&self, model: &str) -> (String, String) {
         let base = self.base_url.trim_end_matches('/');
         match self.api_format {

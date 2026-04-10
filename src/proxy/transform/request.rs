@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use crate::config::Provider;
+use crate::config::{OpenAiApiVersion, Provider};
 use crate::error::{AppError, Result};
 
 // Default model names
@@ -24,7 +24,17 @@ fn extract_system_text(req: &Value) -> String {
 /// Convert an Anthropic Messages API request to OpenAI format.
 /// Automatically detects and uses the appropriate format based on provider configuration.
 pub fn anthropic_to_openai_request(req: &Value, provider: &Provider) -> Result<Value> {
-    let is_responses = provider.uses_responses_api();
+    anthropic_to_openai_request_with_api_version(req, provider, provider.openai_api_version_enum())
+}
+
+/// Convert an Anthropic Messages API request to OpenAI format using an explicit
+/// OpenAI API version for this attempt.
+pub fn anthropic_to_openai_request_with_api_version(
+    req: &Value,
+    provider: &Provider,
+    api_version: OpenAiApiVersion,
+) -> Result<Value> {
+    let is_responses = matches!(api_version, OpenAiApiVersion::Responses);
 
     let model = req
         .get("model")
@@ -586,6 +596,27 @@ mod tests {
     }
 
     // ─── anthropic_to_openai_chat_completions_request ────────────────────────
+
+    #[test]
+    fn explicit_api_version_can_override_provider_default() {
+        let req = json!({
+            "model": "m",
+            "system": "You are helpful.",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 10,
+            "stream": true
+        });
+        let out = anthropic_to_openai_request_with_api_version(
+            &req,
+            &provider_responses(),
+            OpenAiApiVersion::ChatCompletions,
+        )
+        .unwrap();
+        assert!(out.get("messages").is_some());
+        assert!(out.get("input").is_none());
+        assert_eq!(out["messages"][0]["role"], "system");
+        assert_eq!(out["stream_options"]["include_usage"], true);
+    }
 
     #[test]
     fn chat_completions_simple_user_message() {

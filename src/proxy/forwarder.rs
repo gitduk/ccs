@@ -2,7 +2,7 @@ use axum::http::HeaderMap;
 use bytes::Bytes;
 use reqwest::Client;
 
-use crate::config::{ApiFormat, Provider};
+use crate::config::{ApiFormat, OpenAiApiVersion, Provider};
 use crate::error::Result;
 
 /// Headers that should NOT be forwarded to upstream.
@@ -22,15 +22,15 @@ pub async fn forward_request(
     api_key: &str,
     body: Bytes,
     incoming_headers: &HeaderMap,
+    openai_api_version: Option<OpenAiApiVersion>,
 ) -> Result<reqwest::Response> {
     let base = provider.base_url.trim_end_matches('/');
     let url = match provider.api_format {
         ApiFormat::Anthropic => format!("{base}/v1/messages"),
         ApiFormat::OpenAI => {
-            // Prefer new Responses API by default
-            match provider.openai_api_version() {
-                "chat_completions" => format!("{base}/v1/chat/completions"),
-                _ => format!("{base}/v1/responses"), // Default to Responses API
+            match openai_api_version.unwrap_or_else(|| provider.openai_api_version_enum()) {
+                OpenAiApiVersion::ChatCompletions => format!("{base}/v1/chat/completions"),
+                OpenAiApiVersion::Responses => format!("{base}/v1/responses"),
             }
         }
     };

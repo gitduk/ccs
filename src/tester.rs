@@ -1,6 +1,9 @@
 use std::time::{Duration, Instant};
 
+use serde_json::json;
+
 use crate::config::{ApiFormat, Provider};
+use crate::proxy::handler::probe_provider_message;
 
 const TEST_TIMEOUT_SECS: u64 = 10;
 
@@ -37,52 +40,41 @@ pub async fn test_latency(
     // paths share the same reference point.
     let tested_at = Instant::now();
 
+    let used_model = model.clone();
+    let req_json = json!({
+        "model": used_model,
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "ping"}],
+    });
+
     let api_key = match provider.resolve_api_key() {
         Ok(k) => k,
         Err(e) => {
             return TestResult {
                 status: TestStatus::Error(format!("Key error: {e}")),
                 latency_ms: 0,
-                model_count: None,
-                model_names: known_models,
-                tested_at,
-                used_model: model,
-            };
-        }
-    };
-    let base = provider.base_url.trim_end_matches('/');
-    let auth_header = provider.auth_header(&api_key);
-    // Use the shared URL/body builder — same logic as build_test_curl in the TUI.
-    let (msg_url, body) = provider.chat_url_and_body(&model);
-
-    let t0 = Instant::now();
-    let mut req = client
-        .post(&msg_url)
-        .header(auth_header.0, &auth_header.1)
-        .header("content-type", "application/json");
-    if provider.api_format == ApiFormat::Anthropic {
-        req = req.header("anthropic-version", "2023-06-01");
-    }
-    let response = req
-        .body(body)
-        .timeout(Duration::from_secs(TEST_TIMEOUT_SECS))
-        .send()
-        .await;
-    let latency_ms = t0.elapsed().as_millis() as u64;
-
-    let status = match response {
-        Err(e) => {
-            return TestResult {
-                status: TestStatus::Error(format!("Connection failed: {e}")),
-                latency_ms,
                 model_count: known_models.as_ref().map(|v| v.len()),
                 model_names: known_models,
                 tested_at,
-                used_model: model,
+                used_model: used_model.clone(),
             };
         }
-        Ok(r) => r.status(),
     };
+
+    let (status, latency_ms) =
+        match probe_provider_message(client, provider, &api_key, &req_json).await {
+            Ok((status, latency_ms)) => (status, latency_ms),
+            Err(e) => {
+                return TestResult {
+                    status: TestStatus::Error(format!("Connection failed: {e}")),
+                    latency_ms: 0,
+                    model_count: known_models.as_ref().map(|v| v.len()),
+                    model_names: known_models,
+                    tested_at,
+                    used_model: used_model.clone(),
+                };
+            }
+        };
 
     let msg_status = if status.is_success() {
         TestStatus::Ok
@@ -91,6 +83,9 @@ pub async fn test_latency(
     } else {
         TestStatus::Error(format!("HTTP {}", status.as_u16()))
     };
+
+    let base = provider.base_url.trim_end_matches('/');
+    let auth_header = provider.auth_header(&api_key);
 
     // Use the pre-fetched model list when available; otherwise fetch now
     // (best-effort, does not affect status or latency).
@@ -106,7 +101,7 @@ pub async fn test_latency(
         model_count,
         model_names,
         tested_at,
-        used_model: model,
+        used_model: req_json["model"].as_str().unwrap_or_default().to_string(),
     }
 }
 
