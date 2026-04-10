@@ -106,15 +106,25 @@ pub async fn start_server(config: AppConfig) -> crate::error::Result<()> {
 }
 
 /// Start the proxy server with an external shutdown signal (TUI mode).
-/// Accepts a pre-built `Arc<RwLock<AppConfig>>` so the TUI can mutate it live.
+/// Receives config updates via watch so the latest config wins deterministically.
 pub async fn start_server_with_shutdown(
-    shared_config: Arc<RwLock<AppConfig>>,
+    mut config_rx: tokio::sync::watch::Receiver<AppConfig>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     metrics: SharedMetrics,
     request_log: SharedRequestLog,
     db: Repository,
 ) -> crate::error::Result<()> {
-    let listen = shared_config.read().await.listen.clone();
+    let initial_config = config_rx.borrow().clone();
+    let listen = initial_config.listen.clone();
+    let shared_config = Arc::new(RwLock::new(initial_config));
+    let config_for_watcher = shared_config.clone();
+    tokio::spawn(async move {
+        while config_rx.changed().await.is_ok() {
+            let new_cfg = config_rx.borrow_and_update().clone();
+            *config_for_watcher.write().await = new_cfg;
+        }
+    });
+
     let state = Arc::new(AppState {
         config: shared_config,
         http_client: build_http_client(),

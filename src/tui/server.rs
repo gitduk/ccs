@@ -1,23 +1,15 @@
-use std::sync::Arc;
-
 use tokio::sync::watch;
 
 use super::App;
 use super::ServerHandle;
 use super::state::{MessageKind, ServerStatus};
 
-/// Sync config to the running proxy. For the in-process server, writes directly
-/// to the shared RwLock. For the background proxy, saves config to disk and
-/// sends SIGHUP to trigger a reload.
+/// Sync config to the running proxy. For the in-process server, sends the
+/// latest config through watch. For the background proxy, saves config to disk
+/// and sends SIGHUP to trigger a reload.
 pub(super) fn sync_proxy_config(app: &App, server: &Option<ServerHandle>) {
     if let Some(handle) = server {
-        let config = app.config.clone();
-        let proxy_config = handle.proxy_config.clone();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async move {
-                *proxy_config.write().await = config;
-            });
-        });
+        let _ = handle.config_tx.send(app.config.clone());
     } else if let Some(pid) = app.bg_proxy_pid {
         match crate::config::save_config(&app.config) {
             Ok(()) => super::state::send_sighup(pid),
@@ -33,7 +25,7 @@ pub(super) fn start_server_background(app: &mut App, server: &mut Option<ServerH
     }
 
     let listen = app.config.listen.clone();
-    let proxy_config = Arc::new(tokio::sync::RwLock::new(app.config.clone()));
+    let (config_tx, config_rx) = watch::channel(app.config.clone());
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     app.server_status = ServerStatus::Starting;
@@ -41,10 +33,9 @@ pub(super) fn start_server_background(app: &mut App, server: &mut Option<ServerH
     let metrics = app.metrics.clone();
     let request_log = app.request_log.clone();
     let db = app.db.clone();
-    let proxy_config_server = proxy_config.clone();
     let task = tokio::spawn(async move {
         if let Err(e) = crate::proxy::start_server_with_shutdown(
-            proxy_config_server,
+            config_rx,
             shutdown_rx,
             metrics,
             request_log,
@@ -59,7 +50,7 @@ pub(super) fn start_server_background(app: &mut App, server: &mut Option<ServerH
     *server = Some(ServerHandle {
         task,
         shutdown_tx,
-        proxy_config,
+        config_tx,
     });
     app.server_status = ServerStatus::Running;
     app.set_message(format!("Proxy started on {listen}"), MessageKind::Success);

@@ -226,7 +226,7 @@ pub struct ProviderForm {
     /// First visible suggestion index; keeps the highlighted item within the 8-row viewport.
     pub route_suggest_scroll: usize,
 
-    /// Pending first key of a two-key sequence (`ZZ`, `ZQ`, `dd`) inside the form.
+    /// Pending first key of a two-key sequence (`dd`, `gg`, `yy`) inside the form.
     pub pending_key: Option<(char, std::time::Instant)>,
     pub error: Option<String>,
 }
@@ -259,6 +259,8 @@ pub struct FormField {
     pub editable: bool,
     pub is_toggle: bool,
     pub is_multiline: bool,
+    /// Valid only when `is_toggle = true`. Lists the values the toggle cycles through (first = left, second = right).
+    pub toggle_options: &'static [&'static str],
 }
 
 // ─── FormField helpers ────────────────────────────────────────────────────────
@@ -273,6 +275,7 @@ impl FormField {
             editable: true,
             is_toggle: false,
             is_multiline: false,
+            toggle_options: &[],
         }
     }
 
@@ -284,10 +287,20 @@ impl FormField {
             editable: true,
             is_toggle: false,
             is_multiline: false,
+            toggle_options: &[],
         }
     }
 
-    pub(super) fn toggle(label: &'static str, value: &str) -> Self {
+    /// Construct a toggle field that cycles through the given options.
+    pub(super) fn toggle(
+        label: &'static str,
+        value: &str,
+        options: &'static [&'static str],
+    ) -> Self {
+        debug_assert!(
+            options.len() >= 2,
+            "toggle fields require at least two options"
+        );
         Self {
             label,
             value: value.to_string(),
@@ -295,6 +308,7 @@ impl FormField {
             editable: true,
             is_toggle: true,
             is_multiline: false,
+            toggle_options: options,
         }
     }
 
@@ -306,6 +320,7 @@ impl FormField {
             editable: true,
             is_toggle: false,
             is_multiline: true,
+            toggle_options: &[],
         }
     }
 
@@ -463,15 +478,34 @@ impl FormField {
         self.cursor = self.value.len();
     }
 
-    pub fn toggle_value(&mut self) {
-        if !self.is_toggle {
+    pub fn move_next(&mut self) {
+        if !self.is_toggle || self.toggle_options.len() < 2 {
             return;
         }
-        self.value = if self.value == "anthropic" {
-            "openai".to_string()
+        let current = self
+            .toggle_options
+            .iter()
+            .position(|&o| o == self.value)
+            .unwrap_or(0);
+        let next = (current + 1) % self.toggle_options.len();
+        self.value = self.toggle_options[next].to_string();
+    }
+
+    pub fn move_prev(&mut self) {
+        if !self.is_toggle || self.toggle_options.len() < 2 {
+            return;
+        }
+        let current = self
+            .toggle_options
+            .iter()
+            .position(|&o| o == self.value)
+            .unwrap_or(0);
+        let prev = if current == 0 {
+            self.toggle_options.len() - 1
         } else {
-            "anthropic".to_string()
+            current - 1
         };
+        self.value = self.toggle_options[prev].to_string();
     }
 }
 
@@ -480,15 +514,31 @@ impl FormField {
 impl ProviderForm {
     /// Create a new form for adding or editing a provider.
     pub(super) fn new(name: &str, provider: Option<&Provider>) -> Self {
+        use crate::config::{ApiFormat, OpenAiApiVersion};
         let (base_url, api_key, format, notes, routes) = match provider {
-            Some(p) => (
-                p.base_url.as_str(),
-                p.api_key.as_str(),
-                p.api_format.to_string(),
-                p.notes.as_str(),
-                p.routes.clone(),
-            ),
-            None => ("", "", "anthropic".to_string(), "", vec![]),
+            Some(p) => {
+                let fmt = match p.api_format {
+                    ApiFormat::Anthropic => "anthropic",
+                    ApiFormat::OpenAI => {
+                        match p
+                            .api_version
+                            .as_ref()
+                            .unwrap_or(&OpenAiApiVersion::Responses)
+                        {
+                            OpenAiApiVersion::ChatCompletions => "openai-chat",
+                            OpenAiApiVersion::Responses => "openai-responses",
+                        }
+                    }
+                };
+                (
+                    p.base_url.as_str(),
+                    p.api_key.as_str(),
+                    fmt,
+                    p.notes.as_str(),
+                    p.routes.clone(),
+                )
+            }
+            None => ("", "", "anthropic", "", vec![]),
         };
         Self {
             original_name: if name.is_empty() {
@@ -500,7 +550,11 @@ impl ProviderForm {
                 FormField::text("Name", name),
                 FormField::text("Base URL", base_url),
                 FormField::text("API Key", api_key),
-                FormField::toggle("Format", &format),
+                FormField::toggle(
+                    "Format",
+                    format,
+                    &["anthropic", "openai-chat", "openai-responses"],
+                ),
                 FormField::multiline("Notes", notes),
             ],
             focused: 0,
@@ -543,16 +597,16 @@ impl ProviderForm {
     }
 
     /// Move focus to the next editable slot.
-    /// Visual order: Name → Base URL → API Key → Format → Routes → Notes → (wrap)
+    /// Visual order: Name → Base URL → API Key → Format → Notes → (wrap via Routes)
     pub fn focus_next(&mut self) {
         let routes_slot = self.fields.len(); // virtual index for Routes
-        let notes_idx = routes_slot - 1; // Notes is always the last field
+        let notes_idx = NOTES_FIELD_IDX;
 
         let next = if self.focused == notes_idx {
             0 // Notes → Name (wrap)
         } else if self.focused == routes_slot {
             notes_idx // Routes → Notes
-        } else if self.focused == notes_idx - 1 {
+        } else if self.focused == NOTES_FIELD_IDX - 1 {
             routes_slot // Format → Routes
         } else {
             self.focused + 1 // sequential advance
@@ -561,8 +615,9 @@ impl ProviderForm {
         self.focused = next;
         if next == routes_slot {
             self.reset_route_editing();
-            // Routes has its own editing state machine; entering it while
-            // VimMode::Insert is active causes a stuck [I] indicator.
+            self.vim_mode = VimMode::Normal;
+        } else if self.fields[next].is_toggle {
+            // Toggle fields have no text cursor; Insert mode makes no sense here.
             self.vim_mode = VimMode::Normal;
         }
     }
@@ -571,14 +626,14 @@ impl ProviderForm {
     /// Visual order (reverse): Notes → Routes → Format → API Key → Base URL → Name → (wrap)
     pub fn focus_prev(&mut self) {
         let routes_slot = self.fields.len();
-        let notes_idx = routes_slot - 1;
+        let notes_idx = NOTES_FIELD_IDX;
 
         let prev = if self.focused == 0 {
             notes_idx // Name → Notes (wrap)
         } else if self.focused == notes_idx {
             routes_slot // Notes → Routes
         } else if self.focused == routes_slot {
-            notes_idx - 1 // Routes → Format
+            NOTES_FIELD_IDX - 1 // Routes → Format
         } else {
             self.focused - 1 // sequential retreat
         };
@@ -586,7 +641,8 @@ impl ProviderForm {
         self.focused = prev;
         if prev == routes_slot {
             self.reset_route_editing();
-            // Same reason as focus_next: reset vim_mode on entering Routes.
+            self.vim_mode = VimMode::Normal;
+        } else if prev < self.fields.len() && self.fields[prev].is_toggle {
             self.vim_mode = VimMode::Normal;
         }
     }

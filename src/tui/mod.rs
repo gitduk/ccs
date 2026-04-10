@@ -20,7 +20,6 @@ mod server;
 mod testing;
 
 use std::io;
-use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyEventKind};
@@ -45,7 +44,7 @@ use testing::start_background_tests;
 struct ServerHandle {
     task: JoinHandle<()>,
     shutdown_tx: watch::Sender<bool>,
-    proxy_config: Arc<tokio::sync::RwLock<crate::config::AppConfig>>,
+    config_tx: watch::Sender<crate::config::AppConfig>,
 }
 
 pub fn run_tui() -> Result<()> {

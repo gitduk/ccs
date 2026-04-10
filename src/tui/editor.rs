@@ -73,7 +73,6 @@ pub(super) fn handle_key(
         if !form.routes.is_empty() && form.route_cursor < form.routes.len() {
             form.routes.remove(form.route_cursor);
             form.clamp_route_cursor();
-            save_and_sync(app, server)?;
         }
         return Ok(());
     }
@@ -88,14 +87,14 @@ pub(super) fn handle_key(
         } else if form.vim_mode == VimMode::Insert {
             form.vim_mode = VimMode::Normal;
         } else {
-            close(app);
+            close(app, server);
         }
         return Ok(());
     }
 
     if form.vim_mode == VimMode::Normal && !form.route_editing && matches!(code, KeyCode::Char('q'))
     {
-        close(app);
+        close(app, server);
         return Ok(());
     }
 
@@ -115,18 +114,15 @@ pub(super) fn handle_key(
             form.routes.retain(|r| r.is_valid(&provider_models));
             form.clamp_route_cursor();
         }
-        if !form.route_editing {
-            save_and_sync(app, server)?;
-        }
         return Ok(());
     }
 
     if form.vim_mode == VimMode::Normal {
         match code {
-            KeyCode::Char('i') | KeyCode::Insert => {
+            KeyCode::Char('i') | KeyCode::Insert if !form.fields[form.focused].is_toggle => {
                 form.vim_mode = VimMode::Insert;
             }
-            KeyCode::Char('a' | 'A') => {
+            KeyCode::Char('a' | 'A') if !form.fields[form.focused].is_toggle => {
                 form.vim_mode = VimMode::Insert;
                 form.fields[form.focused].end();
             }
@@ -153,27 +149,19 @@ pub(super) fn handle_key(
             KeyCode::Char('h') | KeyCode::Left => {
                 let focused = form.focused;
                 if form.fields[focused].is_toggle {
-                    form.fields[focused].toggle_value();
-                    save_and_sync(app, server)?;
+                    form.fields[focused].move_prev();
                     return Ok(());
                 }
                 form.fields[focused].move_left();
             }
-            KeyCode::Char('l') | KeyCode::Right => {
+            KeyCode::Char('l') | KeyCode::Right | KeyCode::Char(' ') => {
                 let focused = form.focused;
                 if form.fields[focused].is_toggle {
-                    form.fields[focused].toggle_value();
-                    save_and_sync(app, server)?;
+                    form.fields[focused].move_next();
                     return Ok(());
                 }
-                form.fields[focused].move_right();
-            }
-            KeyCode::Char(' ') => {
-                let focused = form.focused;
-                if form.fields[focused].is_toggle {
-                    form.fields[focused].toggle_value();
-                    save_and_sync(app, server)?;
-                    return Ok(());
+                if matches!(code, KeyCode::Char('l') | KeyCode::Right) {
+                    form.fields[focused].move_right();
                 }
             }
             KeyCode::Enter if !form.fields[form.focused].is_toggle => {
@@ -196,7 +184,6 @@ pub(super) fn handle_key(
                 if prev == Some('d') {
                     let focused = form.focused;
                     form.fields[focused].delete_current_line();
-                    save_and_sync(app, server)?;
                     return Ok(());
                 }
                 form.pending_key = Some(('d', std::time::Instant::now()));
@@ -224,7 +211,6 @@ pub(super) fn handle_key(
     match code {
         KeyCode::Enter => {
             form.vim_mode = VimMode::Normal;
-            save_and_sync(app, server)?;
             return Ok(());
         }
         KeyCode::Tab => {
@@ -278,13 +264,11 @@ pub(super) fn handle_key(
 
     if form.fields[form.focused].is_toggle {
         match code {
-            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => {
-                form.fields[form.focused].toggle_value();
-                save_and_sync(app, server)?;
+            KeyCode::Left => {
+                form.fields[form.focused].move_prev();
             }
-            KeyCode::Char('h' | 'l') if ctrl => {
-                form.fields[form.focused].toggle_value();
-                save_and_sync(app, server)?;
+            KeyCode::Right | KeyCode::Char(' ') => {
+                form.fields[form.focused].move_next();
             }
             _ => {}
         }
@@ -299,12 +283,9 @@ pub(super) fn handle_key(
     ) {
         super::input::insert::InsertKeyResult::ExitInsert => {
             form.vim_mode = VimMode::Normal;
-            save_and_sync(app, server)?;
         }
-        super::input::insert::InsertKeyResult::TextChanged => {
-            save_and_sync(app, server)?;
-        }
-        super::input::insert::InsertKeyResult::Consumed
+        super::input::insert::InsertKeyResult::TextChanged
+        | super::input::insert::InsertKeyResult::Consumed
         | super::input::insert::InsertKeyResult::NotHandled => {}
     }
     Ok(())
@@ -401,23 +382,19 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
                 .fg(prov_color)
                 .add_modifier(Modifier::REVERSED | Modifier::BOLD);
             let unselected = Style::default().fg(t::MUTED);
-            let (left, right) = if field.value == "anthropic" {
-                (
-                    Span::styled(" anthropic ", selected),
-                    Span::styled(" openai ", unselected),
-                )
-            } else {
-                (
-                    Span::styled(" anthropic ", unselected),
-                    Span::styled(" openai ", selected),
-                )
-            };
-            Line::from(vec![
-                Span::styled(format!("{:<10}", field.label), label_style),
-                left,
-                Span::raw(" "),
-                right,
-            ])
+            let mut spans = vec![Span::styled(format!("{:<10}", field.label), label_style)];
+            for (i, &opt) in field.toggle_options.iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::raw(" "));
+                }
+                let style = if field.value == opt {
+                    selected
+                } else {
+                    unselected
+                };
+                spans.push(Span::styled(format!(" {opt} "), style));
+            }
+            Line::from(spans)
         } else if field.is_multiline {
             if show_cursor {
                 let cursor_pos = field.cursor.min(field.value.len());
@@ -645,15 +622,34 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
     }
 }
 
-fn save_and_sync(app: &mut App, server: &Option<ServerHandle>) -> crate::error::Result<()> {
-    app.save_form_in_place()?;
-    sync_proxy_config(app, server);
-    Ok(())
-}
+fn close(app: &mut App, server: &Option<ServerHandle>) {
+    // New empty forms with no name entered are just discarded.
+    // fields[0] is the Name field in ProviderForm's fixed field order.
+    let should_save = app
+        .form
+        .as_ref()
+        .is_some_and(|f| f.original_name.is_some() || !f.fields[0].value.trim().is_empty());
 
-fn close(app: &mut App) {
-    app.form = None;
-    app.mode = Mode::Normal;
+    if should_save {
+        if let Err(e) = app.save_form_and_close() {
+            // IO error: force-close and show message.
+            app.set_message(
+                format!("Save failed: {e}"),
+                super::state::MessageKind::Error,
+            );
+            app.form = None;
+            app.mode = Mode::Normal;
+        }
+        // Validation error: do_save_form keeps the form open and sets form.error.
+        if app.form.as_ref().is_some_and(|f| f.error.is_some()) {
+            return;
+        }
+    } else {
+        app.form = None;
+        app.mode = Mode::Normal;
+    }
+
+    sync_proxy_config(app, server);
 }
 
 fn prune_current_rule(form: &mut ProviderForm, provider_models: &[String]) {

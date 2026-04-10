@@ -1,4 +1,4 @@
-use crate::config::{self, ApiFormat};
+use crate::config::{self, ApiFormat, OpenAiApiVersion};
 use crate::error::Result;
 
 use super::{App, ConfirmAction, MessageKind, Mode, NOTES_FIELD_IDX, ProviderForm};
@@ -21,8 +21,8 @@ impl App {
         self.mode = Mode::Editing;
     }
 
-    pub fn save_form_in_place(&mut self) -> Result<()> {
-        self.do_save_form(false)
+    pub fn save_form_and_close(&mut self) -> Result<()> {
+        self.do_save_form(true)
     }
 
     pub(super) fn do_save_form(&mut self, close: bool) -> Result<()> {
@@ -81,10 +81,10 @@ impl App {
             return Ok(());
         }
 
-        let api_format = if format_str == "openai" {
-            ApiFormat::OpenAI
-        } else {
-            ApiFormat::Anthropic
+        let (api_format, api_version) = match format_str.as_str() {
+            "openai-chat" => (ApiFormat::OpenAI, Some(OpenAiApiVersion::ChatCompletions)),
+            "openai-responses" => (ApiFormat::OpenAI, Some(OpenAiApiVersion::Responses)),
+            _ => (ApiFormat::Anthropic, None),
         };
 
         let lookup_name = original_name.as_deref().unwrap_or(&new_name);
@@ -96,7 +96,6 @@ impl App {
         let model_map = existing.map(|p| p.model_map.clone()).unwrap_or_default();
 
         let enabled = existing.map(|p| p.enabled).unwrap_or(true);
-        let api_version = existing.and_then(|p| p.api_version.clone());
         let quota = existing.and_then(|p| p.quota.clone());
         let quota_command = existing.and_then(|p| p.quota_command.clone());
         let provider = crate::config::Provider {
