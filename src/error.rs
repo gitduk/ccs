@@ -27,17 +27,30 @@ pub enum AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let status = match &self {
-            AppError::ProviderNotFound(_) | AppError::NoCurrentProvider => StatusCode::BAD_REQUEST,
-            AppError::Request(_) => StatusCode::BAD_GATEWAY,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        let (status, message) = match &self {
+            AppError::ProviderNotFound(_) | AppError::NoCurrentProvider => (
+                StatusCode::BAD_REQUEST,
+                "Provider not found or not configured".to_string(),
+            ),
+            AppError::Request(_) => (
+                StatusCode::BAD_GATEWAY,
+                "Upstream provider error".to_string(),
+            ),
+            _ => {
+                // Log internal errors for debugging, but don't expose details to client
+                tracing::error!("Internal proxy error: {}", self);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal proxy error".to_string(),
+                )
+            }
         };
 
         let body = serde_json::json!({
             "type": "error",
             "error": {
                 "type": "proxy_error",
-                "message": self.to_string()
+                "message": message
             }
         });
 
