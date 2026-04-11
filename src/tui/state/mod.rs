@@ -446,25 +446,29 @@ impl FormField {
             return;
         }
         let mut pos = self.cursor;
+        // Skip trailing whitespace
         while pos > 0 {
-            let c = self.value[..pos]
-                .chars()
-                .next_back()
-                .expect("pos is a valid UTF-8 char boundary");
-            if !c.is_whitespace() {
-                break;
+            if let Some(c) = self.value[..pos].chars().next_back() {
+                if !c.is_whitespace() {
+                    break;
+                }
+                pos -= c.len_utf8();
+            } else {
+                // Invalid UTF-8 boundary; bail out
+                return;
             }
-            pos -= c.len_utf8();
         }
+        // Delete word characters
         while pos > 0 {
-            let c = self.value[..pos]
-                .chars()
-                .next_back()
-                .expect("pos is a valid UTF-8 char boundary");
-            if c.is_whitespace() {
-                break;
+            if let Some(c) = self.value[..pos].chars().next_back() {
+                if c.is_whitespace() {
+                    break;
+                }
+                pos -= c.len_utf8();
+            } else {
+                // Invalid UTF-8 boundary; bail out
+                return;
             }
-            pos -= c.len_utf8();
         }
         self.value.drain(pos..self.cursor);
         self.cursor = pos;
