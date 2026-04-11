@@ -50,8 +50,9 @@ pub async fn test_latency(
     let api_key = match provider.resolve_api_key() {
         Ok(k) => k,
         Err(e) => {
+            tracing::warn!("Provider test failed to resolve API key: {e}");
             return TestResult {
-                status: TestStatus::Error(format!("Key error: {e}")),
+                status: TestStatus::Error("Configuration error".to_string()),
                 latency_ms: 0,
                 model_count: known_models.as_ref().map(|v| v.len()),
                 model_names: known_models,
@@ -65,8 +66,9 @@ pub async fn test_latency(
         match probe_provider_message(client, provider, &api_key, &req_json).await {
             Ok((status, latency_ms)) => (status, latency_ms),
             Err(e) => {
+                tracing::warn!("Provider test connection failed: {e}");
                 return TestResult {
-                    status: TestStatus::Error(format!("Connection failed: {e}")),
+                    status: TestStatus::Error("Connection error".to_string()),
                     latency_ms: 0,
                     model_count: known_models.as_ref().map(|v| v.len()),
                     model_names: known_models,
