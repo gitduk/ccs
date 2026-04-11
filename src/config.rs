@@ -233,8 +233,10 @@ impl Provider {
     /// Resolve api_key: if it starts with '$', read from environment variable.
     pub fn resolve_api_key(&self) -> Result<String> {
         if let Some(env_var) = self.api_key.strip_prefix('$') {
-            std::env::var(env_var)
-                .map_err(|_| AppError::Config(format!("Environment variable '{env_var}' not set")))
+            std::env::var(env_var).map_err(|e| {
+                tracing::warn!("Failed to resolve API key from env var: {e}");
+                AppError::Config("API key environment variable not found or invalid".to_string())
+            })
         } else {
             Ok(self.api_key.clone())
         }
