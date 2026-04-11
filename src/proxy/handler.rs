@@ -361,13 +361,11 @@ async fn try_providers(
             ProviderRequestOutcome::UpstreamError { body, .. } => {
                 // Defensive: this branch should not be reached for successful statuses,
                 // but if it is, log and return the error body rather than panic.
-                tracing::error!("BUG: Successful status {} but got UpstreamError outcome", status);
-                return Ok((
-                    status,
-                    [("content-type", "application/json")],
-                    body,
-                )
-                .into_response());
+                tracing::error!(
+                    "BUG: Successful status {} but got UpstreamError outcome",
+                    status
+                );
+                return Ok((status, [("content-type", "application/json")], body).into_response());
             }
         };
         return if ctx.is_stream {
@@ -456,10 +454,12 @@ pub async fn handle_messages(
                 match serde_json::to_vec(&json) {
                     Ok(vec) => (Bytes::from(vec), Some(json)),
                     Err(e) => {
-                        tracing::error!("Failed to re-serialize request body after route rewrite: {e}");
-                        return Err(AppError::Transform(
-                            format!("Failed to apply route rewrite: {e}"),
-                        ));
+                        tracing::error!(
+                            "Failed to re-serialize request body after route rewrite: {e}"
+                        );
+                        return Err(AppError::Transform(format!(
+                            "Failed to apply route rewrite: {e}"
+                        )));
                     }
                 }
             }

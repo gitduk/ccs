@@ -344,7 +344,9 @@ impl AppConfig {
             dirs::home_dir()
                 .map(|h| h.join(".ccs").join("ccs.db").display().to_string())
                 .unwrap_or_else(|| {
-                    tracing::warn!("Home directory not found; using /tmp for database (data loss risk)");
+                    tracing::warn!(
+                        "Home directory not found; using /tmp for database (data loss risk)"
+                    );
                     "/tmp/ccs.db".to_string()
                 })
         })
