@@ -87,11 +87,16 @@ pub(super) fn test_provider_by_name(app: &mut App, name: &str) {
                 break;
             }
         }
-        let _ = tx.send(TestEvent::Completed {
-            provider: name_owned,
-            result: result
-                .expect("candidates is non-empty: built from std::iter::once(best_model)"),
-        });
+        // result is guaranteed to be Some because candidates is non-empty (always contains best_model).
+        if let Some(r) = result {
+            let _ = tx.send(TestEvent::Completed {
+                provider: name_owned,
+                result: r,
+            });
+        } else {
+            // This should never happen, but log if it does.
+            tracing::error!("BUG: test task completed with no result");
+        }
     });
 }
 
