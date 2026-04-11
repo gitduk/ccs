@@ -618,8 +618,10 @@ fn track_tokens_in_stream(
                 if line_buf.len() + bytes.len() <= LINE_BUF_MAX {
                     line_buf.push_str(&String::from_utf8_lossy(bytes));
                 } else {
-                    // Abnormally large line — skip parsing, drain buffer to free memory.
+                    // Buffer would exceed limit. Log and clear, but do NOT discard incoming bytes.
+                    tracing::warn!("SSE buffer exceeded {}B limit; resetting", LINE_BUF_MAX);
                     line_buf.clear();
+                    line_buf.push_str(&String::from_utf8_lossy(bytes));
                 }
                 // Process complete SSE lines; single drain at the end.
                 let mut start = 0;
