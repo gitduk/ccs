@@ -5,7 +5,7 @@
 
 use crossterm::event::KeyCode;
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
@@ -15,6 +15,7 @@ use super::state::{App, MessageKind, Mode};
 use super::theme::{self as t};
 use super::ui::format::{fmt_latency, format_tokens, shorten_model_name};
 use super::ui::layout::{BORDER_INNER_DIVIDER, DASH, TITLE_SIDE, centered_rect};
+use crate::proxy::metrics::RequestLogEntry;
 
 pub(super) fn handle_key(app: &mut App, code: KeyCode) -> crate::error::Result<()> {
     let total = app
@@ -69,29 +70,21 @@ pub(super) fn draw_popup(f: &mut Frame, app: &mut App) {
     };
 
     if entries.is_empty() {
-        let empty = Paragraph::new(Line::from(Span::styled(
-            "  No requests yet",
-            Style::default().fg(t::MUTED),
-        )));
-        f.render_widget(empty, inner);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "  No requests yet",
+                Style::default().fg(t::MUTED),
+            ))),
+            inner,
+        );
         return;
     }
 
-    let mut lines: Vec<Line> = Vec::new();
-    let hdr = Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD);
-    lines.push(Line::from(vec![
-        Span::styled(format!("{:<7}", "Status"), hdr),
-        Span::styled(format!("{:<10}", "Latency"), hdr),
-        Span::styled(format!("{:<11}", "Provider"), hdr),
-        Span::styled(format!("{:<32}", "Model"), hdr),
-        Span::styled(format!("{:<6}", "In"), hdr),
-        Span::styled(format!("{:<6}", "Out"), hdr),
-        Span::styled("Age", hdr),
-    ]));
+    let total = entries.len();
+    let selected = app.logs.selected.min(total.saturating_sub(1));
+    app.logs.selected = selected;
 
     let viewport_height = inner.height.saturating_sub(1) as usize;
-    let selected = app.logs.selected.min(entries.len().saturating_sub(1));
-
     let scroll = if selected < app.logs.scroll as usize {
         selected
     } else if selected >= app.logs.scroll as usize + viewport_height {
@@ -101,49 +94,147 @@ pub(super) fn draw_popup(f: &mut Frame, app: &mut App) {
     };
     app.logs.scroll = scroll as u16;
 
-    let visible = entries
+    // Require at least 10 cols for the detail pane; fall back to list-only below that.
+    const LIST_WIDTH: u16 = 37;
+    if inner.width <= LIST_WIDTH + 10 {
+        render_log_list(f, &entries, selected, scroll, inner);
+        let footer = format!(" {} requests  [j/k] navigate  [q/Esc] close", total);
+        draw_footer(f, area, &footer);
+        return;
+    }
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(LIST_WIDTH), Constraint::Min(0)])
+        .split(inner);
+    let list_area = chunks[0];
+    let detail_area = chunks[1];
+
+    render_log_list(f, &entries, selected, scroll, list_area);
+
+    let detail_block = Block::default()
+        .borders(Borders::LEFT)
+        .border_style(Style::default().fg(t::MUTED))
+        .padding(Padding::new(1, 0, 0, 0));
+    let detail_inner = detail_block.inner(detail_area);
+    f.render_widget(detail_block, detail_area);
+    draw_detail(f, &entries[selected], detail_inner);
+
+    let footer = format!(" {} requests  [j/k] navigate  [q/Esc] close", total);
+    draw_footer(f, area, &footer);
+}
+
+fn render_log_list(
+    f: &mut Frame,
+    entries: &[RequestLogEntry],
+    selected: usize,
+    scroll: usize,
+    area: Rect,
+) {
+    let viewport_height = area.height.saturating_sub(1) as usize;
+    let hdr = Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD);
+    let mut lines: Vec<Line> = vec![Line::from(vec![
+        Span::styled(format!("{:<11}", "Response"), hdr),
+        Span::styled(format!("{:<22}", "Provider/Model"), hdr),
+        Span::styled("Age", hdr),
+    ])];
+    for (i, entry) in entries
         .iter()
         .enumerate()
         .skip(scroll)
-        .take(viewport_height);
-
-    for (i, entry) in visible {
+        .take(viewport_height)
+    {
         let is_selected = i == selected;
-
-        let status_style = if entry.error.is_some() || entry.status >= 400 {
+        let base_status = if entry.error.is_some() || entry.status >= 400 {
             Style::default().fg(t::ERROR)
         } else {
             Style::default().fg(t::SUCCESS)
         };
-
-        let status_str = format!("{}", entry.status);
-        let latency_str = fmt_latency(entry.latency_ms);
-        let provider = truncate(&entry.provider, 9);
-        let model = truncate(&entry.model, 31);
-        let in_str = format_tokens(entry.input_tokens);
-        let out_str = format_tokens(entry.output_tokens);
-        let time_str = format_time(entry.timestamp);
-        let row_style = if is_selected {
-            Style::default().add_modifier(Modifier::REVERSED)
+        let (status_style, row_style) = if is_selected {
+            let rev = Modifier::REVERSED;
+            (
+                base_status.add_modifier(rev),
+                Style::default().add_modifier(rev),
+            )
         } else {
-            Style::default()
+            (base_status, Style::default())
         };
-
+        let response = truncate(
+            &format!("{} {}", entry.status, fmt_latency(entry.latency_ms)),
+            10,
+        );
+        let pm = truncate(
+            &format!("{}/{}", entry.provider, shorten_model_name(&entry.model)),
+            21,
+        );
         lines.push(Line::from(vec![
-            Span::styled(format!("{:<7}", status_str), status_style),
-            Span::styled(format!("{:<10}", latency_str), row_style),
-            Span::styled(format!("{:<11}", provider), row_style.fg(t::TEXT)),
-            Span::styled(format!("{:<32}", model), row_style.fg(t::MUTED)),
-            Span::styled(format!("{:<6}", in_str), row_style.fg(t::TEXT)),
-            Span::styled(format!("{:<6}", out_str), row_style.fg(t::TEXT)),
-            Span::styled(format!("{:<8}", time_str), row_style.fg(t::MUTED)),
+            Span::styled(format!("{:<11}", response), status_style),
+            Span::styled(format!("{:<22}", pm), row_style.fg(t::TEXT)),
+            Span::styled(format_time(entry.timestamp), row_style.fg(t::MUTED)),
         ]));
     }
+    f.render_widget(Paragraph::new(lines), area);
+}
 
-    let footer = format!(" {} requests  [j/k] navigate  [q/Esc] close", entries.len());
-    draw_footer(f, area, &footer);
+fn draw_detail(f: &mut Frame, entry: &RequestLogEntry, area: Rect) {
+    let label = Style::default().fg(t::MUTED);
+    let value = Style::default().fg(t::TEXT);
+    let status_style = if entry.error.is_some() || entry.status >= 400 {
+        Style::default().fg(t::ERROR)
+    } else {
+        Style::default().fg(t::SUCCESS)
+    };
 
-    f.render_widget(Paragraph::new(lines), inner);
+    let mut lines: Vec<Line> = vec![
+        Line::from(vec![
+            Span::styled(format!("{:<12}", "Provider"), label),
+            Span::styled(entry.provider.clone(), value),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("{:<12}", "Model"), label),
+            Span::styled(entry.model.clone(), value),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("{:<12}", "Status"), label),
+            Span::styled(format!("{}", entry.status), status_style),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("{:<12}", "Latency"), label),
+            Span::styled(fmt_latency(entry.latency_ms), value),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("{:<12}", "Tokens In"), label),
+            Span::styled(format!("{}", entry.input_tokens), value),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("{:<12}", "Tokens Out"), label),
+            Span::styled(format!("{}", entry.output_tokens), value),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("{:<12}", "Stream"), label),
+            Span::styled(if entry.is_stream { "yes" } else { "no" }, value),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("{:<12}", "Time"), label),
+            Span::styled(format_time(entry.timestamp), Style::default().fg(t::MUTED)),
+        ]),
+    ];
+
+    if let Some(err) = &entry.error {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "Error:",
+            Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD),
+        )));
+        let avail = area.width.saturating_sub(2) as usize;
+        for chunk in wrap_text(err, avail) {
+            lines.push(Line::from(Span::styled(
+                format!("  {chunk}"),
+                Style::default().fg(t::ERROR),
+            )));
+        }
+    }
+
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 pub(super) fn draw_panel(f: &mut Frame, app: &App, area: Rect, messages_height: u16) {

@@ -16,18 +16,21 @@ use super::state::{App, MessageKind, Mode};
 use super::theme::{self as t};
 use super::ui::layout::centered_fixed;
 
+/// Estimated visible rows used for scroll look-ahead in nav and 'G' jump.
+/// Matches the viewport assumption in draw_popup's dialog_height calculation.
+const SCROLL_LOOKAHEAD: usize = 8;
+
 pub(super) fn handle_key(
     app: &mut App,
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> crate::error::Result<()> {
-    let flat = build_flat_models(app);
-    let line_offsets = build_line_offsets(app, &flat);
-    let flat_refs: Vec<&str> = flat.iter().map(|s| s.as_str()).collect();
-    app.models.selected = app.models.selected.min(flat_refs.len().saturating_sub(1));
+    let models = build_models(app);
+    let refs: Vec<&str> = models.iter().map(|s| s.as_str()).collect();
+    app.models.selected = app.models.selected.min(refs.len().saturating_sub(1));
 
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
-    let total = flat_refs.len();
+    let total = refs.len();
 
     if app.models.search_active {
         if ctrl && code == KeyCode::Char('c') {
@@ -36,19 +39,19 @@ pub(super) fn handle_key(
         }
         match code {
             KeyCode::Down => {
-                nav_down(app, total, 1, &line_offsets);
+                nav_down(app, total, 1);
                 return Ok(());
             }
             KeyCode::Up => {
-                nav_up(app, 1, &line_offsets);
+                nav_up(app, 1);
                 return Ok(());
             }
             KeyCode::Char('j') if ctrl => {
-                nav_down(app, total, 1, &line_offsets);
+                nav_down(app, total, 1);
                 return Ok(());
             }
             KeyCode::Char('k') if ctrl => {
-                nav_up(app, 1, &line_offsets);
+                nav_up(app, 1);
                 return Ok(());
             }
             _ => {}
@@ -76,7 +79,7 @@ pub(super) fn handle_key(
         if let Some(pk) = prev {
             match (pk, &code) {
                 ('y', KeyCode::Char('y')) => {
-                    copy_selected(app, &flat_refs);
+                    copy_selected(app, &refs);
                     return Ok(());
                 }
                 ('g', KeyCode::Char('g')) => {
@@ -98,21 +101,17 @@ pub(super) fn handle_key(
             KeyCode::Char('i') => {
                 app.models.search_active = true;
             }
-            KeyCode::Down | KeyCode::Char('j') => nav_down(app, total, 1, &line_offsets),
-            KeyCode::Up | KeyCode::Char('k') => nav_up(app, 1, &line_offsets),
+            KeyCode::Down | KeyCode::Char('j') => nav_down(app, total, 1),
+            KeyCode::Up | KeyCode::Char('k') => nav_up(app, 1),
             KeyCode::Char('G') => {
                 if total > 0 {
                     app.models.selected = total - 1;
-                    if let Some(&row) = line_offsets.get(total - 1) {
-                        app.models.scroll = (row + 1).saturating_sub(8) as u16;
-                    }
+                    app.models.scroll = total.saturating_sub(SCROLL_LOOKAHEAD) as u16;
                 }
             }
-            KeyCode::PageDown | KeyCode::Char('d') if ctrl => {
-                nav_down(app, total, 10, &line_offsets)
-            }
-            KeyCode::PageUp | KeyCode::Char('u') if ctrl => nav_up(app, 10, &line_offsets),
-            KeyCode::Enter => copy_selected(app, &flat_refs),
+            KeyCode::PageDown | KeyCode::Char('d') if ctrl => nav_down(app, total, 10),
+            KeyCode::PageUp | KeyCode::Char('u') if ctrl => nav_up(app, 10),
+            KeyCode::Enter => copy_selected(app, &refs),
             KeyCode::Char('y') => {
                 app.models.pending_key = Some(('y', Instant::now()));
             }
@@ -133,14 +132,16 @@ pub(super) fn handle_paste(app: &mut App, text: &str) {
         .value
         .insert_str(app.models.search_field.cursor, text);
     app.models.search_field.cursor += text.len();
+    app.models.selected = 0;
+    app.models.scroll = 0;
 }
 
 pub(super) fn draw_popup(f: &mut Frame, app: &App) {
-    let filtered = build_grouped_models(app);
-    let content_lines = (filtered.iter().map(|(_, ms)| 1 + ms.len()).sum::<usize>()
-        + filtered.len().saturating_sub(1))
-    .min(u16::MAX as usize) as u16;
+    let models = build_models(app);
+    let prov_name = current_provider(app).unwrap_or("—");
+    let prov_color = t::provider_color(prov_name);
 
+    let content_lines = models.len().min(u16::MAX as usize) as u16;
     let dialog_height = (content_lines + 4).min(f.area().height * 4 / 5).max(6);
     let area = centered_fixed(80, dialog_height, f.area());
     f.render_widget(Clear, area);
@@ -153,7 +154,7 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
     let outer_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(t::PRIMARY))
-        .title(format!(" Models  {mode_tag} "))
+        .title(format!(" {prov_name} — Models  {mode_tag} "))
         .title_style(Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD))
         .padding(Padding::new(1, 1, 0, 0));
     let inner = outer_block.inner(area);
@@ -213,44 +214,28 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
 
     let list_height = chunks[2].height;
     let mut lines: Vec<Line> = Vec::new();
-    let mut flat_idx: usize = 0;
 
-    if filtered.is_empty() {
+    if models.is_empty() {
         lines.push(Line::from(Span::styled(
             "  No matches",
             Style::default().fg(t::MUTED),
         )));
     } else {
-        for (gi, (prov, models)) in filtered.iter().enumerate() {
-            if gi > 0 {
-                lines.push(Line::from(""));
-            }
-            lines.push(Line::from(Span::styled(
-                format!("  {prov}"),
-                Style::default()
-                    .fg(t::provider_color(prov))
-                    .add_modifier(Modifier::BOLD),
-            )));
-            let last = models.len().saturating_sub(1);
-            for (mi, model) in models.iter().enumerate() {
-                let is_selected = flat_idx == app.models.selected;
-                let prefix = if mi == last { "    └ " } else { "    ├ " };
-                if is_selected {
-                    let prov_color = t::provider_color(prov);
-                    lines.push(Line::from(vec![
-                        Span::styled("  ▶ ", Style::default().fg(prov_color)),
-                        Span::styled(
-                            model.to_string(),
-                            Style::default().fg(prov_color).add_modifier(Modifier::BOLD),
-                        ),
-                    ]));
-                } else {
-                    lines.push(Line::from(vec![
-                        Span::styled(prefix, Style::default().fg(t::MUTED)),
-                        Span::styled(model.to_string(), Style::default().fg(t::TEXT)),
-                    ]));
-                }
-                flat_idx += 1;
+        for (i, model) in models.iter().enumerate() {
+            let is_selected = i == app.models.selected;
+            if is_selected {
+                lines.push(Line::from(vec![
+                    Span::styled("  ▶ ", Style::default().fg(prov_color)),
+                    Span::styled(
+                        model.to_string(),
+                        Style::default().fg(prov_color).add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::raw("    "),
+                    Span::styled(model.to_string(), Style::default().fg(t::TEXT)),
+                ]));
             }
         }
     }
@@ -261,94 +246,49 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), chunks[2]);
 }
 
-fn build_grouped_models(app: &App) -> Vec<(String, Vec<String>)> {
-    let filter = app.models.search_field.value.to_lowercase();
-    let mut providers: Vec<&String> = app.models.provider_models.keys().collect();
-    providers.sort_unstable();
+fn current_provider(app: &App) -> Option<&str> {
+    app.providers
+        .table_state
+        .selected()
+        .and_then(|i| app.providers.names.get(i))
+        .map(|s| s.as_str())
+}
 
-    providers
+fn build_models(app: &App) -> Vec<String> {
+    let Some(prov) = current_provider(app) else {
+        return vec![];
+    };
+    let filter = app.models.search_field.value.to_lowercase();
+    let models = app
+        .models
+        .provider_models
+        .get(prov)
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
+    let mut matched: Vec<String> = models
         .iter()
-        .filter_map(|prov| {
-            let models = app.models.provider_models.get(*prov)?;
-            let mut matched: Vec<String> = models
-                .iter()
-                .filter(|m| filter.is_empty() || m.to_lowercase().contains(&filter))
-                .cloned()
-                .collect();
-            if matched.is_empty() {
-                return None;
-            }
-            matched.sort_unstable();
-            Some(((*prov).clone(), matched))
-        })
-        .collect()
+        .filter(|m| filter.is_empty() || m.to_lowercase().contains(&filter))
+        .cloned()
+        .collect();
+    matched.sort_unstable();
+    matched
 }
 
-fn build_flat_models(app: &App) -> Vec<String> {
-    build_grouped_models(app)
-        .into_iter()
-        .flat_map(|(_, models)| models)
-        .collect()
-}
-
-fn build_line_offsets(app: &App, flat: &[String]) -> Vec<usize> {
-    let filter = app.models.search_field.value.to_lowercase();
-    let mut providers: Vec<&String> = app.models.provider_models.keys().collect();
-    providers.sort_unstable();
-
-    let mut line_offsets: Vec<usize> = Vec::with_capacity(flat.len());
-    let mut line: usize = 0;
-    let mut first_group = true;
-
-    for prov in &providers {
-        let models = app
-            .models
-            .provider_models
-            .get(*prov)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
-        let mut matched: Vec<String> = models
-            .iter()
-            .filter(|m| filter.is_empty() || m.to_lowercase().contains(&filter))
-            .cloned()
-            .collect();
-        if matched.is_empty() {
-            continue;
-        }
-        matched.sort_unstable();
-        if !first_group {
-            line += 1;
-        }
-        first_group = false;
-        line += 1;
-        for _ in matched {
-            line_offsets.push(line);
-            line += 1;
-        }
-    }
-
-    line_offsets
-}
-
-fn nav_down(app: &mut App, total: usize, step: usize, line_offsets: &[usize]) {
+fn nav_down(app: &mut App, total: usize, step: usize) {
     if total == 0 {
         return;
     }
     app.models.selected = (app.models.selected + step).min(total - 1);
-    if let Some(&row) = line_offsets.get(app.models.selected) {
-        let bottom = app.models.scroll as usize + 8;
-        if row >= bottom {
-            app.models.scroll = (row + 1).saturating_sub(8) as u16;
-        }
+    let bottom = app.models.scroll as usize + SCROLL_LOOKAHEAD;
+    if app.models.selected >= bottom {
+        app.models.scroll = (app.models.selected + 1).saturating_sub(8) as u16;
     }
 }
 
-fn nav_up(app: &mut App, step: usize, line_offsets: &[usize]) {
+fn nav_up(app: &mut App, step: usize) {
     app.models.selected = app.models.selected.saturating_sub(step);
-    if let Some(&row) = line_offsets.get(app.models.selected)
-        && row < app.models.scroll as usize
-    {
-        app.models.scroll = row as u16;
+    if app.models.selected < app.models.scroll as usize {
+        app.models.scroll = app.models.selected as u16;
     }
 }
 
