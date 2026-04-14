@@ -312,9 +312,7 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect, right_border:
             let (indicator, indicator_style) = if is_selected && app.terminal_focused {
                 (
                     " ◀",
-                    Style::default()
-                        .fg(t::provider_color(name))
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD),
                 )
             } else {
                 ("  ", Style::default())
@@ -323,16 +321,14 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect, right_border:
             let name_style = if disabled {
                 Style::default().fg(t::MUTED)
             } else if is_current {
-                Style::default()
-                    .fg(t::provider_color(name))
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(t::TEXT)
             };
             let detail_style = if disabled || !is_current {
                 Style::default().fg(t::MUTED)
             } else {
-                Style::default().fg(t::provider_color(name))
+                Style::default().fg(t::PRIMARY)
             };
             let name_display_width = name.width();
             let padding = max_name_len.saturating_sub(name_display_width);

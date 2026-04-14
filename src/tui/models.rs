@@ -139,7 +139,7 @@ pub(super) fn handle_paste(app: &mut App, text: &str) {
 pub(super) fn draw_popup(f: &mut Frame, app: &App) {
     let models = build_models(app);
     let prov_name = current_provider(app).unwrap_or("—");
-    let prov_color = t::provider_color(prov_name);
+    let prov_color = t::PRIMARY;
 
     let content_lines = models.len().min(u16::MAX as usize) as u16;
     let dialog_height = (content_lines + 4).min(f.area().height * 4 / 5).max(6);

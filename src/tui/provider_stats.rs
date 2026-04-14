@@ -111,7 +111,6 @@ pub(super) fn draw_panel(f: &mut Frame, app: &App, area: Rect, right_border: boo
         Line::from(""),
     ];
     lines.extend(provider_rows.iter().map(|(name, s)| {
-        let color = t::provider_color(name);
         Line::from(vec![
             Span::styled(
                 format!(
@@ -119,17 +118,17 @@ pub(super) fn draw_panel(f: &mut Frame, app: &App, area: Rect, right_border: boo
                     name,
                     " ".repeat(id_col_width.saturating_sub(name.width()))
                 ),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
+                Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD),
             ),
             Span::styled("  In ", muted),
             Span::styled(
                 format!("{:>8}", format_tokens(s.input)),
-                Style::default().fg(color),
+                Style::default().fg(t::TEXT),
             ),
             Span::styled("  Out ", muted),
             Span::styled(
                 format!("{:>8}", format_tokens(s.output)),
-                Style::default().fg(color),
+                Style::default().fg(t::TEXT),
             ),
             Span::styled("  Avg ", muted),
             {

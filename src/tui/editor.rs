@@ -295,7 +295,7 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
     let Some(form) = &app.form else { return };
 
     let in_routes = form.in_routes();
-    let prov_color = t::provider_color(form.fields[0].value.trim());
+    let prov_color = t::PRIMARY;
     let suggest_items = suggest_panel_height(form, app);
     let vim_tag = if form.route_editing || form.vim_mode == VimMode::Insert {
         "[I]"
@@ -490,16 +490,7 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
                 let after_start =
                     cursor_pos + cursor_char.len_utf8().min(display_val.len() - cursor_pos);
                 let after = display_val[after_start..].to_string();
-                let (before_span, after_span) = if field.label == "Name" && !display_val.is_empty()
-                {
-                    let color = t::provider_color(&display_val);
-                    (
-                        Span::styled(before, Style::default().fg(color)),
-                        Span::styled(after, Style::default().fg(color)),
-                    )
-                } else {
-                    (Span::raw(before), Span::raw(after))
-                };
+                let (before_span, after_span) = (Span::raw(before), Span::raw(after));
                 Line::from(vec![
                     Span::styled(format!("{:<10}", field.label), label_style),
                     before_span,
@@ -512,9 +503,7 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
                     after_span,
                 ])
             } else {
-                let val_style = if field.label == "Name" && !display_val.is_empty() {
-                    Style::default().fg(t::provider_color(&display_val))
-                } else if !field.editable {
+                let val_style = if !field.editable {
                     Style::default().fg(t::MUTED)
                 } else {
                     Style::default()
