@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc;
 
 /// Index of the Notes field inside `ProviderForm::fields`.
-pub(super) const NOTES_FIELD_IDX: usize = 4;
+pub(super) const FALLBACK_FIELD_IDX: usize = 4;
+pub(super) const NOTES_FIELD_IDX: usize = 5;
 
 use ratatui::widgets::TableState;
 
@@ -519,7 +520,7 @@ impl ProviderForm {
     /// Create a new form for adding or editing a provider.
     pub(super) fn new(name: &str, provider: Option<&Provider>) -> Self {
         use crate::config::{ApiFormat, OpenAiApiVersion};
-        let (base_url, api_key, format, notes, routes) = match provider {
+        let (base_url, api_key, format, fallback, notes, routes) = match provider {
             Some(p) => {
                 let fmt = match p.api_format {
                     ApiFormat::Anthropic => "anthropic",
@@ -534,15 +535,17 @@ impl ProviderForm {
                         }
                     }
                 };
+                let fb = if p.fallback { "yes" } else { "no" };
                 (
                     p.base_url.as_str(),
                     p.api_key.as_str(),
                     fmt,
+                    fb,
                     p.notes.as_str(),
                     p.routes.clone(),
                 )
             }
-            None => ("", "", "anthropic", "", vec![]),
+            None => ("", "", "anthropic", "yes", "", vec![]),
         };
         Self {
             original_name: if name.is_empty() {
@@ -559,6 +562,7 @@ impl ProviderForm {
                     format,
                     &["anthropic", "openai-chat", "openai-responses"],
                 ),
+                FormField::toggle("Fallback", fallback, &["yes", "no"]),
                 FormField::multiline("Notes", notes),
             ],
             focused: 0,
@@ -601,7 +605,7 @@ impl ProviderForm {
     }
 
     /// Move focus to the next editable slot.
-    /// Visual order: Name → Base URL → API Key → Format → Notes → (wrap via Routes)
+    /// Visual order: Name → Base URL → API Key → Format → Fallback → Routes → Notes → (wrap)
     pub fn focus_next(&mut self) {
         let routes_slot = self.fields.len(); // virtual index for Routes
         let notes_idx = NOTES_FIELD_IDX;
@@ -610,8 +614,8 @@ impl ProviderForm {
             0 // Notes → Name (wrap)
         } else if self.focused == routes_slot {
             notes_idx // Routes → Notes
-        } else if self.focused == NOTES_FIELD_IDX - 1 {
-            routes_slot // Format → Routes
+        } else if self.focused == FALLBACK_FIELD_IDX {
+            routes_slot // Fallback → Routes
         } else {
             self.focused + 1 // sequential advance
         };
@@ -627,7 +631,7 @@ impl ProviderForm {
     }
 
     /// Move focus to the previous editable slot.
-    /// Visual order (reverse): Notes → Routes → Format → API Key → Base URL → Name → (wrap)
+    /// Visual order (reverse): Notes → Routes → Fallback → Format → API Key → Base URL → Name → (wrap)
     pub fn focus_prev(&mut self) {
         let routes_slot = self.fields.len();
         let notes_idx = NOTES_FIELD_IDX;
@@ -637,7 +641,7 @@ impl ProviderForm {
         } else if self.focused == notes_idx {
             routes_slot // Notes → Routes
         } else if self.focused == routes_slot {
-            NOTES_FIELD_IDX - 1 // Routes → Format
+            FALLBACK_FIELD_IDX // Routes → Fallback
         } else {
             self.focused - 1 // sequential retreat
         };
@@ -667,5 +671,16 @@ impl QuotaForm {
             preview_loading: false,
             preview_scroll: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProviderForm;
+
+    #[test]
+    fn new_provider_form_defaults_fallback_to_yes() {
+        let form = ProviderForm::new("", None);
+        assert_eq!(form.fields[super::FALLBACK_FIELD_IDX].value, "yes");
     }
 }

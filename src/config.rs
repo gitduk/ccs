@@ -201,6 +201,9 @@ pub struct Provider {
     /// When false, this provider is skipped during request forwarding.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// When true, this provider participates in the fallback rotation.
+    #[serde(default = "default_true")]
+    pub fallback: bool,
     /// Only effective when api_format = OpenAI. See [`OpenAiApiVersion`] for variants.
     #[serde(default)]
     pub api_version: Option<OpenAiApiVersion>,
@@ -569,6 +572,7 @@ mod tests {
             notes: String::new(),
             routes: Vec::new(),
             enabled: true,
+            fallback: true,
             api_version: None,
             quota: None,
             quota_command: None,
@@ -631,6 +635,22 @@ mod tests {
     fn map_model_passthrough_when_no_mapping() {
         let p = make_provider("key", ApiFormat::OpenAI);
         assert_eq!(p.map_model("claude-opus-4"), "claude-opus-4");
+    }
+
+    #[test]
+    fn provider_fallback_defaults_true_for_legacy_configs() {
+        let provider: Provider = serde_json::from_value(serde_json::json!({
+            "id": "legacy-id",
+            "base_url": "https://api.example.com",
+            "api_key": "key",
+            "api_format": "anthropic",
+            "enabled": true,
+            "notes": "",
+            "routes": [],
+            "model_map": {}
+        }))
+        .unwrap();
+        assert!(provider.fallback);
     }
 
     #[test]

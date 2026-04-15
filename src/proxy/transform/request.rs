@@ -525,6 +525,7 @@ mod tests {
             notes: String::new(),
             routes: Vec::new(),
             enabled: true,
+            fallback: true,
             api_version,
             quota: None,
             quota_command: None,

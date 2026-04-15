@@ -167,6 +167,10 @@ pub(super) fn handle_key(
             let _ = app.move_provider_down();
         }
         KeyCode::Char('f') => {
+            let _ = app.toggle_provider_fallback();
+            server::sync_proxy_config(app, server_handle);
+        }
+        KeyCode::Char('F') => {
             let _ = app.toggle_fallback();
             server::sync_proxy_config(app, server_handle);
         }
@@ -264,6 +268,7 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect, right_border:
     } else {
         0
     };
+    let has_fallback_col = app.config.fallback;
     let has_quota = app
         .config
         .providers
@@ -325,6 +330,11 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect, right_border:
             } else {
                 Style::default().fg(t::TEXT)
             };
+            let name_style = if has_fallback_col && provider.fallback && !is_current {
+                name_style.add_modifier(Modifier::UNDERLINED)
+            } else {
+                name_style
+            };
             let detail_style = if disabled || !is_current {
                 Style::default().fg(t::MUTED)
             } else {
@@ -332,9 +342,10 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect, right_border:
             };
             let name_display_width = name.width();
             let padding = max_name_len.saturating_sub(name_display_width);
-            let padded_name = format!("{}{}", name.as_str(), " ".repeat(padding));
+            let pad_style = name_style.remove_modifier(Modifier::UNDERLINED);
             let name_cell = Cell::from(Line::from(vec![
-                Span::styled(padded_name, name_style),
+                Span::styled(name.as_str().to_string(), name_style),
+                Span::styled(" ".repeat(padding), pad_style),
                 Span::styled(indicator, indicator_style),
             ]));
 

@@ -134,7 +134,7 @@ async fn resolve_provider_pool(
                 config
                     .providers
                     .get_index(i)
-                    .filter(|(_, v)| v.enabled)
+                    .filter(|(k, v)| v.enabled && (v.fallback || k.as_str() == config.current))
                     .map(|(k, v)| (k.clone(), v.clone()))
             })
             .collect();

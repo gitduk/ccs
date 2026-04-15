@@ -1,7 +1,9 @@
 use crate::config::{self, ApiFormat, OpenAiApiVersion};
 use crate::error::Result;
 
-use super::{App, ConfirmAction, MessageKind, Mode, NOTES_FIELD_IDX, ProviderForm};
+use super::{
+    App, ConfirmAction, FALLBACK_FIELD_IDX, MessageKind, Mode, NOTES_FIELD_IDX, ProviderForm,
+};
 
 impl App {
     pub fn add(&mut self) {
@@ -38,6 +40,7 @@ impl App {
             .to_string();
         let api_key = form.fields[2].value.trim().to_string();
         let format_str = form.fields[3].value.trim().to_string();
+        let fallback = form.fields[FALLBACK_FIELD_IDX].value.trim() == "yes";
         let notes = form.fields[NOTES_FIELD_IDX]
             .value
             .trim_matches('\n')
@@ -96,6 +99,7 @@ impl App {
         let model_map = existing.map(|p| p.model_map.clone()).unwrap_or_default();
 
         let enabled = existing.map(|p| p.enabled).unwrap_or(true);
+        // fallback is set via the form field; don't inherit from existing.
         let quota = existing.and_then(|p| p.quota.clone());
         let quota_command = existing.and_then(|p| p.quota_command.clone());
         let provider = crate::config::Provider {
@@ -107,6 +111,7 @@ impl App {
             notes: notes.clone(),
             routes,
             enabled,
+            fallback,
             api_version,
             quota,
             quota_command,
@@ -291,6 +296,32 @@ impl App {
             }
             self.config.current = name.clone();
             config::save_config(&self.config)?;
+        }
+        Ok(())
+    }
+
+    pub fn toggle_provider_fallback(&mut self) -> Result<()> {
+        let Some(name) = self.selected_name().map(|s| s.to_string()) else {
+            return Ok(());
+        };
+        if name == self.config.current {
+            self.set_message(
+                format!("'{name}' is current provider — it always participates in fallback"),
+                MessageKind::Info,
+            );
+            return Ok(());
+        }
+        if let Some(provider) = self.config.providers.get_mut(&name) {
+            // No guard against "last fallback provider": an empty fallback pool is fine —
+            // the current provider still handles requests as primary.
+            provider.fallback = !provider.fallback;
+            let state = if provider.fallback {
+                "in fallback"
+            } else {
+                "out of fallback"
+            };
+            config::save_config(&self.config)?;
+            self.set_message(format!("'{name}' {state}"), MessageKind::Info);
         }
         Ok(())
     }

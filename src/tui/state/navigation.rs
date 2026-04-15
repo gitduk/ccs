@@ -147,6 +147,8 @@ impl App {
     pub fn toggle_fallback(&mut self) -> Result<()> {
         self.config.fallback = !self.config.fallback;
         config::save_config(&self.config)?;
+        let state = if self.config.fallback { "on" } else { "off" };
+        self.set_message(format!("Fallback mode {state}"), super::MessageKind::Info);
         Ok(())
     }
 
