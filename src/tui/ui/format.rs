@@ -3,6 +3,7 @@ use ratatui::text::Span;
 use ratatui::widgets::Cell;
 
 use super::super::theme::{self as t};
+use crate::config::RouteRule;
 
 /// Truncate a string to `max` characters, appending `…` if truncated.
 pub(crate) fn truncate_chars(s: &str, max: usize) -> String {
@@ -139,4 +140,34 @@ pub(crate) fn strip_model_prefix(model: &str) -> &str {
 pub(crate) fn shorten_model_name(model: &str) -> &str {
     let stripped = strip_model_prefix(model);
     stripped.strip_prefix("claude-").unwrap_or(stripped)
+}
+
+/// Pack enabled routes into wrapped lines given the available text width.
+/// Returns groups of routes, each group rendered on one line.
+pub(crate) fn pack_routes<'a>(
+    routes: &[&'a RouteRule],
+    avail_width: usize,
+) -> Vec<Vec<&'a RouteRule>> {
+    use unicode_width::UnicodeWidthStr;
+
+    let mut result: Vec<Vec<&RouteRule>> = vec![];
+    let mut current: Vec<&RouteRule> = vec![];
+    let mut used = 0usize;
+
+    for route in routes {
+        let item_w = route.pattern.width() + 3 + route.target.width(); // 3 = " → "
+        let sep_w = if current.is_empty() { 0 } else { 2 };
+        if current.is_empty() || used + sep_w + item_w <= avail_width {
+            current.push(route);
+            used += sep_w + item_w;
+        } else {
+            result.push(std::mem::take(&mut current));
+            current.push(route);
+            used = item_w;
+        }
+    }
+    if !current.is_empty() {
+        result.push(current);
+    }
+    result
 }

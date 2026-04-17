@@ -1,7 +1,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::symbols::border;
 
-use crate::config::RouteRule;
+use super::format::pack_routes;
 use crate::tui::state::App;
 
 // ── Panel system ───────────────────────────────────────────────────
@@ -43,6 +43,13 @@ pub(super) struct ScreenPlan {
     /// Height used by Providers + Detail on the left (used by logs panel
     /// to align its Messages / Recent Requests divider).
     pub top_height: u16,
+}
+
+/// Allocated heights for left-column panels.
+struct AllocatedHeights {
+    providers: u16,
+    detail: u16,
+    stats: u16,
 }
 
 // ── Layout constants ───────────────────────────────────────────────
@@ -102,13 +109,65 @@ fn stats_spec(app: &App) -> HeightSpec {
 
 // ── Main planner ──────────────────────────────────────────────────
 
+/// Allocate vertical space to left-column panels given their specs.
+fn allocate_heights(
+    prov_spec: HeightSpec,
+    det_spec: HeightSpec,
+    sta_spec: HeightSpec,
+    total_height: u16,
+) -> AllocatedHeights {
+    let providers = prov_spec.ideal.min(total_height.max(prov_spec.min));
+    let remaining = total_height.saturating_sub(providers);
+
+    let show_detail = remaining >= det_spec.min;
+    let detail = if show_detail {
+        det_spec.ideal.min(remaining)
+    } else {
+        0
+    };
+
+    let leftover = total_height.saturating_sub(providers + detail);
+    let show_stats = leftover >= sta_spec.min;
+    let stats = if show_stats { leftover } else { 0 };
+
+    AllocatedHeights {
+        providers,
+        detail,
+        stats,
+    }
+}
+
+/// Build left-column panel placements from allocated heights.
+/// Panels with height 0 are omitted (convention: 0 = hidden).
+fn build_left_column(heights: &AllocatedHeights, left_rect: Rect) -> Vec<PanelPlacement> {
+    let panels = [
+        (PanelId::Providers, heights.providers),
+        (PanelId::Detail, heights.detail),
+        (PanelId::Stats, heights.stats),
+    ];
+
+    panels
+        .into_iter()
+        .filter(|(_, h)| *h > 0)
+        .scan(left_rect.y, |y, (id, height)| {
+            let rect = Rect {
+                x: left_rect.x,
+                y: *y,
+                width: left_rect.width,
+                height,
+            };
+            *y += height;
+            Some(PanelPlacement { id, area: rect })
+        })
+        .collect()
+}
+
 /// Compute the layout plan for the main screen given the current
 /// terminal area and application state.  This is the single source of
 /// truth for all main-screen panel geometry.
 pub(super) fn plan_main_screen(app: &App, area: Rect) -> ScreenPlan {
     let split = area.width >= MIN_WIDTH_FOR_SPLIT;
 
-    // The left column is narrower when the right panel is present.
     let left_width = if split {
         area.width.saturating_sub(LOGS_PANEL_WIDTH) as usize
     } else {
@@ -123,30 +182,8 @@ pub(super) fn plan_main_screen(app: &App, area: Rect) -> ScreenPlan {
     let det_spec = detail_spec(app, route_avail);
     let sta_spec = stats_spec(app);
 
-    // ── Vertical allocation: providers first ──────────────────────
-    let table_height = prov_spec.ideal.min(area.height.max(prov_spec.min));
-    let remaining = area.height.saturating_sub(table_height);
+    let heights = allocate_heights(prov_spec, det_spec, sta_spec, area.height);
 
-    let show_detail = remaining >= det_spec.min;
-    let detail_height = if show_detail {
-        det_spec.ideal.min(remaining)
-    } else {
-        0
-    };
-
-    let leftover = area.height.saturating_sub(table_height + detail_height);
-    let show_stats = leftover >= sta_spec.min;
-    let stats_height = if show_stats { leftover } else { 0 };
-
-    // top_height: how many lines the Providers+Detail block occupies.
-    // The logs panel uses this to split Messages vs Recent Requests at
-    // the same visual row as "By Provider".
-    // stats_panel starts with one blank line, so we add 1 when stats are shown.
-    let top_height = table_height
-        .saturating_add(detail_height)
-        .saturating_add(if show_stats { 1 } else { 0 });
-
-    // ── Build left-column Rects manually (no Min constraints) ─────
     let left_rect = if split {
         Rect {
             x: area.x,
@@ -158,49 +195,15 @@ pub(super) fn plan_main_screen(app: &App, area: Rect) -> ScreenPlan {
         area
     };
 
-    let mut left = Vec::new();
-    let mut y = left_rect.y;
+    let left = build_left_column(&heights, left_rect);
 
-    let prov_rect = Rect {
-        x: left_rect.x,
-        y,
-        width: left_rect.width,
-        height: table_height,
-    };
-    left.push(PanelPlacement {
-        id: PanelId::Providers,
-        area: prov_rect,
-    });
-    y += table_height;
+    // top_height: how many lines the Providers+Detail block occupies.
+    // stats_panel starts with one blank line, so we add 1 when stats are shown.
+    let top_height = heights
+        .providers
+        .saturating_add(heights.detail)
+        .saturating_add(if heights.stats > 0 { 1 } else { 0 });
 
-    if show_detail {
-        let det_rect = Rect {
-            x: left_rect.x,
-            y,
-            width: left_rect.width,
-            height: detail_height,
-        };
-        left.push(PanelPlacement {
-            id: PanelId::Detail,
-            area: det_rect,
-        });
-        y += detail_height;
-    }
-
-    if show_stats {
-        let sta_rect = Rect {
-            x: left_rect.x,
-            y,
-            width: left_rect.width,
-            height: stats_height,
-        };
-        left.push(PanelPlacement {
-            id: PanelId::Stats,
-            area: sta_rect,
-        });
-    }
-
-    // ── Right column ──────────────────────────────────────────────
     let logs = if split {
         let logs_rect = Rect {
             x: area.x + area.width.saturating_sub(LOGS_PANEL_WIDTH),
@@ -250,36 +253,6 @@ pub(crate) const BORDER_INNER_DIVIDER: border::Set = border::Set {
     vertical_left: "╎",
     ..border::PLAIN
 };
-
-/// Pack enabled routes into wrapped lines given the available text width.
-/// Returns groups of routes, each group rendered on one line.
-pub(crate) fn pack_routes<'a>(
-    routes: &[&'a RouteRule],
-    avail_width: usize,
-) -> Vec<Vec<&'a RouteRule>> {
-    use unicode_width::UnicodeWidthStr;
-
-    let mut result: Vec<Vec<&RouteRule>> = vec![];
-    let mut current: Vec<&RouteRule> = vec![];
-    let mut used = 0usize;
-
-    for route in routes {
-        let item_w = route.pattern.width() + 3 + route.target.width(); // 3 = " → "
-        let sep_w = if current.is_empty() { 0 } else { 2 };
-        if current.is_empty() || used + sep_w + item_w <= avail_width {
-            current.push(route);
-            used += sep_w + item_w;
-        } else {
-            result.push(std::mem::take(&mut current));
-            current.push(route);
-            used = item_w;
-        }
-    }
-    if !current.is_empty() {
-        result.push(current);
-    }
-    result
-}
 
 pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()

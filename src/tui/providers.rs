@@ -17,10 +17,10 @@ use crate::tester::TestStatus;
 use super::state::{App, ConfirmAction, MessageKind, Mode, QuotaStatus};
 use super::theme::{self as t};
 use super::ui::format::{
-    api_key_display_len, col_width, config_path_display, fmt_latency, masked_api_key,
+    api_key_display_len, col_width, config_path_display, fmt_latency, masked_api_key, pack_routes,
     truncate_chars, truncate_error,
 };
-use super::ui::layout::{BORDER_DASHED_TOP, ROUTE_LABEL_WIDTH, pack_routes};
+use super::ui::layout::{BORDER_DASHED_TOP, ROUTE_LABEL_WIDTH};
 use super::{ServerHandle, server};
 
 pub(super) fn handle_key(
