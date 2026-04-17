@@ -8,7 +8,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Padding, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Cell, Padding, Paragraph, Row, Table};
 use unicode_width::UnicodeWidthStr;
 
 use crate::config::{ApiFormat, Provider};
@@ -20,7 +20,7 @@ use super::ui::format::{
     api_key_display_len, col_width, config_path_display, fmt_latency, masked_api_key, pack_routes,
     truncate_chars, truncate_error,
 };
-use super::ui::layout::{BORDER_DASHED_TOP, ROUTE_LABEL_WIDTH};
+use super::ui::layout::ROUTE_LABEL_WIDTH;
 use super::{ServerHandle, server};
 
 pub(super) fn handle_key(
@@ -205,13 +205,7 @@ pub(super) fn handle_key(
     Ok(())
 }
 
-pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect, right_border: bool) {
-    let table_borders = if right_border {
-        Borders::TOP | Borders::LEFT | Borders::RIGHT
-    } else {
-        Borders::TOP | Borders::LEFT
-    };
-    let (title_left, title_right) = make_table_titles(app);
+pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
     if app.providers.names.is_empty() {
         let empty = Paragraph::new(vec![
             Line::from(""),
@@ -233,14 +227,7 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect, right_border:
                 Span::styled(config_path_display(), Style::default().fg(t::PRIMARY)),
             ]),
         ])
-        .block(
-            Block::default()
-                .borders(table_borders)
-                .border_set(BORDER_DASHED_TOP)
-                .border_style(Style::default().fg(t::MUTED))
-                .title_top(title_left)
-                .title_top(title_right),
-        );
+        .block(Block::default().padding(Padding::horizontal(1)));
         f.render_widget(empty, area);
         return;
     }
@@ -396,31 +383,14 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect, right_border:
     }
     let table = Table::new(rows, col_constraints)
         .header(header)
-        .block(
-            Block::default()
-                .borders(table_borders)
-                .border_set(BORDER_DASHED_TOP)
-                .border_style(Style::default().fg(t::MUTED))
-                .padding(Padding::horizontal(1))
-                .title_top(title_left)
-                .title_top(title_right),
-        )
+        .block(Block::default().padding(Padding::horizontal(1)))
         .row_highlight_style(Style::default());
 
     f.render_stateful_widget(table, area, &mut app.providers.table_state);
 }
 
-pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect, right_border: bool) {
-    let border_style = Style::default().fg(t::MUTED);
-    let detail_borders = if right_border {
-        Borders::LEFT | Borders::RIGHT
-    } else {
-        Borders::LEFT
-    };
-    let block = Block::default()
-        .borders(detail_borders)
-        .border_style(border_style)
-        .padding(Padding::horizontal(1));
+pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default().padding(Padding::horizontal(1));
 
     let label = Style::default().fg(t::MUTED);
     let title_line = Line::from(Span::styled(
@@ -540,48 +510,6 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect, right_bord
     }
 
     f.render_widget(Paragraph::new(lines).block(block), area);
-}
-
-fn make_table_titles(app: &App) -> (Line<'static>, Line<'static>) {
-    let left = Line::from(vec![
-        Span::styled(
-            " Claude Code Switcher",
-            Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("  v{} ", env!("CARGO_PKG_VERSION")),
-            Style::default().fg(t::MUTED),
-        ),
-    ]);
-    let listen = app.config.listen.to_string();
-    let fallback_label = if app.config.fallback {
-        "Fallback on"
-    } else {
-        "Fallback off"
-    };
-    let right = Line::from(vec![
-        Span::styled("╌╌ ", Style::default().fg(t::MUTED)),
-        Span::styled(
-            listen,
-            if app.bg_proxy_pid.is_some() {
-                Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(t::MUTED)
-            },
-        ),
-        Span::styled("  ", Style::default()),
-        Span::styled(
-            fallback_label,
-            if app.config.fallback {
-                Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(t::MUTED)
-            },
-        ),
-        Span::styled(" ╌╌ ", Style::default().fg(t::MUTED)),
-    ])
-    .right_aligned();
-    (left, right)
 }
 
 fn build_test_curl(provider: &Provider, model: &str) -> Result<String, String> {

@@ -3,6 +3,7 @@
 //! Feature-specific panels live at `src/tui/*.rs`.
 //! This module keeps shared dialogs, layout primitives, and top-level draw dispatch.
 
+mod chrome;
 mod dialogs;
 pub(super) mod format;
 pub(super) mod layout;
@@ -33,11 +34,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
     let plan = plan_main_screen(app, area);
 
+    chrome::draw(f, &plan, app);
+
     for placement in &plan.left {
         match placement.id {
-            PanelId::Providers => draw_table(f, app, placement.area, !plan.split),
-            PanelId::Detail => draw_detail_panel(f, app, placement.area, !plan.split),
-            PanelId::Stats => draw_provider_stats(f, app, placement.area, !plan.split),
+            PanelId::Providers => draw_table(f, app, placement.area),
+            PanelId::Detail => draw_detail_panel(f, app, placement.area),
+            PanelId::Stats => draw_provider_stats(f, app, placement.area),
             PanelId::Logs => {}
         }
     }

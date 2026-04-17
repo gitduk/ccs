@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Padding, Paragraph};
+use ratatui::widgets::{Block, Padding, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use super::state::App;
@@ -12,16 +12,8 @@ use super::theme::{self as t};
 use super::ui::format::{fmt_latency, format_tokens, max_content_width, strip_model_prefix};
 use super::ui::layout::{DASH, SUFFIX_GAP, TITLE_SIDE};
 
-pub(super) fn draw_panel(f: &mut Frame, app: &App, area: Rect, right_border: bool) {
-    let borders = if right_border {
-        Borders::LEFT | Borders::RIGHT | Borders::BOTTOM
-    } else {
-        Borders::LEFT | Borders::BOTTOM
-    };
-    let block = Block::default()
-        .borders(borders)
-        .border_style(Style::default().fg(t::MUTED))
-        .padding(Padding::horizontal(1));
+pub(super) fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default().padding(Padding::horizontal(1));
 
     let inner = block.inner(area);
     f.render_widget(block, area);

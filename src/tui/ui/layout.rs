@@ -34,14 +34,20 @@ pub(super) struct PanelPlacement {
 
 /// The complete layout plan for one draw cycle.
 pub(super) struct ScreenPlan {
-    /// Left-column placements in top-to-bottom order.
+    /// Outer L-frame rect for the left column. The chrome module draws
+    /// the top/bottom/left (and optional right) borders here.
+    pub left_frame: Rect,
+    /// Left-column panel *content* placements (inside left_frame), in
+    /// top-to-bottom order. Panels render directly into these rects with
+    /// no borders of their own.
     pub left: Vec<PanelPlacement>,
     /// Right logs panel, or None when width < split threshold.
     pub logs: Option<PanelPlacement>,
     /// True when the right logs column is present.
     pub split: bool,
-    /// Height used by Providers + Detail on the left (used by logs panel
-    /// to align its Messages / Recent Requests divider).
+    /// Row index (inside the logs inner area) where the Messages section
+    /// ends and the Recent Requests section begins. Chosen so the
+    /// Messages end aligns with the left column's Detail end.
     pub top_height: u16,
 }
 
@@ -63,10 +69,12 @@ const DETAIL_MIN_HEIGHT: u16 = 2;
 
 // ── Per-panel height spec helpers ─────────────────────────────────
 
-/// Minimum / ideal height for the Providers table.
+/// Minimum / ideal height for the Providers table content (no borders;
+/// the outer chrome owns top/bottom). One row for the header plus one
+/// row per provider.
 fn providers_spec(app: &App) -> HeightSpec {
-    let ideal = (app.providers.names.len() as u16 + 2).max(3);
-    HeightSpec { min: 3, ideal }
+    let ideal = (app.providers.names.len() as u16 + 1).max(2);
+    HeightSpec { min: 2, ideal }
 }
 
 /// Minimum / ideal height for the Detail panel.
@@ -99,11 +107,12 @@ fn detail_spec(app: &App, route_avail: usize) -> HeightSpec {
 }
 
 /// Minimum / ideal height for the Stats panel (By Provider section only;
-/// By Model gets whatever space remains).
+/// By Model gets whatever space remains). No bottom border — owned by
+/// the chrome.
 fn stats_spec(app: &App) -> HeightSpec {
-    // blank + title + blank + N provider rows + bottom border
+    // blank + title + N provider rows
     let n = app.providers.names.len() as u16;
-    let min = 3 + n;
+    let min = 2 + n;
     HeightSpec { min, ideal: min }
 }
 
@@ -168,23 +177,7 @@ fn build_left_column(heights: &AllocatedHeights, left_rect: Rect) -> Vec<PanelPl
 pub(super) fn plan_main_screen(app: &App, area: Rect) -> ScreenPlan {
     let split = area.width >= MIN_WIDTH_FOR_SPLIT;
 
-    let left_width = if split {
-        area.width.saturating_sub(LOGS_PANEL_WIDTH) as usize
-    } else {
-        area.width as usize
-    };
-
-    // detail panel: LEFT border (1) + horizontal padding (2) = 3 overhead on each side → 4 total
-    let detail_inner_width = left_width.saturating_sub(4);
-    let route_avail = detail_inner_width.saturating_sub(ROUTE_LABEL_WIDTH);
-
-    let prov_spec = providers_spec(app);
-    let det_spec = detail_spec(app, route_avail);
-    let sta_spec = stats_spec(app);
-
-    let heights = allocate_heights(prov_spec, det_spec, sta_spec, area.height);
-
-    let left_rect = if split {
+    let left_frame = if split {
         Rect {
             x: area.x,
             y: area.y,
@@ -195,12 +188,36 @@ pub(super) fn plan_main_screen(app: &App, area: Rect) -> ScreenPlan {
         area
     };
 
-    let left = build_left_column(&heights, left_rect);
+    // Chrome consumes: 1 row top, 1 row bottom, 1 col left, and 1 col right
+    // when no logs column is shown (split = false).
+    let right_frame = if split { 0 } else { 1 };
+    let inner_left = Rect {
+        x: left_frame.x.saturating_add(1),
+        y: left_frame.y.saturating_add(1),
+        width: left_frame.width.saturating_sub(1 + right_frame),
+        height: left_frame.height.saturating_sub(2),
+    };
 
-    // top_height: how many lines the Providers+Detail block occupies.
-    // stats_panel starts with one blank line, so we add 1 when stats are shown.
-    let top_height = heights
-        .providers
+    // detail panel: horizontal padding (1 each side) = 2 overhead on inner width
+    let detail_inner_width = (inner_left.width as usize).saturating_sub(2);
+    let route_avail = detail_inner_width.saturating_sub(ROUTE_LABEL_WIDTH);
+
+    let prov_spec = providers_spec(app);
+    let det_spec = detail_spec(app, route_avail);
+    let sta_spec = stats_spec(app);
+
+    let heights = allocate_heights(prov_spec, det_spec, sta_spec, inner_left.height);
+
+    let left = build_left_column(&heights, inner_left);
+
+    // top_height: row inside the logs inner area where Messages ends and
+    // Requests begins. We want Messages' last row to align with Detail's
+    // last content row (with a +1 offset when Stats is shown, to land on
+    // the blank first row of Stats).  Since the left column content is
+    // shifted down by 1 row by the chrome's top border, but the logs
+    // column has no top border, we add 1 here to compensate.
+    let top_height = 1u16
+        .saturating_add(heights.providers)
         .saturating_add(heights.detail)
         .saturating_add(if heights.stats > 0 { 1 } else { 0 });
 
@@ -220,6 +237,7 @@ pub(super) fn plan_main_screen(app: &App, area: Rect) -> ScreenPlan {
     };
 
     ScreenPlan {
+        left_frame,
         left,
         logs,
         split,
