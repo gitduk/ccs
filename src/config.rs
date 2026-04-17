@@ -261,6 +261,24 @@ impl Provider {
             .unwrap_or_else(|| model.to_string())
     }
 
+    /// Resolve an incoming model for this provider: first match routes (glob
+    /// patterns with targets), then apply model_map. Returns the effective
+    /// model name and the matched route pattern (for metrics), if any.
+    ///
+    /// Why per-provider: each provider rewrites models via its own routes; a
+    /// fallback to a different-format provider must apply *that* provider's
+    /// rules, not the originally-selected provider's.
+    pub fn resolve_model(&self, model: &str) -> (String, Option<String>) {
+        let (after_routes, pattern) = self
+            .routes
+            .iter()
+            .find(|r| r.matches(model))
+            .filter(|r| !r.target.is_empty())
+            .map(|r| (r.target.clone(), Some(r.pattern.clone())))
+            .unwrap_or_else(|| (model.to_string(), None));
+        (self.map_model(&after_routes), pattern)
+    }
+
     /// Get the actual OpenAI API version (defaults to Responses API)
     pub fn openai_api_version(&self) -> &str {
         match self.openai_api_version_enum() {

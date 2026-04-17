@@ -87,43 +87,13 @@ pub async fn handle_models(
         .into_response())
 }
 
-/// Build the candidate provider list and resolve the current provider's route.
-/// Routes are per-provider model rewrites — they never change which provider is selected.
-/// Returns `(pool, should_cycle, optional_routed_target)`.
+/// Build the candidate provider list. Routes are per-provider and are applied
+/// at request execution time (see [`try_providers`]) so that a fallback to a
+/// different-format provider uses *its own* routes, not the current provider's.
 async fn resolve_provider_pool(
     state: &SharedState,
-    req_model: &str,
-) -> Result<
-    (
-        Vec<(String, crate::config::Provider)>,
-        bool,
-        Option<String>,
-        String,
-    ),
-    AppError,
-> {
+) -> Result<(Vec<(String, crate::config::Provider)>, bool), AppError> {
     let config = state.config.read().await;
-
-    // Route lookup: only check the current provider's routes for model rewriting.
-    let (_, current_provider) = config.current_enabled_provider()?;
-    let (routed_target, route_pattern) = current_provider
-        .routes
-        .iter()
-        .find(|r| r.matches(req_model))
-        .map(|r| {
-            let target = if r.target.is_empty() {
-                None
-            } else {
-                Some(r.target.clone())
-            };
-            let pattern = if target.is_some() {
-                r.pattern.clone()
-            } else {
-                String::new()
-            };
-            (target, pattern)
-        })
-        .unwrap_or((None, String::new()));
 
     if config.fallback {
         let start_idx = config.providers.get_index_of(&config.current).unwrap_or(0);
@@ -138,13 +108,12 @@ async fn resolve_provider_pool(
                     .map(|(k, v)| (k.clone(), v.clone()))
             })
             .collect();
-        Ok((list, true, routed_target, route_pattern))
+        Ok((list, true))
     } else {
+        let (_, current_provider) = config.current_enabled_provider()?;
         Ok((
             vec![(config.current.clone(), current_provider.clone())],
             false,
-            routed_target,
-            route_pattern,
         ))
     }
 }
@@ -155,7 +124,6 @@ struct RequestCtx<'a> {
     req_json: Option<&'a serde_json::Value>,
     headers: &'a HeaderMap,
     is_stream: bool,
-    route_pattern: &'a str,
 }
 
 /// Try each provider in the pool; cycle on retryable errors (5xx, 429, auth).
@@ -193,11 +161,12 @@ async fn try_providers(
         );
     };
 
-    let record_error_metric = |state: &SharedState, name: &str, status: u16, msg: &str| {
-        if let Ok(mut m) = state.metrics.lock() {
-            m.record_error(name, status, &req_model_hint, ctx.route_pattern, msg);
-        }
-    };
+    let record_error_metric =
+        |state: &SharedState, name: &str, status: u16, msg: &str, pattern: &str| {
+            if let Ok(mut m) = state.metrics.lock() {
+                m.record_error(name, status, &req_model_hint, pattern, msg);
+            }
+        };
 
     let t0 = std::time::Instant::now();
 
@@ -207,12 +176,19 @@ async fn try_providers(
             name: provider_name.clone(),
         };
 
+        // Per-provider route pattern for metrics: reflects which rule (if any)
+        // of *this* provider matched the requested model.
+        let route_pattern = provider
+            .resolve_model(&req_model_hint)
+            .1
+            .unwrap_or_default();
+
         let api_key = match provider.resolve_api_key() {
             Ok(k) => k,
             Err(e) => {
                 tracing::warn!("Skipping provider {}: {e}", provider.base_url);
                 record_failure(state, &pkey);
-                record_error_metric(state, provider_name, 0, &e.to_string());
+                record_error_metric(state, provider_name, 0, &e.to_string(), &route_pattern);
                 consecutive_failures += 1;
                 if !do_cycle || consecutive_failures >= max_failures {
                     break;
@@ -238,7 +214,7 @@ async fn try_providers(
                     provider.base_url
                 );
                 record_failure(state, &pkey);
-                record_error_metric(state, provider_name, 0, &e.to_string());
+                record_error_metric(state, provider_name, 0, &e.to_string(), &route_pattern);
                 consecutive_failures += 1;
                 if !do_cycle || consecutive_failures >= max_failures {
                     break;
@@ -264,7 +240,7 @@ async fn try_providers(
                 provider.base_url
             );
             record_failure(state, &pkey);
-            record_error_metric(state, provider_name, status_u16, &preview);
+            record_error_metric(state, provider_name, status_u16, &preview, &route_pattern);
             last_status = Some(status);
             last_error_body = Some(error_body);
             consecutive_failures += 1;
@@ -289,7 +265,7 @@ async fn try_providers(
                 preview
             );
             record_failure(state, &pkey);
-            record_error_metric(state, provider_name, status_u16, &preview);
+            record_error_metric(state, provider_name, status_u16, &preview, &route_pattern);
             last_status = Some(status);
             last_error_body = Some(error_body.clone());
             auth_failures += 1;
@@ -312,7 +288,7 @@ async fn try_providers(
             let preview = extract_error_message(&error_body);
             tracing::warn!("Upstream returned {status}: {preview}");
             record_failure(state, &pkey);
-            record_error_metric(state, provider_name, status_u16, &preview);
+            record_error_metric(state, provider_name, status_u16, &preview, &route_pattern);
             return Ok((status, [("content-type", "application/json")], error_body).into_response());
         }
 
@@ -431,50 +407,23 @@ pub async fn handle_messages(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    // Parse body once to extract routing hints (model name + stream flag).
+    // Parse body once to extract the stream flag. The body's `model` field is
+    // left untouched here — each provider applies its own routes + model_map
+    // at request time (see `try_providers`), so that fallback to a different-
+    // format provider uses its own rules rather than the current provider's.
     let req_json = serde_json::from_slice::<serde_json::Value>(&body).ok();
     let is_stream = req_json
         .as_ref()
         .and_then(|v| v.get("stream").and_then(|s| s.as_bool()))
         .unwrap_or(false);
-    let req_model = req_json
-        .as_ref()
-        .and_then(|v| v.get("model").and_then(|m| m.as_str()))
-        .unwrap_or("")
-        .to_string();
 
-    let (pool, do_cycle, routed_target, route_pattern) =
-        resolve_provider_pool(&state, &req_model).await?;
-
-    // Patch body: rewrite `model` field with route target when applicable.
-    let (body, req_json) = if let Some(target) = &routed_target {
-        match req_json {
-            Some(mut json) => {
-                json["model"] = serde_json::Value::String(target.clone());
-                match serde_json::to_vec(&json) {
-                    Ok(vec) => (Bytes::from(vec), Some(json)),
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to re-serialize request body after route rewrite: {e}"
-                        );
-                        return Err(AppError::Transform(format!(
-                            "Failed to apply route rewrite: {e}"
-                        )));
-                    }
-                }
-            }
-            None => (body, None),
-        }
-    } else {
-        (body, req_json)
-    };
+    let (pool, do_cycle) = resolve_provider_pool(&state).await?;
 
     let ctx = RequestCtx {
         body: &body,
         req_json: req_json.as_ref(),
         headers: &headers,
         is_stream,
-        route_pattern: &route_pattern,
     };
     try_providers(&state, &pool, do_cycle, &ctx).await
 }

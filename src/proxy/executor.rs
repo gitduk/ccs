@@ -55,7 +55,7 @@ pub(crate) async fn execute_provider_request(
         None
     };
     let make_openai_body = |api_version: OpenAiApiVersion| -> Result<Bytes, AppError> {
-        let transformed = transform::anthropic_to_openai_request_with_api_version(
+        let transformed = transform::to_openai(
             request_json.expect("OpenAI request JSON should exist"),
             provider,
             api_version,
@@ -65,7 +65,10 @@ pub(crate) async fn execute_provider_request(
 
     let upstream_body = match initial_api_version.as_ref() {
         Some(api_version) => make_openai_body(api_version.clone())?,
-        None => body.clone(),
+        None => match req_json.and_then(|req| transform::map_anthropic_model(req, provider)) {
+            Some(mapped) => Bytes::from(serde_json::to_vec(&mapped)?),
+            None => body.clone(),
+        },
     };
 
     let mut response = match initial_api_version.as_ref() {

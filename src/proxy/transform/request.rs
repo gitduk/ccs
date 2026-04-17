@@ -6,6 +6,16 @@ use crate::error::{AppError, Result};
 // Default model names
 const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
 
+fn current_model(req: &Value) -> &str {
+    req.get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or(DEFAULT_MODEL)
+}
+
+fn get_mapped_model(req: &Value, provider: &Provider) -> String {
+    provider.resolve_model(current_model(req)).0
+}
+
 /// Extract system text from Anthropic request
 fn extract_system_text(req: &Value) -> String {
     req.get("system")
@@ -24,23 +34,29 @@ fn extract_system_text(req: &Value) -> String {
 /// Convert an Anthropic Messages API request to OpenAI format.
 /// Automatically detects and uses the appropriate format based on provider configuration.
 pub fn anthropic_to_openai_request(req: &Value, provider: &Provider) -> Result<Value> {
-    anthropic_to_openai_request_with_api_version(req, provider, provider.openai_api_version_enum())
+    to_openai(req, provider, provider.openai_api_version_enum())
+}
+
+/// Apply model mapping to an Anthropic-format request body.
+/// Returns `None` when no mapping applies, so callers can reuse the original
+/// request bytes instead of re-serializing an identical `Value`.
+pub fn map_anthropic_model(req: &Value, provider: &Provider) -> Option<Value> {
+    let original = current_model(req);
+    let (mapped, _) = provider.resolve_model(original);
+    if mapped == original {
+        return None;
+    }
+    let mut out = req.clone();
+    out["model"] = json!(mapped);
+    Some(out)
 }
 
 /// Convert an Anthropic Messages API request to OpenAI format using an explicit
 /// OpenAI API version for this attempt.
-pub fn anthropic_to_openai_request_with_api_version(
-    req: &Value,
-    provider: &Provider,
-    api_version: OpenAiApiVersion,
-) -> Result<Value> {
+pub fn to_openai(req: &Value, provider: &Provider, api_version: OpenAiApiVersion) -> Result<Value> {
     let is_responses = matches!(api_version, OpenAiApiVersion::Responses);
 
-    let model = req
-        .get("model")
-        .and_then(|m| m.as_str())
-        .unwrap_or(DEFAULT_MODEL);
-    let mapped_model = provider.map_model(model);
+    let mapped_model = get_mapped_model(req, provider);
 
     let mut converted_msgs: Vec<Value> = Vec::new();
 
@@ -607,7 +623,7 @@ mod tests {
             "max_tokens": 10,
             "stream": true
         });
-        let out = anthropic_to_openai_request_with_api_version(
+        let out = to_openai(
             &req,
             &provider_responses(),
             OpenAiApiVersion::ChatCompletions,
