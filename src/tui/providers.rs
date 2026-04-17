@@ -227,7 +227,7 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                 Span::styled(config_path_display(), Style::default().fg(t::PRIMARY)),
             ]),
         ])
-        .block(Block::default().padding(Padding::horizontal(1)));
+        .block(Block::default().padding(Padding::new(1, 1, 1, 0)));
         f.render_widget(empty, area);
         return;
     }
@@ -383,7 +383,7 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
     }
     let table = Table::new(rows, col_constraints)
         .header(header)
-        .block(Block::default().padding(Padding::horizontal(1)))
+        .block(Block::default().padding(Padding::new(1, 1, 1, 0)))
         .row_highlight_style(Style::default());
 
     f.render_stateful_widget(table, area, &mut app.providers.table_state);

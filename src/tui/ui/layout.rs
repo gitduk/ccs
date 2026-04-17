@@ -70,11 +70,11 @@ const DETAIL_MIN_HEIGHT: u16 = 2;
 // ── Per-panel height spec helpers ─────────────────────────────────
 
 /// Minimum / ideal height for the Providers table content (no borders;
-/// the outer chrome owns top/bottom). One row for the header plus one
-/// row per provider.
+/// the outer chrome owns top/bottom). One row of top padding + one
+/// header row + one row per provider.
 fn providers_spec(app: &App) -> HeightSpec {
-    let ideal = (app.providers.names.len() as u16 + 1).max(2);
-    HeightSpec { min: 2, ideal }
+    let ideal = (app.providers.names.len() as u16 + 2).max(3);
+    HeightSpec { min: 3, ideal }
 }
 
 /// Minimum / ideal height for the Detail panel.
