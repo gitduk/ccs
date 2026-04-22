@@ -3,6 +3,8 @@ use futures::Stream;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::config::OpenAiApiVersion;
+
 /// Convert an OpenAI SSE stream to Anthropic SSE stream.
 pub fn openai_stream_to_anthropic(
     response: reqwest::Response,
@@ -108,10 +110,6 @@ enum BlockType {
 
 #[derive(Clone, Debug)]
 struct ToolCallState {
-    #[allow(dead_code)]
-    id: String,
-    #[allow(dead_code)]
-    name: String,
     arguments_buffer: String,
     /// content_index assigned to this tool call's content block.
     content_index: usize,
@@ -181,14 +179,8 @@ impl StreamState {
             None => return events,
         };
 
-        // Check finish_reason
         if let Some(reason) = choice.get("finish_reason").and_then(|f| f.as_str()) {
-            self.stop_reason = Some(match reason {
-                "stop" => "end_turn".to_string(),
-                "length" => "max_tokens".to_string(),
-                "tool_calls" => "tool_use".to_string(),
-                other => other.to_string(),
-            });
+            self.stop_reason = Some(super::chat_finish_to_anthropic_stop(reason).to_string());
         }
 
         // Handle reasoning_content (thinking)
@@ -238,8 +230,6 @@ impl StreamState {
                         self.tool_calls.insert(
                             tc_index,
                             ToolCallState {
-                                id: id.clone(),
-                                name: name.to_string(),
                                 arguments_buffer: String::new(),
                                 content_index: self.content_index,
                             },
@@ -378,8 +368,6 @@ impl StreamState {
                     self.response_tool_calls.insert(
                         item_id,
                         ToolCallState {
-                            id: call_id.clone(),
-                            name: name.clone(),
                             arguments_buffer: String::new(),
                             content_index,
                         },
@@ -453,10 +441,8 @@ impl StreamState {
                     .get("status")
                     .and_then(|v| v.as_str())
                     .unwrap_or("completed");
-                self.stop_reason = Some(match status {
-                    "incomplete" => "max_tokens".to_string(),
-                    _ => "end_turn".to_string(),
-                });
+                self.stop_reason =
+                    Some(super::response_status_to_anthropic_stop(status).to_string());
                 self.response_tool_calls.clear();
             }
             _ => {}
@@ -595,6 +581,668 @@ impl StreamState {
             serde_json::to_string(data).unwrap_or_default()
         )
     }
+}
+
+// ─── Anthropic SSE → OpenAI SSE ──────────────────────────────────────────────
+
+/// Convert an Anthropic Messages SSE byte-stream to an OpenAI SSE byte-stream.
+///
+/// Supports both OpenAI Chat Completions (`chat.completion.chunk`) and the
+/// Responses API (`response.*` events). Used when a client speaks OpenAI but
+/// the upstream provider (or upstream-normalised pipeline) is Anthropic.
+pub fn anthropic_stream_to_openai<S>(
+    byte_stream: S,
+    target: OpenAiApiVersion,
+) -> impl Stream<Item = std::result::Result<Bytes, std::io::Error>> + Send
+where
+    S: Stream<Item = std::result::Result<Bytes, std::io::Error>> + Send + 'static,
+{
+    async_stream::stream! {
+        let mut state = AnthropicToOpenAiState::new(target);
+        let mut buffer = String::new();
+
+        use futures::StreamExt;
+        let mut byte_stream = Box::pin(byte_stream);
+
+        const BUFFER_MAX: usize = 1024 * 1024;
+
+        while let Some(chunk_result) = byte_stream.next().await {
+            let chunk = match chunk_result {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!("Stream read error: {e}");
+                    for ev in state.emit_error() {
+                        yield Ok(Bytes::from(ev));
+                    }
+                    break;
+                }
+            };
+
+            if buffer.len() + chunk.len() > BUFFER_MAX {
+                tracing::warn!("SSE buffer exceeded 1 MB, dropping chunk");
+                buffer.clear();
+                continue;
+            }
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(pos) = buffer.find('\n') {
+                let line = buffer[..pos].trim_end_matches('\r').to_string();
+                buffer.drain(..=pos);
+
+                if line.is_empty() {
+                    continue;
+                }
+                if let Some(data) = line.strip_prefix("data: ") {
+                    if data.trim() == "[DONE]" {
+                        continue;
+                    }
+                    match serde_json::from_str::<Value>(data) {
+                        Ok(ev) => {
+                            for out in state.process_anthropic_event(&ev) {
+                                yield Ok(Bytes::from(out));
+                            }
+                        }
+                        Err(e) => tracing::warn!("Failed to parse Anthropic SSE chunk: {e}"),
+                    }
+                }
+            }
+        }
+
+        for ev in state.finalize() {
+            yield Ok(Bytes::from(ev));
+        }
+    }
+}
+
+struct AnthropicToOpenAiState {
+    target: OpenAiApiVersion,
+    id: String,
+    model: String,
+    created: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    stop_reason: Option<String>,
+    role_emitted: bool,
+    finalized: bool,
+    // Chat Completions: next tool_calls[].index value.
+    next_tool_call_index: usize,
+    // Currently-open Anthropic content block's OpenAI tool_calls[] index
+    // (Some iff the current block is a tool_use).
+    current_tool_call_index: Option<usize>,
+    // Responses API: output item counter for output_index fields.
+    next_output_index: usize,
+    // Responses API: current output item id for tool use streaming.
+    current_tool_item_id: Option<String>,
+    current_tool_call_id: Option<String>,
+    // Responses API: whether we've emitted response.created.
+    response_created_emitted: bool,
+    // Responses API: index of the currently-open output item (message or
+    // reasoning). `Some(_)` is the authoritative "a message-like item is
+    // open and awaiting output_item.done".
+    current_message_index: Option<usize>,
+    current_block_kind: Option<BlockType>,
+}
+
+impl AnthropicToOpenAiState {
+    fn new(target: OpenAiApiVersion) -> Self {
+        Self {
+            target,
+            id: String::new(),
+            model: String::new(),
+            created: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            input_tokens: 0,
+            output_tokens: 0,
+            stop_reason: None,
+            role_emitted: false,
+            finalized: false,
+            next_tool_call_index: 0,
+            current_tool_call_index: None,
+            next_output_index: 0,
+            current_tool_item_id: None,
+            current_tool_call_id: None,
+            response_created_emitted: false,
+            current_message_index: None,
+            current_block_kind: None,
+        }
+    }
+
+    fn is_chat(&self) -> bool {
+        matches!(self.target, OpenAiApiVersion::ChatCompletions)
+    }
+
+    fn process_anthropic_event(&mut self, ev: &Value) -> Vec<String> {
+        let event_type = ev.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        match event_type {
+            "message_start" => self.on_message_start(ev),
+            "content_block_start" => self.on_content_block_start(ev),
+            "content_block_delta" => self.on_content_block_delta(ev),
+            "content_block_stop" => self.on_content_block_stop(),
+            "message_delta" => self.on_message_delta(ev),
+            "message_stop" => Vec::new(), // handled in finalize()
+            _ => Vec::new(),
+        }
+    }
+
+    fn on_message_start(&mut self, ev: &Value) -> Vec<String> {
+        if let Some(msg) = ev.get("message") {
+            if let Some(id) = msg.get("id").and_then(|v| v.as_str()) {
+                self.id = id.to_string();
+            }
+            if let Some(model) = msg.get("model").and_then(|v| v.as_str()) {
+                self.model = model.to_string();
+            }
+            if let Some(usage) = msg.get("usage") {
+                if let Some(it) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
+                    self.input_tokens = it;
+                }
+                if let Some(ot) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
+                    self.output_tokens = ot;
+                }
+            }
+        }
+        if self.id.is_empty() {
+            self.id = if self.is_chat() {
+                format!("chatcmpl-{}", Uuid::new_v4())
+            } else {
+                format!("resp_{}", Uuid::new_v4())
+            };
+        }
+        if self.is_chat() {
+            self.emit_chat_role_chunk()
+        } else {
+            self.emit_response_created()
+        }
+    }
+
+    fn on_content_block_start(&mut self, ev: &Value) -> Vec<String> {
+        let block = match ev.get("content_block") {
+            Some(b) => b,
+            None => return Vec::new(),
+        };
+        let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        match block_type {
+            "text" => {
+                self.current_block_kind = Some(BlockType::Text);
+                if self.is_chat() {
+                    Vec::new()
+                } else {
+                    self.emit_response_message_open()
+                }
+            }
+            "thinking" => {
+                self.current_block_kind = Some(BlockType::Thinking);
+                if self.is_chat() {
+                    Vec::new()
+                } else {
+                    self.emit_response_reasoning_open()
+                }
+            }
+            "tool_use" => {
+                self.current_block_kind = Some(BlockType::ToolUse);
+                let id = block
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let name = block
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if self.is_chat() {
+                    self.emit_chat_tool_call_start(&id, &name)
+                } else {
+                    self.emit_response_tool_call_start(&id, &name)
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn on_content_block_delta(&mut self, ev: &Value) -> Vec<String> {
+        let delta = match ev.get("delta") {
+            Some(d) => d,
+            None => return Vec::new(),
+        };
+        let delta_type = delta.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        match delta_type {
+            "text_delta" => {
+                let text = delta.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                if text.is_empty() {
+                    return Vec::new();
+                }
+                if self.is_chat() {
+                    vec![self.chat_chunk(json!({"content": text}), None)]
+                } else {
+                    self.emit_response_text_delta(text)
+                }
+            }
+            "thinking_delta" => {
+                let text = delta.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
+                if text.is_empty() {
+                    return Vec::new();
+                }
+                if self.is_chat() {
+                    vec![self.chat_chunk(json!({"reasoning_content": text}), None)]
+                } else {
+                    self.emit_response_reasoning_delta(text)
+                }
+            }
+            "input_json_delta" => {
+                let partial = delta
+                    .get("partial_json")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                if partial.is_empty() {
+                    return Vec::new();
+                }
+                if self.is_chat() {
+                    self.emit_chat_tool_arguments(partial)
+                } else {
+                    self.emit_response_tool_arguments(partial)
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn on_content_block_stop(&mut self) -> Vec<String> {
+        let kind = self.current_block_kind.take();
+        self.current_tool_call_index = None;
+        if self.is_chat() {
+            return Vec::new();
+        }
+        // Responses API: emit close events for the current block.
+        match kind {
+            Some(BlockType::ToolUse) => self.emit_response_tool_call_done(),
+            Some(BlockType::Text) => self.emit_response_message_close(),
+            Some(BlockType::Thinking) => self.emit_response_reasoning_close(),
+            None => Vec::new(),
+        }
+    }
+
+    fn on_message_delta(&mut self, ev: &Value) -> Vec<String> {
+        if let Some(delta) = ev.get("delta")
+            && let Some(reason) = delta.get("stop_reason").and_then(|r| r.as_str())
+        {
+            self.stop_reason = Some(reason.to_string());
+        }
+        if let Some(usage) = ev.get("usage") {
+            if let Some(it) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
+                self.input_tokens = it;
+            }
+            if let Some(ot) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
+                self.output_tokens = ot;
+            }
+        }
+        Vec::new()
+    }
+
+    // ─── Chat Completions emitters ───────────────────────────────────────────
+
+    fn emit_chat_role_chunk(&mut self) -> Vec<String> {
+        if self.role_emitted {
+            return Vec::new();
+        }
+        self.role_emitted = true;
+        vec![self.chat_chunk(json!({"role": "assistant"}), None)]
+    }
+
+    fn emit_chat_tool_call_start(&mut self, id: &str, name: &str) -> Vec<String> {
+        let index = self.next_tool_call_index;
+        self.next_tool_call_index += 1;
+        self.current_tool_call_index = Some(index);
+        vec![self.chat_chunk(
+            json!({
+                "tool_calls": [{
+                    "index": index,
+                    "id": id,
+                    "type": "function",
+                    "function": { "name": name, "arguments": "" }
+                }]
+            }),
+            None,
+        )]
+    }
+
+    fn emit_chat_tool_arguments(&mut self, partial: &str) -> Vec<String> {
+        let index = match self.current_tool_call_index {
+            Some(i) => i,
+            None => return Vec::new(),
+        };
+        vec![self.chat_chunk(
+            json!({
+                "tool_calls": [{
+                    "index": index,
+                    "function": { "arguments": partial }
+                }]
+            }),
+            None,
+        )]
+    }
+
+    fn chat_chunk(&self, delta: Value, finish_reason: Option<&str>) -> String {
+        let mut choice = json!({
+            "index": 0,
+            "delta": delta,
+            "finish_reason": Value::Null,
+        });
+        if let Some(reason) = finish_reason {
+            choice["finish_reason"] = Value::String(reason.to_string());
+        }
+        let chunk = json!({
+            "id": self.id,
+            "object": "chat.completion.chunk",
+            "created": self.created,
+            "model": self.model,
+            "choices": [choice],
+        });
+        format!(
+            "data: {}\n\n",
+            serde_json::to_string(&chunk).unwrap_or_default()
+        )
+    }
+
+    fn chat_usage_chunk(&self) -> String {
+        let chunk = json!({
+            "id": self.id,
+            "object": "chat.completion.chunk",
+            "created": self.created,
+            "model": self.model,
+            "choices": [],
+            "usage": {
+                "prompt_tokens": self.input_tokens,
+                "completion_tokens": self.output_tokens,
+                "total_tokens": self.input_tokens + self.output_tokens,
+            }
+        });
+        format!(
+            "data: {}\n\n",
+            serde_json::to_string(&chunk).unwrap_or_default()
+        )
+    }
+
+    fn chat_finish_reason(&self) -> &'static str {
+        super::anthropic_stop_to_chat_finish(self.stop_reason.as_deref())
+    }
+
+    // ─── Responses API emitters ──────────────────────────────────────────────
+
+    fn emit_response_created(&mut self) -> Vec<String> {
+        if self.response_created_emitted {
+            return Vec::new();
+        }
+        self.response_created_emitted = true;
+        let response = json!({
+            "id": self.id,
+            "object": "response",
+            "created_at": self.created,
+            "model": self.model,
+            "status": "in_progress",
+            "output": [],
+        });
+        vec![
+            format_response_event(
+                "response.created",
+                &json!({
+                    "type": "response.created",
+                    "response": response.clone(),
+                }),
+            ),
+            format_response_event(
+                "response.in_progress",
+                &json!({
+                    "type": "response.in_progress",
+                    "response": response,
+                }),
+            ),
+        ]
+    }
+
+    fn take_message_index(&mut self) -> usize {
+        match self.current_message_index {
+            Some(i) => i,
+            None => {
+                let i = self.next_output_index;
+                self.next_output_index += 1;
+                self.current_message_index = Some(i);
+                i
+            }
+        }
+    }
+
+    fn emit_response_message_open(&mut self) -> Vec<String> {
+        if self.current_message_index.is_some() {
+            return Vec::new();
+        }
+        let index = self.take_message_index();
+        let item = json!({
+            "type": "message",
+            "id": format!("msg_{}", Uuid::new_v4()),
+            "status": "in_progress",
+            "role": "assistant",
+            "content": [],
+        });
+        vec![format_response_event(
+            "response.output_item.added",
+            &json!({
+                "type": "response.output_item.added",
+                "output_index": index,
+                "item": item,
+            }),
+        )]
+    }
+
+    fn emit_response_text_delta(&mut self, text: &str) -> Vec<String> {
+        let opens = self.emit_response_message_open();
+        let index = self.current_message_index.unwrap_or(0);
+        let mut out = opens;
+        out.push(format_response_event(
+            "response.output_text.delta",
+            &json!({
+                "type": "response.output_text.delta",
+                "output_index": index,
+                "content_index": 0,
+                "delta": text,
+            }),
+        ));
+        out
+    }
+
+    fn emit_response_message_close(&mut self) -> Vec<String> {
+        let Some(index) = self.current_message_index.take() else {
+            return Vec::new();
+        };
+        vec![format_response_event(
+            "response.output_item.done",
+            &json!({
+                "type": "response.output_item.done",
+                "output_index": index,
+                "item": {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                }
+            }),
+        )]
+    }
+
+    fn emit_response_reasoning_open(&mut self) -> Vec<String> {
+        // Reasoning items are siblings of messages; close an open message
+        // first if needed.
+        let mut out = self.emit_response_message_close();
+        let index = self.next_output_index;
+        self.next_output_index += 1;
+        self.current_message_index = Some(index);
+        out.push(format_response_event(
+            "response.output_item.added",
+            &json!({
+                "type": "response.output_item.added",
+                "output_index": index,
+                "item": {
+                    "type": "reasoning",
+                    "summary": [],
+                },
+            }),
+        ));
+        out
+    }
+
+    fn emit_response_reasoning_delta(&mut self, text: &str) -> Vec<String> {
+        let index = self.current_message_index.unwrap_or(0);
+        vec![format_response_event(
+            "response.reasoning_summary_text.delta",
+            &json!({
+                "type": "response.reasoning_summary_text.delta",
+                "output_index": index,
+                "summary_index": 0,
+                "delta": text,
+            }),
+        )]
+    }
+
+    fn emit_response_reasoning_close(&mut self) -> Vec<String> {
+        // Reuse message close: same shape, same tracking var.
+        self.emit_response_message_close()
+    }
+
+    fn emit_response_tool_call_start(&mut self, id: &str, name: &str) -> Vec<String> {
+        // Close an open message/reasoning first so the tool call is a sibling.
+        let mut out = self.emit_response_message_close();
+        let index = self.next_output_index;
+        self.next_output_index += 1;
+        let item_id = format!("fc_{}", Uuid::new_v4());
+        self.current_tool_item_id = Some(item_id.clone());
+        self.current_tool_call_id = Some(id.to_string());
+        self.current_message_index = Some(index);
+        out.push(format_response_event(
+            "response.output_item.added",
+            &json!({
+                "type": "response.output_item.added",
+                "output_index": index,
+                "item": {
+                    "type": "function_call",
+                    "id": item_id,
+                    "call_id": id,
+                    "name": name,
+                    "arguments": "",
+                    "status": "in_progress",
+                },
+            }),
+        ));
+        out
+    }
+
+    fn emit_response_tool_arguments(&self, partial: &str) -> Vec<String> {
+        let item_id = match self.current_tool_item_id.as_ref() {
+            Some(id) => id,
+            None => return Vec::new(),
+        };
+        let output_index = self.current_message_index.unwrap_or(0);
+        vec![format_response_event(
+            "response.function_call_arguments.delta",
+            &json!({
+                "type": "response.function_call_arguments.delta",
+                "output_index": output_index,
+                "item_id": item_id,
+                "delta": partial,
+            }),
+        )]
+    }
+
+    fn emit_response_tool_call_done(&mut self) -> Vec<String> {
+        let index = match self.current_message_index.take() {
+            Some(i) => i,
+            None => return Vec::new(),
+        };
+        let item_id = self.current_tool_item_id.take().unwrap_or_default();
+        let call_id = self.current_tool_call_id.take().unwrap_or_default();
+        vec![format_response_event(
+            "response.output_item.done",
+            &json!({
+                "type": "response.output_item.done",
+                "output_index": index,
+                "item": {
+                    "type": "function_call",
+                    "id": item_id,
+                    "call_id": call_id,
+                    "status": "completed",
+                },
+            }),
+        )]
+    }
+
+    fn response_status(&self) -> &'static str {
+        super::anthropic_stop_to_response_status(self.stop_reason.as_deref())
+    }
+
+    // ─── finalize ────────────────────────────────────────────────────────────
+
+    fn finalize(&mut self) -> Vec<String> {
+        if self.finalized {
+            return Vec::new();
+        }
+        self.finalized = true;
+        let mut out = Vec::new();
+
+        // Close any dangling open block (defensive: normally already closed
+        // via content_block_stop).
+        if self.current_message_index.is_some() && !self.is_chat() {
+            out.extend(self.emit_response_message_close());
+        }
+
+        if self.is_chat() {
+            let finish = self.chat_finish_reason();
+            out.push(self.chat_chunk(json!({}), Some(finish)));
+            out.push(self.chat_usage_chunk());
+            out.push("data: [DONE]\n\n".to_string());
+        } else {
+            let response = json!({
+                "id": self.id,
+                "object": "response",
+                "created_at": self.created,
+                "model": self.model,
+                "status": self.response_status(),
+                "usage": {
+                    "input_tokens": self.input_tokens,
+                    "output_tokens": self.output_tokens,
+                    "total_tokens": self.input_tokens + self.output_tokens,
+                },
+            });
+            out.push(format_response_event(
+                "response.completed",
+                &json!({
+                    "type": "response.completed",
+                    "response": response,
+                }),
+            ));
+        }
+        out
+    }
+
+    fn emit_error(&self) -> Vec<String> {
+        if self.is_chat() {
+            vec!["data: [DONE]\n\n".to_string()]
+        } else {
+            vec![format_response_event(
+                "response.failed",
+                &json!({
+                    "type": "response.failed",
+                    "response": {"id": self.id, "status": "failed"}
+                }),
+            )]
+        }
+    }
+}
+
+fn format_response_event(event_type: &str, data: &Value) -> String {
+    format!(
+        "event: {event_type}\ndata: {}\n\n",
+        serde_json::to_string(data).unwrap_or_default()
+    )
 }
 
 #[cfg(test)]
@@ -1025,5 +1673,254 @@ mod tests {
         let (_, delta) = events.iter().find(|(t, _)| t == "message_delta").unwrap();
         assert_eq!(delta["usage"]["input_tokens"], 42);
         assert_eq!(delta["usage"]["output_tokens"], 17);
+    }
+
+    // ─── anthropic_stream_to_openai tests ────────────────────────────────────
+    //
+    // We exercise the state machine directly (parsing + emission) instead of
+    // driving a reqwest::Response — this keeps tests fast and deterministic.
+
+    use crate::config::OpenAiApiVersion;
+
+    fn drive_anthropic_events(target: OpenAiApiVersion, events: &[Value]) -> Vec<String> {
+        let mut state = AnthropicToOpenAiState::new(target);
+        let mut out = Vec::new();
+        for ev in events {
+            out.extend(state.process_anthropic_event(ev));
+        }
+        out.extend(state.finalize());
+        out
+    }
+
+    /// Extract each SSE frame's parsed `data:` JSON (skipping `[DONE]`).
+    fn extract_data_json(frames: &[String]) -> Vec<Value> {
+        frames
+            .iter()
+            .flat_map(|frame| frame.lines())
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter(|d| d.trim() != "[DONE]")
+            .filter_map(|d| serde_json::from_str::<Value>(d).ok())
+            .collect()
+    }
+
+    // ─── Chat Completions target ─────────────────────────────────────────────
+
+    #[test]
+    fn anthropic_to_chat_simple_text_stream() {
+        let events = vec![
+            json!({"type": "message_start", "message": {"id": "msg_x", "model": "claude-sonnet-4", "usage": {"input_tokens": 5, "output_tokens": 0}}}),
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hel"}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "lo"}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 2}}),
+            json!({"type": "message_stop"}),
+        ];
+        let frames = drive_anthropic_events(OpenAiApiVersion::ChatCompletions, &events);
+        let data = extract_data_json(&frames);
+
+        // [role chunk, "Hel" delta, "lo" delta, finish chunk, usage chunk]
+        assert_eq!(data.len(), 5);
+        assert_eq!(data[0]["object"], "chat.completion.chunk");
+        assert_eq!(data[0]["choices"][0]["delta"]["role"], "assistant");
+        assert_eq!(data[1]["choices"][0]["delta"]["content"], "Hel");
+        assert_eq!(data[2]["choices"][0]["delta"]["content"], "lo");
+        assert_eq!(data[3]["choices"][0]["finish_reason"], "stop");
+        assert_eq!(data[4]["usage"]["prompt_tokens"], 5);
+        assert_eq!(data[4]["usage"]["completion_tokens"], 2);
+
+        // Must end with [DONE]
+        assert!(
+            frames.iter().any(|f| f.contains("data: [DONE]")),
+            "chat stream must terminate with [DONE]"
+        );
+    }
+
+    #[test]
+    fn anthropic_to_chat_max_tokens_becomes_length() {
+        let events = vec![
+            json!({"type": "message_start", "message": {"id": "msg_x", "model": "m", "usage": {"input_tokens": 1, "output_tokens": 0}}}),
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "x"}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "max_tokens"}, "usage": {"output_tokens": 1}}),
+            json!({"type": "message_stop"}),
+        ];
+        let data = extract_data_json(&drive_anthropic_events(
+            OpenAiApiVersion::ChatCompletions,
+            &events,
+        ));
+        let finish = data
+            .iter()
+            .find_map(|d| {
+                d["choices"]
+                    .get(0)
+                    .and_then(|c| c.get("finish_reason"))
+                    .and_then(|f| f.as_str())
+            })
+            .unwrap();
+        assert_eq!(finish, "length");
+    }
+
+    #[test]
+    fn anthropic_to_chat_tool_use_stream() {
+        let events = vec![
+            json!({"type": "message_start", "message": {"id": "msg_x", "model": "m", "usage": {"input_tokens": 3, "output_tokens": 0}}}),
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "toolu_1", "name": "search", "input": {}}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"q\":"}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "\"rust\"}"}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 10}}),
+            json!({"type": "message_stop"}),
+        ];
+        let data = extract_data_json(&drive_anthropic_events(
+            OpenAiApiVersion::ChatCompletions,
+            &events,
+        ));
+        // role chunk
+        assert_eq!(data[0]["choices"][0]["delta"]["role"], "assistant");
+        // tool_call start chunk
+        let start = &data[1]["choices"][0]["delta"]["tool_calls"][0];
+        assert_eq!(start["index"], 0);
+        assert_eq!(start["id"], "toolu_1");
+        assert_eq!(start["type"], "function");
+        assert_eq!(start["function"]["name"], "search");
+        // argument deltas
+        assert_eq!(
+            data[2]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"],
+            "{\"q\":"
+        );
+        assert_eq!(
+            data[3]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"],
+            "\"rust\"}"
+        );
+        // finish_reason = tool_calls
+        let finish = data
+            .iter()
+            .find_map(|d| {
+                d["choices"]
+                    .get(0)
+                    .and_then(|c| c.get("finish_reason"))
+                    .and_then(|f| f.as_str())
+            })
+            .unwrap();
+        assert_eq!(finish, "tool_calls");
+    }
+
+    #[test]
+    fn anthropic_to_chat_thinking_becomes_reasoning_content() {
+        let events = vec![
+            json!({"type": "message_start", "message": {"id": "msg_x", "model": "m", "usage": {"input_tokens": 1, "output_tokens": 0}}}),
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "hmm"}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}}),
+            json!({"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "ok"}}),
+            json!({"type": "content_block_stop", "index": 1}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 2}}),
+            json!({"type": "message_stop"}),
+        ];
+        let data = extract_data_json(&drive_anthropic_events(
+            OpenAiApiVersion::ChatCompletions,
+            &events,
+        ));
+        assert!(
+            data.iter()
+                .any(|d| d["choices"][0]["delta"]["reasoning_content"] == "hmm"),
+            "expected a reasoning_content delta"
+        );
+        assert!(
+            data.iter()
+                .any(|d| d["choices"][0]["delta"]["content"] == "ok")
+        );
+    }
+
+    // ─── Responses API target ────────────────────────────────────────────────
+
+    #[test]
+    fn anthropic_to_responses_emits_created_and_completed() {
+        let events = vec![
+            json!({"type": "message_start", "message": {"id": "msg_x", "model": "m", "usage": {"input_tokens": 4, "output_tokens": 0}}}),
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "hi"}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}}),
+            json!({"type": "message_stop"}),
+        ];
+        let frames = drive_anthropic_events(OpenAiApiVersion::Responses, &events);
+
+        let has_event = |name: &str| {
+            frames
+                .iter()
+                .any(|f| f.starts_with(&format!("event: {name}\n")))
+        };
+        assert!(has_event("response.created"));
+        assert!(has_event("response.in_progress"));
+        assert!(has_event("response.output_item.added"));
+        assert!(has_event("response.output_text.delta"));
+        assert!(has_event("response.output_item.done"));
+        assert!(has_event("response.completed"));
+
+        // Final event carries usage + model
+        let last = frames
+            .iter()
+            .rev()
+            .find(|f| f.starts_with("event: response.completed\n"))
+            .unwrap();
+        let data_line = last.lines().find_map(|l| l.strip_prefix("data: ")).unwrap();
+        let parsed: Value = serde_json::from_str(data_line).unwrap();
+        assert_eq!(parsed["response"]["status"], "completed");
+        assert_eq!(parsed["response"]["usage"]["input_tokens"], 4);
+        assert_eq!(parsed["response"]["usage"]["output_tokens"], 1);
+    }
+
+    #[test]
+    fn anthropic_to_responses_tool_use_emits_function_call_events() {
+        let events = vec![
+            json!({"type": "message_start", "message": {"id": "msg_x", "model": "m", "usage": {"input_tokens": 2, "output_tokens": 0}}}),
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "toolu_1", "name": "search", "input": {}}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"q\":\"rust\"}"}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 5}}),
+            json!({"type": "message_stop"}),
+        ];
+        let frames = drive_anthropic_events(OpenAiApiVersion::Responses, &events);
+
+        let added = frames
+            .iter()
+            .find(|f| f.starts_with("event: response.output_item.added\n"))
+            .and_then(|f| f.lines().find_map(|l| l.strip_prefix("data: ")))
+            .and_then(|d| serde_json::from_str::<Value>(d).ok())
+            .unwrap();
+        assert_eq!(added["item"]["type"], "function_call");
+        assert_eq!(added["item"]["call_id"], "toolu_1");
+        assert_eq!(added["item"]["name"], "search");
+
+        assert!(
+            frames
+                .iter()
+                .any(|f| f.starts_with("event: response.function_call_arguments.delta\n"))
+        );
+    }
+
+    #[test]
+    fn anthropic_to_responses_max_tokens_sets_incomplete() {
+        let events = vec![
+            json!({"type": "message_start", "message": {"id": "msg_x", "model": "m", "usage": {"input_tokens": 1, "output_tokens": 0}}}),
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "x"}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "max_tokens"}, "usage": {"output_tokens": 1}}),
+            json!({"type": "message_stop"}),
+        ];
+        let frames = drive_anthropic_events(OpenAiApiVersion::Responses, &events);
+        let completed = frames
+            .iter()
+            .rev()
+            .find(|f| f.starts_with("event: response.completed\n"))
+            .and_then(|f| f.lines().find_map(|l| l.strip_prefix("data: ")))
+            .and_then(|d| serde_json::from_str::<Value>(d).ok())
+            .unwrap();
+        assert_eq!(completed["response"]["status"], "incomplete");
     }
 }

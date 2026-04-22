@@ -1,5 +1,26 @@
 use serde_json::{Value, json};
 
+/// Convert an Anthropic GET /v1/models response to OpenAI format.
+pub fn anthropic_to_openai_models(anthropic: &Value) -> Value {
+    let models = anthropic["data"].as_array().cloned().unwrap_or_default();
+    let data: Vec<Value> = models
+        .iter()
+        .map(|m| {
+            let id = m["id"].as_str().unwrap_or("unknown").to_string();
+            json!({
+                "id": id,
+                "object": "model",
+                "created": 0,
+                "owned_by": "anthropic",
+            })
+        })
+        .collect();
+    json!({
+        "object": "list",
+        "data": data,
+    })
+}
+
 /// Convert an OpenAI GET /v1/models response to Anthropic format.
 pub fn openai_to_anthropic_models(openai: &Value) -> Value {
     let models = openai["data"].as_array().cloned().unwrap_or_default();

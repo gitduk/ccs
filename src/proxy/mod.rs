@@ -32,6 +32,11 @@ pub type SharedState = Arc<AppState>;
 pub fn build_router(state: SharedState) -> Router {
     Router::new()
         .route("/v1/messages", post(handler::handle_messages))
+        .route(
+            "/v1/chat/completions",
+            post(handler::handle_chat_completions),
+        )
+        .route("/v1/responses", post(handler::handle_responses))
         .route("/v1/models", get(handler::handle_models))
         .route("/health", get(handler::health_check))
         .layer(

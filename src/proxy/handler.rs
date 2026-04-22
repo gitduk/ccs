@@ -6,13 +6,33 @@ use bytes::Bytes;
 use futures::StreamExt;
 
 use super::SharedState;
-use crate::config::ApiFormat;
+use crate::config::{ApiFormat, OpenAiApiVersion};
 use crate::error::AppError;
 use crate::proxy::executor::{
     ProviderRequestOutcome, execute_provider_request, extract_error_message,
 };
 use crate::proxy::metrics::{RequestLogEntry, SharedRequestLog};
 use crate::proxy::transform;
+
+/// Wire format expected by the *client* (the caller of this proxy). The proxy
+/// always normalises to Anthropic internally, then converts to the client
+/// format on the way out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClientFormat {
+    Anthropic,
+    OpenAIChat,
+    OpenAIResponses,
+}
+
+impl ClientFormat {
+    fn openai_variant(self) -> Option<OpenAiApiVersion> {
+        match self {
+            ClientFormat::Anthropic => None,
+            ClientFormat::OpenAIChat => Some(OpenAiApiVersion::ChatCompletions),
+            ClientFormat::OpenAIResponses => Some(OpenAiApiVersion::Responses),
+        }
+    }
+}
 
 /// Bundles a provider's stable UUID and display name for passing through the request pipeline.
 #[derive(Clone)]
@@ -71,12 +91,33 @@ pub async fn handle_models(
     }
 
     let body = response.bytes().await?;
-    let response_body = if provider.api_format == ApiFormat::OpenAI {
-        let openai_json: serde_json::Value = serde_json::from_slice(&body)?;
-        let anthropic_json = transform::openai_to_anthropic_models(&openai_json);
-        Bytes::from(serde_json::to_vec(&anthropic_json)?)
-    } else {
-        body
+
+    // Return OpenAI shape when the caller identifies itself via Bearer token;
+    // return Anthropic shape for x-api-key or unauthenticated callers.
+    let client_wants_openai = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.starts_with("Bearer "))
+        .unwrap_or(false);
+    let provider_is_openai = provider.api_format == ApiFormat::OpenAI;
+
+    // Pass-through when both sides already speak the same wire format (no
+    // parse+reserialize needed).
+    let response_body = match (provider_is_openai, client_wants_openai) {
+        (false, false) => body,
+        (true, false) => {
+            let openai_json: serde_json::Value = serde_json::from_slice(&body)?;
+            Bytes::from(serde_json::to_vec(&transform::openai_to_anthropic_models(
+                &openai_json,
+            ))?)
+        }
+        (false, true) => {
+            let anthropic_json: serde_json::Value = serde_json::from_slice(&body)?;
+            Bytes::from(serde_json::to_vec(&transform::anthropic_to_openai_models(
+                &anthropic_json,
+            ))?)
+        }
+        (true, true) => body,
     };
 
     Ok((
@@ -124,6 +165,7 @@ struct RequestCtx<'a> {
     req_json: Option<&'a serde_json::Value>,
     headers: &'a HeaderMap,
     is_stream: bool,
+    client_format: ClientFormat,
 }
 
 /// Try each provider in the pool; cycle on retryable errors (5xx, 429, auth).
@@ -348,6 +390,7 @@ async fn try_providers(
             handle_streaming_response(
                 response,
                 provider.api_format == ApiFormat::OpenAI,
+                ctx.client_format,
                 StreamTrackingCtx {
                     db: state.db.clone(),
                     provider_id: pkey.id,
@@ -363,11 +406,17 @@ async fn try_providers(
             handle_buffered_response(
                 response,
                 provider.api_format == ApiFormat::OpenAI,
-                state.db.clone(),
-                pkey,
-                &state.request_log,
-                initial_entry,
-                request_log_limit,
+                ctx.client_format,
+                BufferedTrackingCtx {
+                    db: state.db.clone(),
+                    pkey,
+                    request_log: state.request_log.clone(),
+                    log_entry: RequestLogEntry {
+                        id: entry_id,
+                        ..initial_entry
+                    },
+                    request_log_limit,
+                },
             )
             .await
         };
@@ -401,18 +450,27 @@ async fn try_providers(
     Ok((final_status, [("content-type", "application/json")], body).into_response())
 }
 
-/// Main handler for POST /v1/messages.
-pub async fn handle_messages(
-    State(state): State<SharedState>,
+/// Shared dispatch logic for all completion endpoints.
+/// Normalises the incoming body to Anthropic canonical form, then forwards.
+async fn dispatch_completion(
+    state: SharedState,
     headers: HeaderMap,
     body: Bytes,
+    client_format: ClientFormat,
 ) -> Result<Response, AppError> {
-    // Parse body once to extract the stream flag. The body's `model` field is
-    // left untouched here — each provider applies its own routes + model_map
-    // at request time (see `try_providers`), so that fallback to a different-
-    // format provider uses its own rules rather than the current provider's.
-    let req_json = serde_json::from_slice::<serde_json::Value>(&body).ok();
-    let is_stream = req_json
+    let (canonical_body, canonical_json) = if let Some(api_version) = client_format.openai_variant()
+    {
+        let incoming = serde_json::from_slice::<serde_json::Value>(&body)
+            .map_err(|e| AppError::Transform(format!("Invalid JSON body: {e}")))?;
+        let anthropic = transform::openai_to_anthropic_request(&incoming, api_version)?;
+        let bytes = Bytes::from(serde_json::to_vec(&anthropic)?);
+        (bytes, Some(anthropic))
+    } else {
+        let json = serde_json::from_slice::<serde_json::Value>(&body).ok();
+        (body, json)
+    };
+
+    let is_stream = canonical_json
         .as_ref()
         .and_then(|v| v.get("stream").and_then(|s| s.as_bool()))
         .unwrap_or(false);
@@ -420,24 +478,56 @@ pub async fn handle_messages(
     let (pool, do_cycle) = resolve_provider_pool(&state).await?;
 
     let ctx = RequestCtx {
-        body: &body,
-        req_json: req_json.as_ref(),
+        body: &canonical_body,
+        req_json: canonical_json.as_ref(),
         headers: &headers,
         is_stream,
+        client_format,
     };
     try_providers(&state, &pool, do_cycle, &ctx).await
+}
+
+/// POST /v1/messages — Anthropic Messages API.
+pub async fn handle_messages(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, AppError> {
+    dispatch_completion(state, headers, body, ClientFormat::Anthropic).await
+}
+
+/// POST /v1/chat/completions — OpenAI Chat Completions API.
+pub async fn handle_chat_completions(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, AppError> {
+    dispatch_completion(state, headers, body, ClientFormat::OpenAIChat).await
+}
+
+/// POST /v1/responses — OpenAI Responses API.
+pub async fn handle_responses(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, AppError> {
+    dispatch_completion(state, headers, body, ClientFormat::OpenAIResponses).await
 }
 
 /// Handle non-streaming response.
 async fn handle_buffered_response(
     response: reqwest::Response,
     is_openai: bool,
-    db: Repository,
-    pkey: ProviderKey,
-    request_log: &crate::proxy::metrics::SharedRequestLog,
-    mut log_entry: RequestLogEntry,
-    request_log_limit: usize,
+    client_format: ClientFormat,
+    bctx: BufferedTrackingCtx,
 ) -> Result<Response, AppError> {
+    let BufferedTrackingCtx {
+        db,
+        pkey,
+        request_log,
+        mut log_entry,
+        request_log_limit,
+    } = bctx;
     let entry_id = log_entry.id;
     let ProviderKey {
         id: provider_id,
@@ -445,15 +535,26 @@ async fn handle_buffered_response(
     } = pkey;
     let body = response.bytes().await?;
 
-    // Parse once; extract tokens from the in-memory Value before serializing.
-    let (response_body, usage_json) = if is_openai {
+    // Normalise provider response to the Anthropic canonical form for token
+    // extraction. Keep the raw bytes around so the Anthropic→Anthropic
+    // pass-through path can return them untouched (no reserialize).
+    let usage_json: Option<serde_json::Value> = if is_openai {
         let openai_json: serde_json::Value = serde_json::from_slice(&body)?;
-        let anthropic_json = transform::openai_to_anthropic_response(&openai_json)?;
-        let bytes = Bytes::from(serde_json::to_vec(&anthropic_json)?);
-        (bytes, Some(anthropic_json))
+        Some(transform::openai_to_anthropic_response(&openai_json)?)
     } else {
-        let parsed = serde_json::from_slice::<serde_json::Value>(&body).ok();
-        (body, parsed)
+        serde_json::from_slice::<serde_json::Value>(&body).ok()
+    };
+
+    // Serialize once, directly to the client's expected wire format.
+    let response_body = match (client_format.openai_variant(), &usage_json) {
+        (Some(api_version), Some(anthropic_json)) => {
+            let out = transform::anthropic_to_openai_response(anthropic_json, api_version)?;
+            Bytes::from(serde_json::to_vec(&out)?)
+        }
+        (None, Some(anthropic_json)) if is_openai => {
+            Bytes::from(serde_json::to_vec(anthropic_json)?)
+        }
+        _ => body,
     };
 
     let (input, output, model) = if let Some(ref json) = usage_json {
@@ -504,6 +605,7 @@ async fn handle_buffered_response(
 async fn handle_streaming_response(
     response: reqwest::Response,
     is_openai: bool,
+    client_format: ClientFormat,
     ctx: StreamTrackingCtx,
 ) -> Result<Response, AppError> {
     let raw_stream: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>> =
@@ -519,7 +621,16 @@ async fn handle_streaming_response(
         };
 
     let tracked = track_tokens_in_stream(raw_stream, ctx);
-    let body = Body::from_stream(tracked);
+
+    let final_stream: std::pin::Pin<
+        Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>,
+    > = if let Some(api_version) = client_format.openai_variant() {
+        Box::pin(transform::anthropic_stream_to_openai(tracked, api_version))
+    } else {
+        Box::pin(tracked)
+    };
+
+    let body = Body::from_stream(final_stream);
 
     Response::builder()
         .status(StatusCode::OK)
@@ -527,6 +638,15 @@ async fn handle_streaming_response(
         .header("cache-control", "no-cache")
         .body(body)
         .map_err(|e| AppError::Transform(e.to_string()))
+}
+
+/// Context for tracking tokens in a buffered response.
+struct BufferedTrackingCtx {
+    db: Repository,
+    pkey: ProviderKey,
+    request_log: crate::proxy::metrics::SharedRequestLog,
+    log_entry: RequestLogEntry,
+    request_log_limit: usize,
 }
 
 /// Context for tracking tokens in a streaming response.
