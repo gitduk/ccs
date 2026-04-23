@@ -545,7 +545,7 @@ impl ProviderForm {
                     p.routes.clone(),
                 )
             }
-            None => ("", "", "anthropic", "yes", "", vec![]),
+            None => ("", "", "anthropic", "no", "", vec![]),
         };
         Self {
             original_name: if name.is_empty() {
@@ -679,8 +679,8 @@ mod tests {
     use super::ProviderForm;
 
     #[test]
-    fn new_provider_form_defaults_fallback_to_yes() {
+    fn new_provider_form_defaults_fallback_to_no() {
         let form = ProviderForm::new("", None);
-        assert_eq!(form.fields[super::FALLBACK_FIELD_IDX].value, "yes");
+        assert_eq!(form.fields[super::FALLBACK_FIELD_IDX].value, "no");
     }
 }
