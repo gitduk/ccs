@@ -5,6 +5,7 @@ A lightweight API proxy for routing Claude Code traffic between multiple provide
 ## Features
 
 - **Multi-Provider Support**: Configure and switch between multiple API providers
+- **Dual-Endpoint**: Serve Anthropic (`/v1/messages`) and OpenAI (`/v1/chat/completions`, `/v1/responses`) clients simultaneously — no toggle needed
 - **Format Conversion**: Automatic bidirectional translation between Anthropic and OpenAI API formats
 - **Streaming Support**: Full support for Server-Sent Events (SSE) streaming responses
 - **TUI Management**: Interactive terminal UI for provider configuration
@@ -12,6 +13,7 @@ A lightweight API proxy for routing Claude Code traffic between multiple provide
 - **Model Mapping**: Custom model name mapping per provider
 - **Tool Calling**: Full support for function/tool calling in both formats
 - **Extended Thinking**: Support for Claude's thinking/reasoning blocks
+- **Per-Provider Fallback**: Each provider independently opts in/out of the fallback rotation
 
 ## Installation
 
@@ -43,11 +45,20 @@ ccs serve --listen 127.0.0.1:7896
 
 ### 3. Configure your client
 
-Set the environment variable to use the proxy:
+**Anthropic clients:**
 
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:7896
 ```
+
+**OpenAI clients:**
+
+```bash
+export OPENAI_BASE_URL=http://127.0.0.1:7896
+export OPENAI_API_KEY=any-value
+```
+
+Both endpoints share the same active provider — no configuration change needed to switch clients.
 
 ## Configuration
 
@@ -62,7 +73,8 @@ Configuration is stored in `~/.ccs/config.json`:
       "base_url": "https://api.anthropic.com",
       "api_key": "$ANTHROPIC_API_KEY",
       "api_format": "anthropic",
-      "model_map": {}
+      "model_map": {},
+      "fallback": true
     },
     "openrouter": {
       "base_url": "https://openrouter.ai/api",
@@ -70,7 +82,8 @@ Configuration is stored in `~/.ccs/config.json`:
       "api_format": "openai",
       "model_map": {
         "claude-sonnet-4-20250514": "anthropic/claude-sonnet-4-20250514"
-      }
+      },
+      "fallback": false
     }
   }
 }
@@ -92,27 +105,89 @@ Map Claude model names to provider-specific names:
 }
 ```
 
+### OpenAI API Version
+
+For OpenAI-format providers, set `api_version` to control which upstream endpoint is used:
+
+- `"responses"` (default) — use the `/v1/responses` endpoint
+- `"chat_completions"` — use the `/v1/chat/completions` endpoint
+
+```json
+"api_version": "chat_completions"
+```
+
+### Per-Provider Fallback
+
+Set `"fallback": true` to include a provider in the fallback rotation when the active provider fails. New providers default to `false`.
+
+```json
+"fallback": true
+```
+
 ## TUI Keybindings
 
+### Navigation
 - `↑/↓` or `j/k` - Navigate providers
+- `gg` / `G` - Go to top / bottom
+- `K/J` - Move provider up / down in list
+
+### Provider Actions
 - `s` - Switch to selected provider
-- `a` - Add new provider
-- `e` - Edit selected provider
-- `d` - Delete selected provider
+- `a` / `o` - Add new provider
+- `e` / `Enter` - Edit selected provider
+- `dd` - Delete selected provider
+- `p` - Toggle provider enabled/disabled
+- `f` - Toggle provider fallback participation
+- `F` - Toggle global fallback mode
 - `t` - Test connectivity
-- `p` - Start/stop proxy server
+- `u` - Configure quota for selected provider
+- `yy` - Duplicate selected provider
+- `yc` - Copy provider config to clipboard
+
+### Server & Config
+- `S` - Toggle background proxy server
 - `r` - Reload configuration from disk
+- `c` - Clear current provider selection
+- `C` - Clear all providers
+
+### Views
+- `l` - Open request logs panel
+- `m` - Open models panel
+- `h` or `?` - Show help
+
+### General
+- `Ctrl-L` - Clear message log
 - `q` or `Esc` - Quit
 
 ## API Endpoints
 
-### POST /v1/messages
+### Anthropic-compatible
 
-Main proxy endpoint. Accepts Anthropic Messages API format and forwards to the current provider with automatic format conversion if needed.
+#### POST /v1/messages
 
-### GET /health
+Accepts Anthropic Messages API format. Automatically converts to the upstream provider's format if needed.
 
-Health check endpoint:
+#### GET /v1/models (Anthropic shape)
+
+Returns the model list in Anthropic format when the request uses `x-api-key` or no authentication header.
+
+### OpenAI-compatible
+
+#### POST /v1/chat/completions
+
+Accepts OpenAI Chat Completions format. Normalised to Anthropic canonical form internally; response converted back on the way out.
+
+#### POST /v1/responses
+
+Accepts OpenAI Responses API format. Same normalisation pipeline as `/v1/chat/completions`.
+
+#### GET /v1/models (OpenAI shape)
+
+Returns the model list in OpenAI format when the request uses a `Bearer` token.
+
+### Utility
+
+#### GET /health
 
 ```json
 {
@@ -122,12 +197,12 @@ Health check endpoint:
 }
 ```
 
-### POST /reload
+#### POST /reload
 
 Reload configuration from disk without restarting:
 
 ```bash
-curl -X POST http://localhost:7896/reload
+xh POST http://localhost:7896/reload
 ```
 
 ## Format Conversion
