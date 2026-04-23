@@ -188,7 +188,7 @@ pub(super) fn handle_key(
         }
         KeyCode::Char('m') => {
             app.mode = Mode::Models;
-            app.models.search_active = true;
+            app.models.search_active = false;
             app.models.selected = 0;
             app.models.scroll = 0;
         }
