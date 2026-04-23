@@ -1,5 +1,7 @@
 # CCS - Claude Code Switch
 
+English | [中文](README.zh.md)
+
 A lightweight API proxy for routing Claude Code traffic between multiple providers with Anthropic ↔ OpenAI format conversion.
 
 ## Features
