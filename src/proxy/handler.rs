@@ -294,11 +294,14 @@ async fn try_providers(
 
         // 401/403/404: auth error or model not found — try next provider in fallback mode
         if status_u16 == 401 || status_u16 == 403 || status_u16 == 404 {
-            let error_body = match outcome {
-                ProviderRequestOutcome::UpstreamError { body, .. } => body,
-                ProviderRequestOutcome::Success { response, .. } => {
-                    response.bytes().await.unwrap_or_default()
-                }
+            let (error_body, latency_ms) = match outcome {
+                ProviderRequestOutcome::UpstreamError {
+                    body, latency_ms, ..
+                } => (body, latency_ms),
+                ProviderRequestOutcome::Success {
+                    response,
+                    latency_ms,
+                } => (response.bytes().await.unwrap_or_default(), latency_ms),
             };
             let preview = extract_error_message(&error_body);
             tracing::warn!(
@@ -312,6 +315,26 @@ async fn try_providers(
             last_error_body = Some(error_body.clone());
             auth_failures += 1;
             if !do_cycle || auth_failures >= max_auth_failures {
+                let entry = RequestLogEntry {
+                    id: 0,
+                    timestamp: std::time::SystemTime::now(),
+                    provider: provider_name.clone(),
+                    model: req_model_hint.clone(),
+                    status: status_u16,
+                    latency_ms,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    is_stream: ctx.is_stream,
+                    error: Some(preview),
+                };
+                if let Ok(mut log) = state.request_log.lock() {
+                    let id = log.push(entry.clone());
+                    let mut persisted = entry;
+                    persisted.id = id;
+                    state
+                        .db
+                        .persist_request_log_async(persisted, request_log_limit);
+                }
                 return Ok(
                     (status, [("content-type", "application/json")], error_body).into_response()
                 );
@@ -321,16 +344,39 @@ async fn try_providers(
 
         // Other 4xx: client error (bad request format etc.), return immediately
         if !status.is_success() {
-            let error_body = match outcome {
-                ProviderRequestOutcome::UpstreamError { body, .. } => body,
-                ProviderRequestOutcome::Success { response, .. } => {
-                    response.bytes().await.unwrap_or_default()
-                }
+            let (error_body, latency_ms) = match outcome {
+                ProviderRequestOutcome::UpstreamError {
+                    body, latency_ms, ..
+                } => (body, latency_ms),
+                ProviderRequestOutcome::Success {
+                    response,
+                    latency_ms,
+                } => (response.bytes().await.unwrap_or_default(), latency_ms),
             };
             let preview = extract_error_message(&error_body);
             tracing::warn!("Upstream returned {status}: {preview}");
             record_failure(state, &pkey);
             record_error_metric(state, provider_name, status_u16, &preview, &route_pattern);
+            let entry = RequestLogEntry {
+                id: 0,
+                timestamp: std::time::SystemTime::now(),
+                provider: provider_name.clone(),
+                model: req_model_hint.clone(),
+                status: status_u16,
+                latency_ms,
+                input_tokens: 0,
+                output_tokens: 0,
+                is_stream: ctx.is_stream,
+                error: Some(preview),
+            };
+            if let Ok(mut log) = state.request_log.lock() {
+                let id = log.push(entry.clone());
+                let mut persisted = entry;
+                persisted.id = id;
+                state
+                    .db
+                    .persist_request_log_async(persisted, request_log_limit);
+            }
             return Ok((status, [("content-type", "application/json")], error_body).into_response());
         }
 
