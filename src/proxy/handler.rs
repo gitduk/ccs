@@ -210,6 +210,32 @@ async fn try_providers(
             }
         };
 
+    let push_request_log = |provider: &str, status: u16, latency_ms: u64, error: String| {
+        let entry = RequestLogEntry {
+            id: 0,
+            timestamp: std::time::SystemTime::now(),
+            provider: provider.to_owned(),
+            model: req_model_hint.clone(),
+            status,
+            latency_ms,
+            input_tokens: 0,
+            output_tokens: 0,
+            is_stream: ctx.is_stream,
+            error: Some(error),
+        };
+        if let Ok(id) = state
+            .request_log
+            .lock()
+            .map(|mut log| log.push(entry.clone()))
+        {
+            let mut persisted = entry;
+            persisted.id = id;
+            state
+                .db
+                .persist_request_log_async(persisted, request_log_limit);
+        }
+    };
+
     let t0 = std::time::Instant::now();
 
     for (provider_name, provider) in pool.iter().cycle() {
@@ -315,26 +341,7 @@ async fn try_providers(
             last_error_body = Some(error_body.clone());
             auth_failures += 1;
             if !do_cycle || auth_failures >= max_auth_failures {
-                let entry = RequestLogEntry {
-                    id: 0,
-                    timestamp: std::time::SystemTime::now(),
-                    provider: provider_name.clone(),
-                    model: req_model_hint.clone(),
-                    status: status_u16,
-                    latency_ms,
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    is_stream: ctx.is_stream,
-                    error: Some(preview),
-                };
-                if let Ok(mut log) = state.request_log.lock() {
-                    let id = log.push(entry.clone());
-                    let mut persisted = entry;
-                    persisted.id = id;
-                    state
-                        .db
-                        .persist_request_log_async(persisted, request_log_limit);
-                }
+                push_request_log(provider_name, status_u16, latency_ms, preview);
                 return Ok(
                     (status, [("content-type", "application/json")], error_body).into_response()
                 );
@@ -357,26 +364,7 @@ async fn try_providers(
             tracing::warn!("Upstream returned {status}: {preview}");
             record_failure(state, &pkey);
             record_error_metric(state, provider_name, status_u16, &preview, &route_pattern);
-            let entry = RequestLogEntry {
-                id: 0,
-                timestamp: std::time::SystemTime::now(),
-                provider: provider_name.clone(),
-                model: req_model_hint.clone(),
-                status: status_u16,
-                latency_ms,
-                input_tokens: 0,
-                output_tokens: 0,
-                is_stream: ctx.is_stream,
-                error: Some(preview),
-            };
-            if let Ok(mut log) = state.request_log.lock() {
-                let id = log.push(entry.clone());
-                let mut persisted = entry;
-                persisted.id = id;
-                state
-                    .db
-                    .persist_request_log_async(persisted, request_log_limit);
-            }
+            push_request_log(provider_name, status_u16, latency_ms, preview);
             return Ok((status, [("content-type", "application/json")], error_body).into_response());
         }
 
@@ -470,26 +458,12 @@ async fn try_providers(
 
     // All providers failed — log the final failure.
     let final_status = last_status.unwrap_or(StatusCode::BAD_GATEWAY);
-    let failed_entry = RequestLogEntry {
-        id: 0,
-        timestamp: std::time::SystemTime::now(),
-        provider: pool.first().map(|(n, _)| n.clone()).unwrap_or_default(),
-        model: req_model_hint,
-        status: final_status.as_u16(),
-        latency_ms: t0.elapsed().as_millis() as u64,
-        input_tokens: 0,
-        output_tokens: 0,
-        is_stream: ctx.is_stream,
-        error: Some("all providers failed".into()),
-    };
-    if let Ok(mut log) = state.request_log.lock() {
-        let id = log.push(failed_entry.clone());
-        let mut persisted = failed_entry;
-        persisted.id = id;
-        state
-            .db
-            .persist_request_log_async(persisted, request_log_limit);
-    }
+    push_request_log(
+        pool.first().map(|(n, _)| n.as_str()).unwrap_or_default(),
+        final_status.as_u16(),
+        t0.elapsed().as_millis() as u64,
+        "all providers failed".into(),
+    );
 
     let body =
         last_error_body.unwrap_or_else(|| Bytes::from(r#"{"error":"all providers failed"}"#));
