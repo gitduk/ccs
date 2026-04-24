@@ -478,6 +478,13 @@ pub fn trim_request_log(conn: &Connection, keep: usize) -> Result<()> {
     Ok(())
 }
 
+pub fn max_request_log_id(conn: &Connection) -> u64 {
+    conn.query_row("SELECT COALESCE(MAX(id), 0) FROM request_log", [], |row| {
+        row.get(0)
+    })
+    .unwrap_or(0)
+}
+
 mod tests {
     #[allow(unused_imports)]
     use super::*;

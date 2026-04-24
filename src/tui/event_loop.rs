@@ -117,9 +117,14 @@ pub(super) fn check_server_status(app: &mut App, server: &mut Option<ServerHandl
         let result =
             tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(handle.task));
         match result {
-            Ok(()) => {
+            Ok(Ok(())) => {
                 app.server_status = ServerStatus::Stopped;
                 app.set_message("Proxy stopped", MessageKind::Info);
+            }
+            Ok(Err(e)) => {
+                let msg = format!("Proxy error: {e}");
+                app.server_status = ServerStatus::Error(msg.clone());
+                app.set_message(msg, MessageKind::Error);
             }
             Err(e) => {
                 let msg = format!("Proxy crashed: {e}");

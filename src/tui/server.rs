@@ -34,17 +34,8 @@ pub(super) fn start_server_background(app: &mut App, server: &mut Option<ServerH
     let request_log = app.request_log.clone();
     let db = app.db.clone();
     let task = tokio::spawn(async move {
-        if let Err(e) = crate::proxy::start_server_with_shutdown(
-            config_rx,
-            shutdown_rx,
-            metrics,
-            request_log,
-            db,
-        )
-        .await
-        {
-            tracing::error!("Proxy server error: {e}");
-        }
+        crate::proxy::start_server_with_shutdown(config_rx, shutdown_rx, metrics, request_log, db)
+            .await
     });
 
     *server = Some(ServerHandle {

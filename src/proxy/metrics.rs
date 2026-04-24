@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
+static NEXT_REQUEST_LOG_ID: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Debug, Clone)]
 pub struct LastRequestError {
     pub status: u16,
@@ -90,8 +92,7 @@ impl RequestLog {
     /// Push an entry, assigning a unique ID. Returns the assigned ID for
     /// later back-fill lookups.
     pub fn push(&mut self, mut entry: RequestLogEntry) -> u64 {
-        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let id = NEXT_REQUEST_LOG_ID.fetch_add(1, Ordering::Relaxed);
         entry.id = id;
         if self.entries.len() >= REQUEST_LOG_CAPACITY {
             self.entries.pop_front();
@@ -121,6 +122,9 @@ impl RequestLog {
 
     /// Replace all in-memory entries, keeping only the newest `REQUEST_LOG_CAPACITY`.
     pub fn replace(&mut self, entries: Vec<RequestLogEntry>) {
+        if let Some(max_id) = entries.iter().map(|e| e.id).max() {
+            sync_next_request_log_id(max_id.saturating_add(1));
+        }
         let mut deque = VecDeque::from(entries);
         while deque.len() > REQUEST_LOG_CAPACITY {
             deque.pop_front();
@@ -136,3 +140,47 @@ impl RequestLog {
 }
 
 pub type SharedRequestLog = Arc<Mutex<RequestLog>>;
+
+pub(crate) fn sync_next_request_log_id(next_id: u64) {
+    let mut current = NEXT_REQUEST_LOG_ID.load(Ordering::Relaxed);
+    while current < next_id {
+        match NEXT_REQUEST_LOG_ID.compare_exchange_weak(
+            current,
+            next_id,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry_with_id(id: u64) -> RequestLogEntry {
+        RequestLogEntry {
+            id,
+            timestamp: SystemTime::UNIX_EPOCH,
+            provider: "prov".into(),
+            model: String::new(),
+            status: 200,
+            latency_ms: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            is_stream: false,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn replace_advances_next_id_past_loaded_history() {
+        let mut log = RequestLog::default();
+        log.replace(vec![entry_with_id(1_000_000)]);
+
+        let next_id = log.push(entry_with_id(0));
+        assert!(next_id > 1_000_000);
+    }
+}

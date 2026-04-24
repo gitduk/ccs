@@ -42,7 +42,7 @@ use server::start_server_background;
 use testing::start_background_tests;
 
 struct ServerHandle {
-    task: JoinHandle<()>,
+    task: JoinHandle<crate::error::Result<()>>,
     shutdown_tx: watch::Sender<bool>,
     config_tx: watch::Sender<crate::config::AppConfig>,
 }

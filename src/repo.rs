@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::db::{self, SharedDb};
-use crate::proxy::metrics::TokenMetrics;
+use crate::proxy::metrics::{TokenMetrics, sync_next_request_log_id};
 
 /// Repository wraps the shared DB connection and owns all locking and SQL dispatch.
 /// Callers never touch `SharedDb` or `crate::db::*` directly.
@@ -20,7 +20,12 @@ pub(crate) struct StatsDelta {
 
 impl Repository {
     pub fn open(path: &str) -> Self {
-        Self(db::open_with_fallback(path))
+        let db = db::open_with_fallback(path);
+        if let Ok(conn) = db.lock() {
+            let next_id = db::max_request_log_id(&conn).saturating_add(1);
+            sync_next_request_log_id(next_id);
+        }
+        Self(db)
     }
 
     /// Run DB schema migration. Returns an error if migration SQL fails;

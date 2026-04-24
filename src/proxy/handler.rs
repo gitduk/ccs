@@ -137,7 +137,11 @@ async fn resolve_provider_pool(
     let config = state.config.read().await;
 
     if config.fallback {
-        let start_idx = config.providers.get_index_of(&config.current).unwrap_or(0);
+        let (_, current_provider) = config.current_enabled_provider()?;
+        let start_idx = config
+            .providers
+            .get_index_of(&config.current)
+            .ok_or_else(|| AppError::ProviderNotFound(config.current.clone()))?;
         let len = config.providers.len();
         let list: Vec<(String, crate::config::Provider)> = (0..len)
             .map(|i| (start_idx + i) % len)
@@ -149,6 +153,9 @@ async fn resolve_provider_pool(
                     .map(|(k, v)| (k.clone(), v.clone()))
             })
             .collect();
+        if !current_provider.enabled || list.is_empty() {
+            return Err(AppError::ProviderNotFound(config.current.clone()));
+        }
         Ok((list, true))
     } else {
         let (_, current_provider) = config.current_enabled_provider()?;
@@ -680,26 +687,87 @@ struct StreamTrackingCtx {
     request_log_limit: usize,
 }
 
+struct StreamFinalizer {
+    db: Repository,
+    provider_id: String,
+    provider_name: String,
+    request_log: SharedRequestLog,
+    entry_id: u64,
+    latency: u64,
+    request_log_limit: usize,
+    input_tokens: u64,
+    output_tokens: u64,
+    model: Option<String>,
+    finished: bool,
+}
+
+impl StreamFinalizer {
+    fn finish(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+
+        self.db.persist_stats_async(
+            &self.provider_id,
+            &self.provider_name,
+            self.model.as_deref(),
+            StatsDelta {
+                requests: 1,
+                input: self.input_tokens,
+                output: self.output_tokens,
+                latency: self.latency,
+                ..Default::default()
+            },
+        );
+
+        if let Ok(mut log) = self.request_log.lock() {
+            log.backfill(
+                self.entry_id,
+                self.input_tokens,
+                self.output_tokens,
+                self.model.as_deref(),
+            );
+        }
+        if self.entry_id != 0 {
+            self.db.update_request_log_tokens_async(
+                self.entry_id,
+                self.input_tokens,
+                self.output_tokens,
+                self.model.clone(),
+                self.request_log_limit,
+            );
+        }
+    }
+}
+
+impl Drop for StreamFinalizer {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
 /// Wrap a byte stream to extract token usage from anthropic SSE events.
 /// Passes all bytes through unchanged; records metrics when the stream ends.
 fn track_tokens_in_stream(
     mut inner: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>>,
     ctx: StreamTrackingCtx,
 ) -> impl futures::Stream<Item = std::io::Result<Bytes>> + Send {
-    let StreamTrackingCtx {
-        db,
-        provider_id,
-        provider_name,
-        request_log,
-        entry_id,
-        latency,
-        request_log_limit,
-    } = ctx;
     async_stream::stream! {
         const LINE_BUF_MAX: usize = 1024 * 1024; // 1 MB safety cap
-        let mut input_tokens = 0u64;
-        let mut output_tokens = 0u64;
-        let mut model: Option<String> = None;
+        let mut finalizer = StreamFinalizer {
+            db: ctx.db,
+            provider_id: ctx.provider_id,
+            provider_name: ctx.provider_name,
+            request_log: ctx.request_log,
+            entry_id: ctx.entry_id,
+            latency: ctx.latency,
+            request_log_limit: ctx.request_log_limit,
+            input_tokens: 0,
+            output_tokens: 0,
+            model: None,
+            finished: false,
+        };
         let mut line_buf = String::new();
 
         while let Some(chunk) = inner.next().await {
@@ -721,18 +789,18 @@ fn track_tokens_in_stream(
                         && let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
                             match json["type"].as_str() {
                                 Some("message_start") => {
-                                    input_tokens = json["message"]["usage"]["input_tokens"]
+                                    finalizer.input_tokens = json["message"]["usage"]["input_tokens"]
                                         .as_u64()
                                         .unwrap_or(0);
                                     if let Some(m) = json["message"]["model"].as_str() {
-                                        model = Some(m.to_string());
+                                        finalizer.model = Some(m.to_string());
                                     }
                                 }
                                 Some("message_delta") => {
                                     if let Some(it) = json["usage"]["input_tokens"].as_u64() {
-                                        input_tokens = it;
+                                        finalizer.input_tokens = it;
                                     }
-                                    output_tokens = json["usage"]["output_tokens"]
+                                    finalizer.output_tokens = json["usage"]["output_tokens"]
                                         .as_u64()
                                         .unwrap_or(0);
                                 }
@@ -748,26 +816,120 @@ fn track_tokens_in_stream(
             yield chunk;
         }
 
-        // Stream ended: persist request count and token usage atomically.
-        db.persist_stats_async(
-            &provider_id,
-            &provider_name,
-            model.as_deref(),
-            StatsDelta {
-                requests: 1,
-                input: input_tokens,
-                output: output_tokens,
-                latency,
-                ..Default::default()
-            },
-        );
+        finalizer.finish();
+    }
+}
 
-        // Back-fill token counts into the request log entry we created before streaming.
-        if let Ok(mut log) = request_log.lock() {
-            log.backfill(entry_id, input_tokens, output_tokens, model.as_deref());
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ApiFormat, AppConfig, OpenAiApiVersion, Provider};
+    use crate::proxy::metrics::RequestLog;
+    use futures::{StreamExt, stream};
+    use indexmap::IndexMap;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::RwLock;
+
+    fn make_provider(enabled: bool, fallback: bool) -> Provider {
+        Provider {
+            id: uuid::Uuid::new_v4().to_string(),
+            base_url: "https://api.example.com".into(),
+            api_key: "key".into(),
+            api_format: ApiFormat::Anthropic,
+            model_map: HashMap::new(),
+            notes: String::new(),
+            routes: Vec::new(),
+            enabled,
+            fallback,
+            api_version: Some(OpenAiApiVersion::Responses),
+            quota: None,
+            quota_command: None,
         }
-        if entry_id != 0 {
-            db.update_request_log_tokens_async(entry_id, input_tokens, output_tokens, model, request_log_limit);
-        }
+    }
+
+    fn make_state(config: AppConfig) -> SharedState {
+        let path = format!("/tmp/ccs-handler-test-{}.db", uuid::Uuid::new_v4());
+        Arc::new(crate::proxy::AppState {
+            config: Arc::new(RwLock::new(config)),
+            http_client: super::super::build_http_client(),
+            metrics: Arc::new(Mutex::new(crate::proxy::metrics::TokenMetrics::default())),
+            request_log: Arc::new(Mutex::new(RequestLog::default())),
+            db: Repository::open(&path),
+        })
+    }
+
+    #[tokio::test]
+    async fn fallback_pool_rejects_missing_current_provider() {
+        let mut providers = IndexMap::new();
+        providers.insert("prov-a".into(), make_provider(true, true));
+        let state = make_state(AppConfig {
+            current: "missing".into(),
+            listen: "127.0.0.1:7896".into(),
+            providers,
+            fallback: true,
+            db_path: None,
+            request_log_limit: 100,
+        });
+
+        assert!(resolve_provider_pool(&state).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn streaming_drop_still_persists_stats_and_backfills_log() {
+        let path = format!("/tmp/ccs-stream-test-{}.db", uuid::Uuid::new_v4());
+        let db = Repository::open(&path);
+        let request_log = Arc::new(Mutex::new(RequestLog::default()));
+        let entry_id = {
+            let mut log = request_log.lock().unwrap();
+            log.push(RequestLogEntry {
+                id: 0,
+                timestamp: std::time::SystemTime::now(),
+                provider: "prov-a".into(),
+                model: String::new(),
+                status: 200,
+                latency_ms: 12,
+                input_tokens: 0,
+                output_tokens: 0,
+                is_stream: true,
+                error: None,
+            })
+        };
+
+        let first_chunk = Bytes::from(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\",\"usage\":{\"input_tokens\":7}}}\n\n",
+        );
+        let raw_stream: std::pin::Pin<
+            Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>,
+        > = Box::pin(stream::once(async move { Ok(first_chunk) }).chain(stream::pending()));
+
+        let mut tracked = Box::pin(track_tokens_in_stream(
+            raw_stream,
+            StreamTrackingCtx {
+                db: db.clone(),
+                provider_id: "provider-id".into(),
+                provider_name: "prov-a".into(),
+                request_log: request_log.clone(),
+                entry_id,
+                latency: 12,
+                request_log_limit: 100,
+            },
+        ));
+
+        let chunk = tracked.next().await;
+        assert!(chunk.is_some());
+        drop(tracked);
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let metrics = db.load_metrics();
+        let provider = metrics.by_provider.get("prov-a").unwrap();
+        assert_eq!(provider.requests, 1);
+        assert_eq!(provider.input, 7);
+
+        let log = request_log.lock().unwrap();
+        let entry = log.entries().back().unwrap();
+        assert_eq!(entry.input_tokens, 7);
+        assert_eq!(entry.model, "claude-test");
     }
 }
