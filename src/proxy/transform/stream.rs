@@ -216,7 +216,9 @@ impl StreamState {
 
                 // New tool call
                 if let Some(func) = tc.get("function") {
-                    if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
+                    if let Some(name) = func.get("name").and_then(|n| n.as_str())
+                        && !name.is_empty()
+                    {
                         // Close previous block
                         events.extend(self.close_current_block());
                         self.current_block_type = Some(BlockType::ToolUse);
