@@ -176,6 +176,30 @@ mod tests {
     }
 
     #[test]
+    fn backfill_updates_to_final_response_model() {
+        let mut log = RequestLog::default();
+        let id = log.push(RequestLogEntry {
+            id: 0,
+            timestamp: SystemTime::UNIX_EPOCH,
+            provider: "yc".into(),
+            model: "sonnet-4-6".into(),
+            status: 200,
+            latency_ms: 1500,
+            input_tokens: 0,
+            output_tokens: 0,
+            is_stream: false,
+            error: None,
+        });
+
+        log.backfill(id, 1234, 5678, Some("gpt-5.4"));
+
+        let entry = log.entries().iter().find(|e| e.id == id).unwrap();
+        assert_eq!(entry.model, "gpt-5.4");
+        assert_eq!(entry.input_tokens, 1234);
+        assert_eq!(entry.output_tokens, 5678);
+    }
+
+    #[test]
     fn replace_advances_next_id_past_loaded_history() {
         let mut log = RequestLog::default();
         log.replace(vec![entry_with_id(1_000_000)]);

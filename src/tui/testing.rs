@@ -1,7 +1,10 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use super::App;
 use super::state::{MessageKind, TestEvent};
+
+const TEST_TASK_TIMEOUT_SECS: u64 = 10;
 
 pub(super) fn test_selected(app: &mut App) {
     let Some(name) = app.selected_name().map(|s| s.to_string()) else {
@@ -74,9 +77,27 @@ pub(super) fn test_provider_by_name(app: &mut App, name: &str) {
                 provider: name_owned.clone(),
                 model: model.clone(),
             });
-            let r =
-                crate::tester::test_latency(&client, &provider, model, Some(known_models.clone()))
-                    .await;
+            let r = match tokio::time::timeout(
+                Duration::from_secs(TEST_TASK_TIMEOUT_SECS),
+                crate::tester::test_latency(
+                    &client,
+                    &provider,
+                    model.clone(),
+                    Some(known_models.clone()),
+                ),
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(_) => crate::tester::TestResult {
+                    status: crate::tester::TestStatus::Error("Connection error".to_string()),
+                    latency_ms: 0,
+                    model_count: Some(known_models.len()),
+                    model_names: Some(known_models.clone()),
+                    tested_at: std::time::Instant::now(),
+                    used_model: model.clone(),
+                },
+            };
             let done = matches!(
                 &r.status,
                 // Success or auth failure — no point trying other models.
@@ -150,7 +171,22 @@ pub(super) fn test_provider_after_add(app: &mut App, name: &str) {
             provider: name_owned.clone(),
             model: model.clone(),
         });
-        let result = crate::tester::test_latency(&client, &provider, model, Some(models)).await;
+        let result = match tokio::time::timeout(
+            Duration::from_secs(TEST_TASK_TIMEOUT_SECS),
+            crate::tester::test_latency(&client, &provider, model.clone(), Some(models.clone())),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => crate::tester::TestResult {
+                status: crate::tester::TestStatus::Error("Connection error".to_string()),
+                latency_ms: 0,
+                model_count: Some(models.len()),
+                model_names: Some(models.clone()),
+                tested_at: std::time::Instant::now(),
+                used_model: model,
+            },
+        };
         let _ = tx.send(TestEvent::Completed {
             provider: name_owned,
             result,
@@ -209,4 +245,36 @@ fn pick_next(items: &[String]) -> String {
     static CTR: AtomicUsize = AtomicUsize::new(0);
     let idx = CTR.fetch_add(1, Ordering::Relaxed) % items.len();
     items[idx].clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::TEST_TASK_TIMEOUT_SECS;
+
+    #[tokio::test]
+    async fn test_task_timeout_returns_connection_error_result() {
+        let result = match tokio::time::timeout(
+            Duration::from_secs(TEST_TASK_TIMEOUT_SECS),
+            std::future::pending::<crate::tester::TestResult>(),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => crate::tester::TestResult {
+                status: crate::tester::TestStatus::Error("Connection error".to_string()),
+                latency_ms: 0,
+                model_count: Some(1),
+                model_names: Some(vec!["m".into()]),
+                tested_at: std::time::Instant::now(),
+                used_model: "m".into(),
+            },
+        };
+
+        assert!(
+            matches!(result.status, crate::tester::TestStatus::Error(ref e) if e == "Connection error")
+        );
+        assert_eq!(result.used_model, "m");
+    }
 }

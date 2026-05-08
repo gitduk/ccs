@@ -155,3 +155,44 @@ async fn fetch_models(
         .collect();
     (Some(names.len()), Some(names))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::net::TcpListener;
+
+    use super::{TestStatus, test_latency};
+    use crate::config::{ApiFormat, Provider};
+
+    #[tokio::test]
+    async fn test_latency_times_out_and_returns_connection_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = listener.accept().await;
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+
+        let provider = Provider {
+            id: "test-id".into(),
+            base_url: format!("http://{}", addr),
+            api_key: "test-key".into(),
+            api_format: ApiFormat::OpenAI,
+            model_map: Default::default(),
+            notes: String::new(),
+            routes: vec![],
+            enabled: true,
+            fallback: true,
+            api_version: None,
+            quota: None,
+            quota_command: None,
+        };
+
+        let started = tokio::time::Instant::now();
+        let result = test_latency(&reqwest::Client::new(), &provider, "m".into(), None).await;
+
+        assert!(started.elapsed() < Duration::from_secs(12));
+        assert!(matches!(result.status, TestStatus::Error(ref e) if e == "Connection error"));
+    }
+}

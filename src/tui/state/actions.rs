@@ -376,7 +376,14 @@ impl App {
                     result,
                 } => {
                     self.tests.pending.remove(&name);
-                    self.tests.testing_model.remove(&name);
+                    let final_used_model = result.used_model.clone();
+                    if final_used_model.is_empty() {
+                        self.tests.testing_model.remove(&name);
+                    } else {
+                        self.tests
+                            .testing_model
+                            .insert(name.clone(), final_used_model);
+                    }
                     let provider_id = self
                         .config
                         .providers

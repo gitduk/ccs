@@ -47,12 +47,22 @@ pub(crate) fn fmt_latency(ms: u64) -> String {
 pub(crate) fn format_tokens(n: u64) -> String {
     if n == 0 {
         "—".to_string()
-    } else if n >= 100_000 {
+    } else if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
     } else if n >= 1_000 {
         format!("{:.1}k", n as f64 / 1_000.0)
     } else {
         format!("{n}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_tokens;
+
+    #[test]
+    fn format_tokens_does_not_round_100k_to_0_1m() {
+        assert_eq!(format_tokens(100_000), "100.0k");
     }
 }
 

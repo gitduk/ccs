@@ -458,7 +458,7 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("Status ", label),
             Span::styled(status_str, status_style),
         ];
-        if matches!(r.status, TestStatus::Ok) && !r.used_model.is_empty() {
+        if !r.used_model.is_empty() {
             status_spans.push(Span::styled(
                 format!(" ({})", r.used_model),
                 Style::default().fg(t::MUTED),
@@ -563,5 +563,120 @@ fn render_quota_cell(
             };
             Cell::from(text).style(Style::default().fg(t::ERROR))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use indexmap::IndexMap;
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect, widgets::TableState};
+
+    use super::draw_detail_panel;
+    use crate::config::{ApiFormat, AppConfig, Provider};
+    use crate::tester::{TestResult, TestStatus};
+    use crate::tui::state::{App, LogsState, ModelsState, ProviderList, TestState};
+
+    #[test]
+    fn detail_panel_shows_used_model_for_failed_test() {
+        let path = format!("/tmp/ccs-providers-test-{}.db", uuid::Uuid::new_v4());
+        let mut providers = IndexMap::new();
+        providers.insert(
+            "vllm".to_string(),
+            Provider {
+                id: "vllm-id".into(),
+                base_url: "http://127.0.0.1:1".into(),
+                api_key: "test-key".into(),
+                api_format: ApiFormat::OpenAI,
+                model_map: Default::default(),
+                notes: String::new(),
+                routes: vec![],
+                enabled: true,
+                fallback: true,
+                api_version: None,
+                quota: None,
+                quota_command: None,
+            },
+        );
+
+        let db = crate::repo::Repository::open(&path);
+        let mut table_state = TableState::default();
+        table_state.select(Some(0));
+
+        let mut tests = TestState::new();
+        tests.results.insert(
+            "vllm".into(),
+            TestResult {
+                status: TestStatus::Error("HTTP 502".into()),
+                latency_ms: 152,
+                model_count: Some(1),
+                model_names: Some(vec!["gemma-4-31b-it".into()]),
+                tested_at: Instant::now(),
+                used_model: "sonnet-4-6".into(),
+            },
+        );
+
+        let mut app = App {
+            config: AppConfig {
+                current: "vllm".into(),
+                listen: "127.0.0.1:0".into(),
+                providers,
+                fallback: false,
+                db_path: Some(path),
+                request_log_limit: 100,
+            },
+            mode: crate::tui::state::Mode::Normal,
+            terminal_focused: true,
+            providers: ProviderList {
+                table_state,
+                names: vec!["vllm".into()],
+            },
+            form: None,
+            message: None,
+            confirm_action: None,
+            should_quit: false,
+            server_status: crate::tui::state::ServerStatus::Stopped,
+            metrics: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+            tests,
+            db,
+            bg_proxy_pid: None,
+            models: ModelsState {
+                provider_models: std::collections::HashMap::new(),
+                search_field: crate::tui::state::FormField::search(),
+                search_active: true,
+                selected: 0,
+                scroll: 0,
+                pending_key: None,
+            },
+            request_log: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::proxy::metrics::RequestLog::default(),
+            )),
+            logs: LogsState {
+                selected: 0,
+                scroll: 0,
+            },
+            message_log: std::collections::VecDeque::new(),
+            seen_provider_errors: std::collections::HashMap::new(),
+            pending_key: None,
+            quota_status: std::collections::HashMap::new(),
+            quota_form: None,
+        };
+
+        let backend = TestBackend::new(100, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| draw_detail_panel(f, &app, Rect::new(0, 0, 100, 8)))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("HTTP 502"));
+        assert!(rendered.contains("sonnet-4-6"));
     }
 }

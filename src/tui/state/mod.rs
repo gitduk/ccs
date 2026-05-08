@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc;
+use std::time::Duration;
 
 /// Index of the Notes field inside `ProviderForm::fields`.
 pub(super) const FALLBACK_FIELD_IDX: usize = 4;
@@ -117,7 +118,11 @@ impl TestState {
             testing_model: HashMap::new(),
             tx,
             rx,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(10))
+                .build()
+                .expect("Failed to build test client"),
         }
     }
 
@@ -676,11 +681,122 @@ impl QuotaForm {
 
 #[cfg(test)]
 mod tests {
-    use super::ProviderForm;
+    use std::time::Instant;
+
+    use indexmap::IndexMap;
+
+    use super::{App, ProviderForm, TestEvent};
+    use crate::config::{ApiFormat, AppConfig, Provider};
+    use crate::tester::{TestResult, TestStatus};
 
     #[test]
     fn new_provider_form_defaults_fallback_to_no() {
         let form = ProviderForm::new("", None);
         assert_eq!(form.fields[super::FALLBACK_FIELD_IDX].value, "no");
+    }
+
+    #[tokio::test]
+    async fn completed_test_event_updates_displayed_model_to_used_model() {
+        let path = format!("/tmp/ccs-state-test-{}.db", uuid::Uuid::new_v4());
+        let mut providers = IndexMap::new();
+        providers.insert(
+            "vllm".to_string(),
+            Provider {
+                id: "vllm-id".into(),
+                base_url: "http://127.0.0.1:1".into(),
+                api_key: "test-key".into(),
+                api_format: ApiFormat::OpenAI,
+                model_map: Default::default(),
+                notes: String::new(),
+                routes: vec![],
+                enabled: true,
+                fallback: true,
+                api_version: None,
+                quota: None,
+                quota_command: None,
+            },
+        );
+
+        let db = crate::repo::Repository::open(&path);
+        let mut app = App {
+            config: AppConfig {
+                current: "vllm".into(),
+                listen: "127.0.0.1:0".into(),
+                providers,
+                fallback: false,
+                db_path: Some(path),
+                request_log_limit: 100,
+            },
+            mode: super::Mode::Normal,
+            terminal_focused: true,
+            providers: super::ProviderList {
+                table_state: {
+                    let mut s = ratatui::widgets::TableState::default();
+                    s.select(Some(0));
+                    s
+                },
+                names: vec!["vllm".into()],
+            },
+            form: None,
+            message: None,
+            confirm_action: None,
+            should_quit: false,
+            server_status: super::ServerStatus::Stopped,
+            metrics: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+            tests: super::TestState::new(),
+            db,
+            bg_proxy_pid: None,
+            models: super::ModelsState {
+                provider_models: std::collections::HashMap::new(),
+                search_field: super::FormField::search(),
+                search_active: true,
+                selected: 0,
+                scroll: 0,
+                pending_key: None,
+            },
+            request_log: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::proxy::metrics::RequestLog::default(),
+            )),
+            logs: super::LogsState {
+                selected: 0,
+                scroll: 0,
+            },
+            message_log: std::collections::VecDeque::new(),
+            seen_provider_errors: std::collections::HashMap::new(),
+            pending_key: None,
+            quota_status: std::collections::HashMap::new(),
+            quota_form: None,
+        };
+
+        app.tests.pending.insert("vllm".into());
+        app.tests
+            .testing_model
+            .insert("vllm".into(), "gemma-4-31b-it".into());
+        app.tests
+            .tx
+            .send(TestEvent::Completed {
+                provider: "vllm".into(),
+                result: TestResult {
+                    status: TestStatus::Error("HTTP 502".into()),
+                    latency_ms: 100,
+                    model_count: Some(1),
+                    model_names: Some(vec!["gemma-4-31b-it".into()]),
+                    tested_at: Instant::now(),
+                    used_model: "sonnet-4-6".into(),
+                },
+            })
+            .unwrap();
+
+        app.drain_test_results();
+
+        assert!(!app.tests.pending.contains("vllm"));
+        assert_eq!(
+            app.tests.results.get("vllm").unwrap().used_model,
+            "sonnet-4-6"
+        );
+        assert_eq!(
+            app.tests.testing_model.get("vllm").map(String::as_str),
+            Some("sonnet-4-6")
+        );
     }
 }
