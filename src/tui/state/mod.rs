@@ -198,6 +198,8 @@ pub struct App {
     pub quota_status: HashMap<String, QuotaStatus>,
     /// Quota configuration form for the selected provider.
     pub quota_form: Option<QuotaForm>,
+    /// Line count from the last rendered detail panel, used to size the panel next frame.
+    pub detail_line_count: u16,
 }
 
 // ─── Provider editor form ─────────────────────────────────────────────────────
@@ -718,6 +720,7 @@ mod tests {
             pending_key: None,
             quota_status: std::collections::HashMap::new(),
             quota_form: None,
+            detail_line_count: 6,
         };
 
         app.tests.pending.insert("vllm".into());

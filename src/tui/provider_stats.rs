@@ -156,9 +156,9 @@ pub(super) fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
                 let text = if high {
                     format!("{:>4} ({:.0}%)", s.failures, rate * 100.0)
                 } else {
-                    s.failures.to_string()
+                    format!("{:>4}", s.failures)
                 };
-                Span::styled(format!("{:>10}", text), style)
+                Span::styled(text, style)
             },
         ])
     }));

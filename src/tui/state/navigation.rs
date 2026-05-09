@@ -37,6 +37,15 @@ impl App {
         )));
 
         let bg_proxy_pid = super::bg_proxy::load_bg_proxy_pid();
+
+        let term_avail = crossterm::terminal::size()
+            .map(|(w, _)| (w as usize).saturating_sub(4))
+            .unwrap_or(76);
+        let detail_line_count = {
+            use crate::tui::ui::format::all_providers_detail_height;
+            all_providers_detail_height(config.providers.values(), term_avail)
+        };
+
         Ok(Self {
             config,
             mode: super::Mode::Normal,
@@ -69,6 +78,7 @@ impl App {
             pending_key: None,
             quota_status: std::collections::HashMap::new(),
             quota_form: None,
+            detail_line_count,
         })
     }
 

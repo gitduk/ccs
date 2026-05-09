@@ -1,7 +1,6 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::symbols::border;
 
-use super::format::pack_routes;
 use crate::tui::state::App;
 
 // ── Panel system ───────────────────────────────────────────────────
@@ -79,30 +78,10 @@ fn providers_spec(app: &App) -> HeightSpec {
 
 /// Minimum / ideal height for the Detail panel.
 /// `route_avail` is the inner text width available for route wrapping.
-fn detail_spec(app: &App, route_avail: usize) -> HeightSpec {
-    if app.providers.names.is_empty() {
-        return HeightSpec { min: 2, ideal: 2 };
-    }
-    // base: blank + "Info" title + status line
-    let base: u16 = 3;
-    let max_routes: u16 = app
-        .config
-        .providers
-        .values()
-        .map(|p| {
-            let enabled: Vec<_> = p.routes.iter().filter(|r| r.enabled).collect();
-            if enabled.is_empty() {
-                0u16
-            } else {
-                pack_routes(&enabled, route_avail).len() as u16
-            }
-        })
-        .max()
-        .unwrap_or(0);
-    let ideal = base + max_routes;
+fn detail_spec(app: &App) -> HeightSpec {
     HeightSpec {
         min: DETAIL_MIN_HEIGHT,
-        ideal,
+        ideal: app.detail_line_count.max(DETAIL_MIN_HEIGHT),
     }
 }
 
@@ -198,12 +177,8 @@ pub(super) fn plan_main_screen(app: &App, area: Rect) -> ScreenPlan {
         height: left_frame.height.saturating_sub(2),
     };
 
-    // detail panel: horizontal padding (1 each side) = 2 overhead on inner width
-    let detail_inner_width = (inner_left.width as usize).saturating_sub(2);
-    let route_avail = detail_inner_width.saturating_sub(ROUTE_LABEL_WIDTH);
-
     let prov_spec = providers_spec(app);
-    let det_spec = detail_spec(app, route_avail);
+    let det_spec = detail_spec(app);
     let sta_spec = stats_spec(app);
 
     let heights = allocate_heights(prov_spec, det_spec, sta_spec, inner_left.height);
@@ -244,8 +219,6 @@ pub(super) fn plan_main_screen(app: &App, area: Rect) -> ScreenPlan {
         top_height,
     }
 }
-
-pub(crate) const ROUTE_LABEL_WIDTH: usize = 7; // "Routes "
 
 // ── Shared spacing tokens ──────────────────────────────────────────
 // These keep border characters, title dash counts, and gap widths in

@@ -17,10 +17,9 @@ use crate::tester::TestStatus;
 use super::state::{App, ConfirmAction, MessageKind, Mode, QuotaStatus};
 use super::theme::{self as t};
 use super::ui::format::{
-    api_key_display_len, col_width, config_path_display, fmt_latency, masked_api_key, pack_routes,
-    truncate_chars, truncate_error,
+    all_providers_detail_height, api_key_display_len, col_width, config_path_display, fmt_latency,
+    masked_api_key, pack_routes, truncate_chars, truncate_error,
 };
-use super::ui::layout::ROUTE_LABEL_WIDTH;
 use super::{ServerHandle, server};
 
 pub(super) fn handle_key(
@@ -232,6 +231,13 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
+    let format_col = col_width(
+        "Format",
+        app.config
+            .providers
+            .values()
+            .map(|p| p.api_format.to_string().len()),
+    );
     let url_col = col_width(
         "Base URL",
         app.config.providers.values().map(|p| p.base_url.len()),
@@ -242,6 +248,14 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
             .providers
             .values()
             .map(|p| api_key_display_len(&p.api_key)),
+    );
+    let port_col = col_width(
+        "Port",
+        app.config
+            .providers
+            .values()
+            .filter_map(|p| p.port)
+            .map(|p| p.to_string().len()),
     );
     let has_fallback_col = app.config.fallback;
     let has_quota = app
@@ -259,7 +273,7 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         .max()
         .unwrap_or(0)
         .max("Name".width());
-    let name_col = (max_name_len + 2 + 4) as u16;
+    let name_col = max_name_len as u16;
 
     let hdr = Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD);
     let mut header_cells = vec![
@@ -276,7 +290,6 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
     }
     let header = Row::new(header_cells).height(1);
 
-    let selected = app.providers.table_state.selected();
     let terminal_width = area.width;
     let quota_status = &app.quota_status;
 
@@ -284,20 +297,9 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         .providers
         .names
         .iter()
-        .enumerate()
-        .map(|(i, name)| {
+        .map(|name| {
             let provider = &app.config.providers[name];
             let is_current = name == &app.config.current;
-            let is_selected = selected == Some(i);
-
-            let (indicator, indicator_style) = if is_selected && app.terminal_focused {
-                (
-                    " ◀",
-                    Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD),
-                )
-            } else {
-                ("  ", Style::default())
-            };
             let disabled = !provider.enabled;
             let name_style = if disabled {
                 Style::default().fg(t::MUTED)
@@ -322,7 +324,6 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
             let name_cell = Cell::from(Line::from(vec![
                 Span::styled(name.as_str().to_string(), name_style),
                 Span::styled(" ".repeat(padding), pad_style),
-                Span::styled(indicator, indicator_style),
             ]));
 
             let mut cells = vec![
@@ -348,25 +349,31 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
 
     let mut col_constraints = vec![
         Constraint::Length(name_col),
-        Constraint::Length(12),
+        Constraint::Length(format_col),
         Constraint::Length(url_col),
         Constraint::Length(key_col),
     ];
     if has_port {
-        col_constraints.push(Constraint::Length(7)); // ":65535"
+        col_constraints.push(Constraint::Length(port_col));
     }
     if has_quota {
         col_constraints.push(Constraint::Length(20));
     }
     let table = Table::new(rows, col_constraints)
         .header(header)
+        .column_spacing(COL_GAP)
         .block(Block::default().padding(Padding::new(1, 1, 1, 0)))
-        .row_highlight_style(Style::default());
+        .row_highlight_style(Style::default().bg(t::HIGHLIGHT_BG));
 
     f.render_stateful_widget(table, area, &mut app.providers.table_state);
 }
 
-pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
+const COL_GAP: u16 = 4;
+const MODEL_COUNT_WIDTH: usize = 3;
+const MODEL_NAME_TRUNCATE: usize = 40;
+const INFO_FIELD_SEP: &str = "   ";
+
+pub(super) fn draw_detail_panel(f: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default().padding(Padding::horizontal(1));
 
     let label = Style::default().fg(t::MUTED);
@@ -396,68 +403,100 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
             .unwrap_or_else(|| "—".to_string());
         let models_str = prev
             .and_then(|r| r.model_count)
-            .map(|n| format!("{n} models"))
-            .unwrap_or_else(|| "—".to_string());
+            .map(|n| format!("{n:<width$}", width = MODEL_COUNT_WIDTH))
+            .unwrap_or_else(|| format!("{:<width$}", "—", width = MODEL_COUNT_WIDTH));
         let testing_model = app
             .tests
             .testing_model
             .get(name.as_str())
-            .map(|m| format!(" ({m})"))
+            .map(|m| format!(" ({})", truncate_chars(m, MODEL_NAME_TRUNCATE)))
             .unwrap_or_default();
+        let status_text = format!("Testing{testing_model}");
+        let left_w = status_text.as_str().width();
+        let models_pad = left_w.saturating_sub(MODEL_COUNT_WIDTH);
         lines.push(Line::from(vec![
             Span::styled("Status ", label),
             Span::styled(
-                format!("Testing{testing_model}"),
+                status_text,
                 Style::default().fg(t::MUTED).add_modifier(Modifier::ITALIC),
             ),
-            Span::styled("   Latency ", label),
+            Span::styled(format!("{INFO_FIELD_SEP}Latency "), label),
             Span::styled(latency_str, Style::default().fg(t::MUTED)),
-            Span::styled("   Models ", label),
-            Span::styled(models_str, Style::default().fg(t::MUTED)),
         ]));
+        let mut pending_metrics = vec![
+            Span::styled("Models ", label),
+            Span::styled(models_str, Style::default().fg(t::MUTED)),
+            Span::raw(" ".repeat(models_pad)),
+        ];
+        let tools_span = match prev.and_then(|r| r.tools_supported) {
+            Some(true) => Span::styled("yes", Style::default().fg(t::MUTED)),
+            Some(false) => Span::styled("no", Style::default().fg(t::MUTED)),
+            None => Span::styled("—", Style::default().fg(t::MUTED)),
+        };
+        pending_metrics.extend([
+            Span::styled(format!("{INFO_FIELD_SEP}Tools   "), label),
+            tools_span,
+        ]);
+        lines.push(Line::from(pending_metrics));
     } else if let Some(r) = app.tests.results.get(name.as_str()) {
         let (status_str, status_style) = match &r.status {
             TestStatus::Ok => (
-                "✓ OK".to_string(),
+                "OK".to_string(),
                 Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD),
             ),
             TestStatus::AuthFailed => (
-                "✗ Auth failed".to_string(),
+                "Auth failed".to_string(),
                 Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD),
             ),
             TestStatus::Error(e) => (truncate_error(e), Style::default().fg(t::ERROR)),
         };
         let models_str = match r.model_count {
-            Some(n) => Span::styled(format!("{n} models"), Style::default().fg(t::TEXT)),
-            None => Span::styled("—", Style::default().fg(t::MUTED)),
+            Some(n) => Span::styled(
+                format!("{n:<width$}", width = MODEL_COUNT_WIDTH),
+                Style::default().fg(t::TEXT),
+            ),
+            None => Span::styled(
+                format!("{:<width$}", "—", width = MODEL_COUNT_WIDTH),
+                Style::default().fg(t::MUTED),
+            ),
         };
+        // Line 1: Status + Latency
+        let status_str_w = status_str.as_str().width();
+        let model_display = if !r.used_model.is_empty() {
+            format!(" ({})", truncate_chars(&r.used_model, MODEL_NAME_TRUNCATE))
+        } else {
+            String::new()
+        };
+        let left_w = status_str_w + model_display.as_str().width();
         let mut status_spans = vec![
             Span::styled("Status ", label),
             Span::styled(status_str, status_style),
         ];
-        if !r.used_model.is_empty() {
-            status_spans.push(Span::styled(
-                format!(" ({})", r.used_model),
-                Style::default().fg(t::MUTED),
-            ));
+        if !model_display.is_empty() {
+            status_spans.push(Span::styled(model_display, Style::default().fg(t::MUTED)));
         }
         status_spans.extend([
-            Span::styled("   Latency ", label),
+            Span::styled(format!("{INFO_FIELD_SEP}Latency "), label),
             Span::styled(fmt_latency(r.latency_ms), Style::default().fg(t::TEXT)),
-            Span::styled("   Models ", label),
-            models_str,
         ]);
-        if let Some(supported) = r.tools_supported {
-            status_spans.extend([
-                Span::styled("   Tools ", label),
-                if supported {
-                    Span::styled("✓", Style::default().fg(t::SUCCESS))
-                } else {
-                    Span::styled("✗", Style::default().fg(t::ERROR))
-                },
-            ]);
-        }
         lines.push(Line::from(status_spans));
+        // Line 2: Models + Tools  (left side padded to match line 1)
+        let models_pad = left_w.saturating_sub(MODEL_COUNT_WIDTH);
+        let tools_span = match r.tools_supported {
+            Some(true) => Span::styled("yes", Style::default().fg(t::SUCCESS)),
+            Some(false) => Span::styled("no", Style::default().fg(t::ERROR)),
+            None => Span::styled("—", Style::default().fg(t::MUTED)),
+        };
+        let mut metrics_spans = vec![
+            Span::styled("Models ", label),
+            models_str,
+            Span::raw(" ".repeat(models_pad)),
+        ];
+        metrics_spans.extend([
+            Span::styled(format!("{INFO_FIELD_SEP}Tools   "), label),
+            tools_span,
+        ]);
+        lines.push(Line::from(metrics_spans));
     } else {
         lines.push(Line::from(vec![
             Span::styled("Press ", Style::default().fg(t::MUTED)),
@@ -473,39 +512,38 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
     let enabled_routes: Vec<&crate::config::RouteRule> = provider
         .map(|p| p.routes.iter().filter(|r| r.enabled).collect())
         .unwrap_or_default();
-    if !enabled_routes.is_empty() {
-        let avail = (area.width as usize).saturating_sub(4 + ROUTE_LABEL_WIDTH);
-        for (row_idx, group) in pack_routes(&enabled_routes, avail).into_iter().enumerate() {
-            let mut spans: Vec<Span> = vec![if row_idx == 0 {
-                Span::styled("Routes ", label)
-            } else {
-                Span::raw("       ")
-            }];
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Routes",
+        Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD),
+    )));
+    if enabled_routes.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("Press ", Style::default().fg(t::MUTED)),
+            Span::styled(
+                "[e]",
+                Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" to edit and add routes", Style::default().fg(t::MUTED)),
+        ]));
+    } else {
+        let avail = (area.width as usize).saturating_sub(4);
+        for group in pack_routes(&enabled_routes, avail) {
+            let mut spans: Vec<Span> = vec![];
             for (i, route) in group.iter().enumerate() {
                 if i > 0 {
                     spans.push(Span::raw("  "));
                 }
                 spans.push(Span::styled(&route.pattern, Style::default().fg(t::TEXT)));
                 spans.push(Span::styled(" → ", Style::default().fg(t::MUTED)));
-                spans.push(Span::styled(
-                    &route.target,
-                    Style::default().fg(t::route_target_color(&route.target)),
-                ));
+                spans.push(Span::raw(&route.target));
             }
             lines.push(Line::from(spans));
         }
     }
 
-    if let Some(port) = provider.and_then(|p| p.port) {
-        lines.push(Line::from(vec![
-            Span::styled("Port   ", label),
-            Span::styled(
-                format!(":{port}  (pinned listener)"),
-                Style::default().fg(t::TEXT),
-            ),
-        ]));
-    }
-
+    let avail = (area.width as usize).saturating_sub(4);
+    app.detail_line_count = all_providers_detail_height(app.config.providers.values(), avail);
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
@@ -615,7 +653,7 @@ mod tests {
             },
         );
 
-        let app = App {
+        let mut app = App {
             config: AppConfig {
                 current: "vllm".into(),
                 listen: "127.0.0.1:0".into(),
@@ -659,12 +697,13 @@ mod tests {
             pending_key: None,
             quota_status: std::collections::HashMap::new(),
             quota_form: None,
+            detail_line_count: 6,
         };
 
         let backend = TestBackend::new(100, 8);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| draw_detail_panel(f, &app, Rect::new(0, 0, 100, 8)))
+            .draw(|f| draw_detail_panel(f, &mut app, Rect::new(0, 0, 100, 8)))
             .unwrap();
 
         let buffer = terminal.backend().buffer().clone();

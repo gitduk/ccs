@@ -19,19 +19,3 @@ pub fn format_color(fmt: &ApiFormat) -> Color {
         ApiFormat::OpenAI => PRIMARY,
     }
 }
-
-/// Color for a route target string, based on the model platform.
-/// Matches on well-known prefixes: claude → yellow, gpt/o1/o3/o4 → blue, gemini → cornflower blue, others → white.
-pub fn route_target_color(target: &str) -> Color {
-    let t = target.to_ascii_lowercase();
-    if t.contains("claude") {
-        WARNING // yellow
-    } else if t.contains("gemini") {
-        Color::Rgb(138, 180, 248) // #8AB4F8, Google blue
-    } else if t.contains("gpt") || t.starts_with("o1") || t.starts_with("o3") || t.starts_with("o4")
-    {
-        Color::Rgb(16, 163, 127) // #10A37F, OpenAI teal
-    } else {
-        TEXT
-    }
-}

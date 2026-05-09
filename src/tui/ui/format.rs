@@ -3,7 +3,7 @@ use ratatui::text::Span;
 use ratatui::widgets::Cell;
 
 use super::super::theme::{self as t};
-use crate::config::RouteRule;
+use crate::config::{Provider, RouteRule};
 
 /// Truncate a string to `max` characters, appending `…` if truncated.
 pub(crate) fn truncate_chars(s: &str, max: usize) -> String {
@@ -75,9 +75,9 @@ pub(crate) fn max_content_width(
     content_lens.max().unwrap_or(default).min(cap)
 }
 
-/// Column width = max(header length, max content length) + 4 gap.
+/// Column width = max(header length, max content length), exact fit.
 pub(crate) fn col_width(header: &str, content_lens: impl Iterator<Item = usize>) -> u16 {
-    (max_content_width(content_lens, 0, usize::MAX).max(header.len()) + 4) as u16
+    max_content_width(content_lens, 0, usize::MAX).max(header.len()) as u16
 }
 
 pub(crate) fn api_key_display_len(key: &str) -> usize {
@@ -180,4 +180,23 @@ pub(crate) fn pack_routes<'a>(
         result.push(current);
     }
     result
+}
+
+/// Compute the max detail panel height across all providers (stable panel sizing).
+pub(crate) fn all_providers_detail_height<'a>(
+    providers: impl Iterator<Item = &'a Provider>,
+    avail: usize,
+) -> u16 {
+    providers
+        .map(|p| {
+            let enabled: Vec<_> = p.routes.iter().filter(|r| r.enabled).collect();
+            let route_rows = if enabled.is_empty() {
+                1u16
+            } else {
+                pack_routes(&enabled, avail).len() as u16
+            };
+            4 + 2 + route_rows
+        })
+        .max()
+        .unwrap_or(4)
 }
