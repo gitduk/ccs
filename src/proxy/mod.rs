@@ -187,13 +187,22 @@ pub async fn start_server(config: AppConfig) -> crate::error::Result<()> {
     let app = build_router(base_state.clone());
 
     // Spawn initial pinned listeners.
-    let mut pinned: PinnedListeners = HashMap::new();
-    reconcile_pinned(desired_pinned(&config), &mut pinned, &host, &base_state).await;
+    let pinned = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    reconcile_pinned(
+        desired_pinned(&config),
+        &mut *pinned.lock().await,
+        &host,
+        &base_state,
+    )
+    .await;
 
     // Reload config from disk on SIGHUP so the TUI can signal changes.
     #[cfg(unix)]
     {
         let reload_config = shared_config;
+        let pinned = pinned.clone();
+        let host = host.clone();
+        let base_state = base_state.clone();
         tokio::spawn(async move {
             let mut sig = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
                 .expect("Failed to install SIGHUP handler");
@@ -204,8 +213,15 @@ pub async fn start_server(config: AppConfig) -> crate::error::Result<()> {
                         if cfg.listen != new_cfg.listen {
                             tracing::warn!("SIGHUP: listen address changed — restart required");
                         }
-                        *cfg = new_cfg;
+                        *cfg = new_cfg.clone();
                         tracing::info!("SIGHUP: config reloaded");
+                        reconcile_pinned(
+                            desired_pinned(&new_cfg),
+                            &mut *pinned.lock().await,
+                            &host,
+                            &base_state,
+                        )
+                        .await;
                     }
                     Err(e) => tracing::error!("SIGHUP: failed to reload config: {e}"),
                 }
@@ -220,7 +236,7 @@ pub async fn start_server(config: AppConfig) -> crate::error::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
-    stop_all_pinned(&mut pinned).await;
+    stop_all_pinned(&mut *pinned.lock().await).await;
     Ok(())
 }
 
