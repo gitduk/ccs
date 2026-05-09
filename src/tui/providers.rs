@@ -447,6 +447,16 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("   Models ", label),
             models_str,
         ]);
+        if let Some(supported) = r.tools_supported {
+            status_spans.extend([
+                Span::styled("   Tools ", label),
+                if supported {
+                    Span::styled("✓", Style::default().fg(t::SUCCESS))
+                } else {
+                    Span::styled("✗", Style::default().fg(t::ERROR))
+                },
+            ]);
+        }
         lines.push(Line::from(status_spans));
     } else {
         lines.push(Line::from(vec![
@@ -601,6 +611,7 @@ mod tests {
                 model_names: Some(vec!["gemma-4-31b-it".into()]),
                 tested_at: Instant::now(),
                 used_model: "sonnet-4-6".into(),
+                tools_supported: None,
             },
         );
 

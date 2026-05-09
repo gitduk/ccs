@@ -143,6 +143,29 @@ pub(crate) async fn probe_provider_message(
     Ok((outcome.status(), outcome.latency_ms()))
 }
 
+/// Like `probe_provider_message` but also returns the response body.
+/// Used to inspect the response content for capability detection.
+pub(crate) async fn probe_provider_message_with_body(
+    client: &reqwest::Client,
+    provider: &Provider,
+    api_key: &str,
+    req_json: &serde_json::Value,
+) -> Result<(StatusCode, Bytes), AppError> {
+    let body = Bytes::from(serde_json::to_vec(req_json)?);
+    let headers = HeaderMap::new();
+    let outcome =
+        execute_provider_request(client, provider, api_key, &body, Some(req_json), &headers)
+            .await?;
+    let status = outcome.status();
+    let resp_body = match outcome {
+        ProviderRequestOutcome::Success { response, .. } => {
+            response.bytes().await.unwrap_or_default()
+        }
+        ProviderRequestOutcome::UpstreamError { body, .. } => body,
+    };
+    Ok((status, resp_body))
+}
+
 fn should_fallback_from_responses_404(body: &[u8]) -> bool {
     let message = extract_error_message(body).to_ascii_lowercase();
     if message.is_empty() {

@@ -735,6 +735,7 @@ mod tests {
                     model_names: Some(vec!["gemma-4-31b-it".into()]),
                     tested_at: Instant::now(),
                     used_model: "sonnet-4-6".into(),
+                    tools_supported: None,
                 },
             })
             .unwrap();

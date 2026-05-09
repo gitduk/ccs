@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 
 use crate::config::{ApiFormat, Provider};
-use crate::proxy::executor::probe_provider_message;
+use crate::proxy::executor::{probe_provider_message, probe_provider_message_with_body};
 
 const TEST_TIMEOUT_SECS: u64 = 10;
 
@@ -23,6 +23,9 @@ pub struct TestResult {
     pub tested_at: Instant,
     /// The model name used for the connectivity test.
     pub used_model: String,
+    /// Whether the provider accepted a request containing a tool definition.
+    /// `None` means the check was not run (test failed before reaching this point).
+    pub tools_supported: Option<bool>,
 }
 
 /// Run a latency test against the provider using `model`.
@@ -58,6 +61,7 @@ pub async fn test_latency(
                 model_names: known_models,
                 tested_at,
                 used_model: used_model.clone(),
+                tools_supported: None,
             };
         }
     };
@@ -74,6 +78,7 @@ pub async fn test_latency(
                     model_names: known_models,
                     tested_at,
                     used_model: used_model.clone(),
+                    tools_supported: None,
                 };
             }
         };
@@ -89,13 +94,24 @@ pub async fn test_latency(
     let base = provider.base_url.trim_end_matches('/');
     let auth_header = provider.auth_header(&api_key);
 
-    // Use the pre-fetched model list when available; otherwise fetch now
-    // (best-effort, does not affect status or latency).
-    let (model_count, model_names) = if let Some(models) = known_models {
-        (Some(models.len()), Some(models))
-    } else {
-        fetch_models(client, base, &auth_header, &provider.api_format).await
-    };
+    // Run models fetch and tool-support probe concurrently.
+    // Both are best-effort and don't affect status or latency.
+    let (tools_supported, (model_count, model_names)) = tokio::join!(
+        async {
+            if matches!(msg_status, TestStatus::Ok) {
+                check_tool_support(client, provider, &api_key, &used_model).await
+            } else {
+                None
+            }
+        },
+        async {
+            if let Some(models) = known_models {
+                (Some(models.len()), Some(models))
+            } else {
+                fetch_models(client, base, &auth_header, &provider.api_format).await
+            }
+        }
+    );
 
     TestResult {
         status: msg_status,
@@ -104,6 +120,7 @@ pub async fn test_latency(
         model_names,
         tested_at,
         used_model: req_json["model"].as_str().unwrap_or_default().to_string(),
+        tools_supported,
     }
 }
 
@@ -119,6 +136,88 @@ pub async fn fetch_provider_models(client: &reqwest::Client, provider: &Provider
         .await
         .1
         .unwrap_or_default()
+}
+
+/// Probe whether the provider supports tool calling by forcing a tool call and inspecting
+/// the response body for actual structured tool-call output.
+///
+/// Uses Anthropic-format tools/tool_choice throughout: execute_provider_request's to_openai()
+/// transform converts them to the correct upstream format (top-level "name" → OpenAI
+/// function wrapper). Sending native OpenAI format would cause to_openai() to silently drop
+/// all tools, defeating the probe.
+///
+/// Returns `Some(true)` if the response contains a structured tool call, `Some(false)` if the
+/// provider rejected the request (4xx) or responded with text only, `None` on network error.
+async fn check_tool_support(
+    client: &reqwest::Client,
+    provider: &Provider,
+    api_key: &str,
+    model: &str,
+) -> Option<bool> {
+    let req = json!({
+        "model": model,
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "call the noop tool"}],
+        "tools": [{
+            "name": "noop",
+            "description": "no-op",
+            "input_schema": {"type": "object", "properties": {}}
+        }],
+        // "any" converts to "required" for OpenAI providers via convert_tool_choice_to_openai.
+        "tool_choice": {"type": "any"},
+    });
+    match probe_provider_message_with_body(client, provider, api_key, &req).await {
+        Ok((status, body)) => {
+            if !status.is_success() {
+                return Some(false);
+            }
+            Some(response_body_has_tool_call(&body))
+        }
+        Err(_) => None,
+    }
+}
+
+/// Returns true if a JSON response body contains actual structured tool-call content.
+/// Handles Anthropic messages, OpenAI chat completions, and OpenAI Responses API formats.
+fn response_body_has_tool_call(body: &[u8]) -> bool {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    // Anthropic: content[*].type == "tool_use"
+    if v.get("content")
+        .and_then(|c| c.as_array())
+        .is_some_and(|arr| {
+            arr.iter()
+                .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
+        })
+    {
+        return true;
+    }
+    // OpenAI Chat Completions: choices[*].message.tool_calls non-empty
+    if v.get("choices")
+        .and_then(|c| c.as_array())
+        .is_some_and(|arr| {
+            arr.iter().any(|c| {
+                c.get("message")
+                    .and_then(|m| m.get("tool_calls"))
+                    .and_then(|tc| tc.as_array())
+                    .is_some_and(|calls| !calls.is_empty())
+            })
+        })
+    {
+        return true;
+    }
+    // OpenAI Responses API: output[*].type == "function_call"
+    if v.get("output")
+        .and_then(|o| o.as_array())
+        .is_some_and(|arr| {
+            arr.iter()
+                .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call"))
+        })
+    {
+        return true;
+    }
+    false
 }
 
 async fn fetch_models(

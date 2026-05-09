@@ -96,6 +96,7 @@ pub(super) fn test_provider_by_name(app: &mut App, name: &str) {
                     model_names: Some(known_models.clone()),
                     tested_at: std::time::Instant::now(),
                     used_model: model.clone(),
+                    tools_supported: None,
                 },
             };
             let done = matches!(
@@ -156,6 +157,7 @@ pub(super) fn test_provider_after_add(app: &mut App, name: &str) {
                 model_names: None,
                 tested_at,
                 used_model: String::new(),
+                tools_supported: None,
             };
             let _ = tx.send(TestEvent::Completed {
                 provider: name_owned,
@@ -185,6 +187,7 @@ pub(super) fn test_provider_after_add(app: &mut App, name: &str) {
                 model_names: Some(models.clone()),
                 tested_at: std::time::Instant::now(),
                 used_model: model,
+                tools_supported: None,
             },
         };
         let _ = tx.send(TestEvent::Completed {
@@ -269,6 +272,7 @@ mod tests {
                 model_names: Some(vec!["m".into()]),
                 tested_at: std::time::Instant::now(),
                 used_model: "m".into(),
+                tools_supported: None,
             },
         };
 
