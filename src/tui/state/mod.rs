@@ -2,9 +2,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc;
 use std::time::Duration;
 
-/// Index of the Notes field inside `ProviderForm::fields`.
 pub(super) const FALLBACK_FIELD_IDX: usize = 4;
 pub(super) const NOTES_FIELD_IDX: usize = 5;
+/// Index of the Port field inside `ProviderForm::fields`.
+pub(super) const PORT_FIELD_IDX: usize = 6;
 
 use ratatui::widgets::TableState;
 
@@ -525,7 +526,7 @@ impl ProviderForm {
     /// Create a new form for adding or editing a provider.
     pub(super) fn new(name: &str, provider: Option<&Provider>) -> Self {
         use crate::config::{ApiFormat, OpenAiApiVersion};
-        let (base_url, api_key, format, fallback, notes, routes) = match provider {
+        let (base_url, api_key, format, fallback, notes, port_str, routes) = match provider {
             Some(p) => {
                 let fmt = match p.api_format {
                     ApiFormat::Anthropic => "anthropic",
@@ -541,16 +542,18 @@ impl ProviderForm {
                     }
                 };
                 let fb = if p.fallback { "yes" } else { "no" };
+                let port = p.port.map(|p| p.to_string()).unwrap_or_default();
                 (
                     p.base_url.as_str(),
                     p.api_key.as_str(),
                     fmt,
                     fb,
                     p.notes.as_str(),
+                    port,
                     p.routes.clone(),
                 )
             }
-            None => ("", "", "anthropic", "no", "", vec![]),
+            None => ("", "", "anthropic", "no", "", String::new(), vec![]),
         };
         Self {
             original_name: if name.is_empty() {
@@ -569,6 +572,7 @@ impl ProviderForm {
                 ),
                 FormField::toggle("Fallback", fallback, &["yes", "no"]),
                 FormField::multiline("Notes", notes),
+                FormField::text("Port", &port_str),
             ],
             focused: 0,
             vim_mode: VimMode::Normal,
@@ -610,19 +614,14 @@ impl ProviderForm {
     }
 
     /// Move focus to the next editable slot.
-    /// Visual order: Name → Base URL → API Key → Format → Fallback → Routes → Notes → (wrap)
+    /// Visual order: Name → Base URL → API Key → Format → Fallback → Notes → Port → Routes → (wrap)
     pub fn focus_next(&mut self) {
-        let routes_slot = self.fields.len(); // virtual index for Routes
-        let notes_idx = NOTES_FIELD_IDX;
+        let routes_slot = self.fields.len(); // virtual index for Routes (past last regular field)
 
-        let next = if self.focused == notes_idx {
-            0 // Notes → Name (wrap)
-        } else if self.focused == routes_slot {
-            notes_idx // Routes → Notes
-        } else if self.focused == FALLBACK_FIELD_IDX {
-            routes_slot // Fallback → Routes
+        let next = if self.focused == routes_slot {
+            0 // Routes → Name (wrap)
         } else {
-            self.focused + 1 // sequential advance
+            self.focused + 1 // sequential: Port(6) → Routes(7) naturally
         };
 
         self.focused = next;
@@ -636,19 +635,14 @@ impl ProviderForm {
     }
 
     /// Move focus to the previous editable slot.
-    /// Visual order (reverse): Notes → Routes → Fallback → Format → API Key → Base URL → Name → (wrap)
+    /// Visual order (reverse): Routes → Port → Notes → Fallback → Format → API Key → Base URL → Name → (wrap)
     pub fn focus_prev(&mut self) {
         let routes_slot = self.fields.len();
-        let notes_idx = NOTES_FIELD_IDX;
 
         let prev = if self.focused == 0 {
-            notes_idx // Name → Notes (wrap)
-        } else if self.focused == notes_idx {
-            routes_slot // Notes → Routes
-        } else if self.focused == routes_slot {
-            FALLBACK_FIELD_IDX // Routes → Fallback
+            routes_slot // Name → Routes (wrap)
         } else {
-            self.focused - 1 // sequential retreat
+            self.focused - 1 // sequential: Routes(7) → Port(6) → Notes(5) → ...
         };
 
         self.focused = prev;
@@ -714,6 +708,7 @@ mod tests {
                 api_version: None,
                 quota: None,
                 quota_command: None,
+                port: None,
             },
         );
 

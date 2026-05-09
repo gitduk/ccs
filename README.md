@@ -126,6 +126,44 @@ Set `"fallback": true` to include a provider in the fallback rotation when the a
 "fallback": true
 ```
 
+### Per-Project Routing (Pinned Port Listeners)
+
+When you need different projects to use different providers simultaneously (e.g. project A → OpenRouter, project B → Anthropic), assign a dedicated port to each provider.
+
+**Config (`~/.ccs/config.json`):**
+
+```json
+{
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api",
+      "port": 7901
+    },
+    "anthropic": {
+      "base_url": "https://api.anthropic.com",
+      "port": 7902
+    }
+  }
+}
+```
+
+ccs will listen on `:7901` and `:7902` in addition to the global port. Requests to a pinned port are **routed exclusively** to that provider — no fallback.
+
+**Project-side config (using direnv):**
+
+```bash
+# project-a/.envrc
+export ANTHROPIC_BASE_URL=http://127.0.0.1:7901   # → openrouter
+
+# project-b/.envrc
+export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
+```
+
+**Constraints:**
+- Port numbers must not conflict with each other or with the global `listen` port
+- Disabling a provider stops its pinned listener; re-enabling restarts it
+- Hot-reload (`r` in TUI) dynamically adds/removes port listeners
+
 ## TUI Keybindings
 
 ### Navigation

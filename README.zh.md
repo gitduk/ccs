@@ -126,6 +126,46 @@ export OPENAI_API_KEY=any-value
 "fallback": true
 ```
 
+### 按项目路由（多端口 Pinned Listener）
+
+需要同时使用多个提供商（例如项目 A 用 OpenRouter，项目 B 用 Anthropic 直连）时，可以给每个提供商指定独立监听端口。
+
+**配置方式：**
+
+在 TUI 编辑提供商时填写 `Port` 字段（留空则不开启），或直接在 `~/.ccs/config.json` 中添加：
+
+```json
+{
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api",
+      "port": 7901
+    },
+    "anthropic": {
+      "base_url": "https://api.anthropic.com",
+      "port": 7902
+    }
+  }
+}
+```
+
+ccs 启动后会额外监听 `:7901` 和 `:7902`，每个端口的请求 **固定路由** 到对应提供商，不参与 fallback。
+
+**项目侧配置（推荐配合 direnv）：**
+
+```bash
+# project-a/.envrc
+export ANTHROPIC_BASE_URL=http://127.0.0.1:7901   # → openrouter
+
+# project-b/.envrc
+export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
+```
+
+**限制：**
+- 各提供商端口不能冲突，也不能与全局 `listen` 端口重复
+- 禁用某提供商会停止其 pinned 端口监听；重新启用会恢复
+- 热重载（TUI `r` 键）会动态增删端口监听
+
 ## TUI 快捷键
 
 ### 导航

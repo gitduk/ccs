@@ -4,12 +4,12 @@ pub mod handler;
 pub mod metrics;
 pub mod transform;
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::routing::{get, post};
-use std::time::Duration;
-
 use reqwest::Client;
 use tokio::sync::RwLock;
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -24,6 +24,9 @@ pub struct AppState {
     pub metrics: SharedMetrics,
     pub request_log: SharedRequestLog,
     pub db: Repository,
+    /// When set, all requests on this listener are routed exclusively to this
+    /// provider (no fallback). Used by per-provider pinned port listeners.
+    pub pinned_provider: Option<String>,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -60,22 +63,132 @@ fn build_http_client() -> Client {
         .expect("Failed to build HTTP client")
 }
 
+/// Extract host part from a listen address like "127.0.0.1:7896" or "[::1]:7896".
+fn listen_host(listen: &str) -> &str {
+    listen.rsplit_once(':').map(|(h, _)| h).unwrap_or(listen)
+}
+
+/// Compute desired set of pinned listeners from config: port → provider_name.
+/// Only enabled providers with a port field are included.
+fn desired_pinned(config: &AppConfig) -> HashMap<u16, String> {
+    config
+        .providers
+        .iter()
+        .filter(|(_, p)| p.enabled && p.port.is_some())
+        .map(|(name, p)| (p.port.unwrap(), name.clone()))
+        .collect()
+}
+
+type PinnedEntry = (
+    String,
+    tokio::sync::watch::Sender<bool>,
+    tokio::task::JoinHandle<()>,
+);
+type PinnedListeners = HashMap<u16, PinnedEntry>;
+
+/// Spawn one pinned listener bound to `host:port`, routing to `provider_name`.
+/// All shared resources are cloned from `base`.
+async fn spawn_pinned_listener(
+    port: u16,
+    provider_name: String,
+    host: &str,
+    base: &AppState,
+) -> crate::error::Result<PinnedEntry> {
+    let addr = format!("{host}:{port}");
+    let state = Arc::new(AppState {
+        config: base.config.clone(),
+        http_client: base.http_client.clone(),
+        metrics: base.metrics.clone(),
+        request_log: base.request_log.clone(),
+        db: base.db.clone(),
+        pinned_provider: Some(provider_name.clone()),
+    });
+    let app = build_router(state);
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    tracing::info!("CCS pinned listener for '{provider_name}' on {addr}");
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    let pname = provider_name.clone();
+    let handle = tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.changed().await;
+            })
+            .await
+        {
+            tracing::error!("Pinned listener {addr} error: {e}");
+        }
+        tracing::info!("CCS pinned listener for '{pname}' on {addr} stopped");
+    });
+    Ok((provider_name, shutdown_tx, handle))
+}
+
+/// Reconcile running pinned listeners against the desired set from config.
+/// Stops listeners whose port is removed or whose provider changed; starts new ones.
+async fn reconcile_pinned(
+    desired: HashMap<u16, String>,
+    listeners: &mut PinnedListeners,
+    host: &str,
+    base: &AppState,
+) {
+    let to_stop: Vec<u16> = listeners
+        .iter()
+        .filter(|(port, (name, _, _))| desired.get(port).map(|n| n != name).unwrap_or(true))
+        .map(|(p, _)| *p)
+        .collect();
+    for port in to_stop {
+        let (name, tx, handle) = listeners.remove(&port).unwrap();
+        tracing::info!("CCS stopping pinned listener for '{name}' on port {port}");
+        let _ = tx.send(true);
+        let _ = handle.await;
+    }
+    for (port, provider_name) in desired {
+        if listeners.contains_key(&port) {
+            continue;
+        }
+        match spawn_pinned_listener(port, provider_name, host, base).await {
+            Ok(entry) => {
+                listeners.insert(port, entry);
+            }
+            Err(e) => tracing::error!("Failed to start pinned listener on port {port}: {e}"),
+        }
+    }
+}
+
+/// Stop and drain all pinned listeners, shutting them down concurrently.
+async fn stop_all_pinned(listeners: &mut PinnedListeners) {
+    let handles: Vec<_> = listeners
+        .drain()
+        .map(|(port, (name, tx, handle))| {
+            tracing::info!("CCS stopping pinned listener for '{name}' on port {port}");
+            let _ = tx.send(true);
+            handle
+        })
+        .collect();
+    futures::future::join_all(handles).await;
+}
+
 /// Start the proxy server (CLI mode, shuts down on Ctrl+C / SIGTERM).
 pub async fn start_server(config: AppConfig) -> crate::error::Result<()> {
     let listen = config.listen.clone();
+    let host = listen_host(&listen).to_owned();
     let db = crate::repo::Repository::open(&config.resolve_db_path());
     if let Err(e) = db.migrate(&config.name_to_id_map()) {
         tracing::warn!("DB schema migration failed: {e}");
     }
-    let shared_config = Arc::new(RwLock::new(config));
-    let state = Arc::new(AppState {
+    let shared_config = Arc::new(RwLock::new(config.clone()));
+    let base_state = Arc::new(AppState {
         config: shared_config.clone(),
         http_client: build_http_client(),
         metrics: Arc::new(std::sync::Mutex::new(metrics::TokenMetrics::default())),
         request_log: Arc::new(std::sync::Mutex::new(metrics::RequestLog::default())),
         db,
+        pinned_provider: None,
     });
-    let app = build_router(state);
+    let app = build_router(base_state.clone());
+
+    // Spawn initial pinned listeners.
+    let mut pinned: PinnedListeners = HashMap::new();
+    reconcile_pinned(desired_pinned(&config), &mut pinned, &host, &base_state).await;
 
     // Reload config from disk on SIGHUP so the TUI can signal changes.
     #[cfg(unix)]
@@ -107,6 +220,7 @@ pub async fn start_server(config: AppConfig) -> crate::error::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
+    stop_all_pinned(&mut pinned).await;
     Ok(())
 }
 
@@ -121,33 +235,65 @@ pub async fn start_server_with_shutdown(
 ) -> crate::error::Result<()> {
     let initial_config = config_rx.borrow().clone();
     let listen = initial_config.listen.clone();
-    let shared_config = Arc::new(RwLock::new(initial_config));
-    let config_for_watcher = shared_config.clone();
-    tokio::spawn(async move {
-        while config_rx.changed().await.is_ok() {
-            let new_cfg = config_rx.borrow_and_update().clone();
-            *config_for_watcher.write().await = new_cfg;
-        }
-    });
+    let host = listen_host(&listen).to_owned();
+    let shared_config = Arc::new(RwLock::new(initial_config.clone()));
 
-    let state = Arc::new(AppState {
+    let base_state = Arc::new(AppState {
         config: shared_config,
         http_client: build_http_client(),
         metrics,
         request_log,
         db,
+        pinned_provider: None,
     });
-    let app = build_router(state);
+    let app = build_router(base_state.clone());
 
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     tracing::info!("CCS proxy listening on {listen}");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            let _ = shutdown_rx.changed().await;
-        })
-        .await?;
+    let (global_shutdown_tx, mut global_shutdown_rx) = tokio::sync::watch::channel(false);
+    let main_handle = tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = global_shutdown_rx.changed().await;
+            })
+            .await
+        {
+            tracing::error!("Main proxy listener error: {e}");
+        }
+    });
 
+    // Spawn initial pinned listeners.
+    let mut pinned: PinnedListeners = HashMap::new();
+    reconcile_pinned(
+        desired_pinned(&initial_config),
+        &mut pinned,
+        &host,
+        &base_state,
+    )
+    .await;
+
+    // Event loop: react to config changes and global shutdown.
+    loop {
+        tokio::select! {
+            res = shutdown_rx.changed() => {
+                if res.is_err() || *shutdown_rx.borrow() {
+                    break;
+                }
+            }
+            res = config_rx.changed() => {
+                if res.is_err() { break; }
+                let new_cfg = config_rx.borrow_and_update().clone();
+                *base_state.config.write().await = new_cfg.clone();
+                reconcile_pinned(desired_pinned(&new_cfg), &mut pinned, &host, &base_state).await;
+            }
+        }
+    }
+
+    // Graceful shutdown.
+    let _ = global_shutdown_tx.send(true);
+    stop_all_pinned(&mut pinned).await;
+    let _ = main_handle.await;
     tracing::info!("CCS proxy stopped");
     Ok(())
 }

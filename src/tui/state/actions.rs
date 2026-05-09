@@ -2,7 +2,8 @@ use crate::config::{self, ApiFormat, OpenAiApiVersion};
 use crate::error::Result;
 
 use super::{
-    App, ConfirmAction, FALLBACK_FIELD_IDX, MessageKind, Mode, NOTES_FIELD_IDX, ProviderForm,
+    App, ConfirmAction, FALLBACK_FIELD_IDX, MessageKind, Mode, NOTES_FIELD_IDX, PORT_FIELD_IDX,
+    ProviderForm,
 };
 
 impl App {
@@ -45,6 +46,7 @@ impl App {
             .value
             .trim_matches('\n')
             .to_string();
+        let port_raw = form.fields[PORT_FIELD_IDX].value.trim().to_string();
         let is_new = form.original_name.is_none();
         let original_name = form.original_name.clone();
         // Look up the known model list for this provider (used for route validation).
@@ -65,6 +67,21 @@ impl App {
             .collect();
 
         let is_rename = !is_new && original_name.as_deref() != Some(new_name.as_str());
+
+        let port: Option<u16> = if port_raw.is_empty() {
+            None
+        } else {
+            match port_raw.parse::<u16>() {
+                Ok(p) => Some(p),
+                Err(_) => {
+                    if let Some(f) = self.form.as_mut() {
+                        f.error =
+                            Some(format!("Port must be a number (1–65535), got '{port_raw}'"));
+                    }
+                    return Ok(());
+                }
+            }
+        };
 
         let validation_error = if new_name.is_empty() {
             Some("Name cannot be empty".to_string())
@@ -115,7 +132,24 @@ impl App {
             api_version,
             quota,
             quota_command,
+            port,
         };
+
+        // Port collision check — apply the proposed change to a temp config and let
+        // validate_ports() enforce all rules centrally, so this path stays in sync.
+        if port.is_some() {
+            let mut temp = self.config.clone();
+            if let Some(old_name) = original_name.as_deref() {
+                temp.providers.shift_remove(old_name);
+            }
+            temp.providers.insert(new_name.clone(), provider.clone());
+            if let Err(e) = temp.validate_ports() {
+                if let Some(f) = self.form.as_mut() {
+                    f.error = Some(e.to_string());
+                }
+                return Ok(());
+            }
+        }
 
         if is_rename {
             let old_name = original_name.as_deref().unwrap();

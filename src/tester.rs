@@ -187,6 +187,7 @@ mod tests {
             api_version: None,
             quota: None,
             quota_command: None,
+            port: None,
         };
 
         let started = tokio::time::Instant::now();

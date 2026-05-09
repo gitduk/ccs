@@ -1092,6 +1092,7 @@ mod tests {
             api_version,
             quota: None,
             quota_command: None,
+            port: None,
         }
     }
 

@@ -262,6 +262,7 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         .values()
         .any(|p| p.quota_command.is_some())
         || !app.quota_status.is_empty();
+    let has_port = app.config.providers.values().any(|p| p.port.is_some());
     let max_name_len = app
         .providers
         .names
@@ -279,6 +280,9 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         Cell::from("Base URL").style(hdr),
         Cell::from("API Key").style(hdr),
     ];
+    if has_port {
+        header_cells.push(Cell::from("Port").style(hdr));
+    }
     if has_quota {
         header_cells.push(Cell::from("Quota").style(hdr));
     }
@@ -355,6 +359,10 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                 Cell::from(Span::styled(provider.base_url.as_str(), detail_style)),
                 masked_api_key(&provider.api_key),
             ];
+            if has_port {
+                let port_text = provider.port.map(|p| format!(":{p}")).unwrap_or_default();
+                cells.push(Cell::from(Span::styled(port_text, detail_style)));
+            }
             if has_quota {
                 cells.push(render_quota_cell(
                     quota_status,
@@ -375,6 +383,9 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         Constraint::Length(url_col),
         Constraint::Length(key_col),
     ];
+    if has_port {
+        col_constraints.push(Constraint::Length(7)); // ":65535"
+    }
     if has_quota {
         col_constraints.push(Constraint::Length(20));
     }
@@ -509,6 +520,16 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
+    if let Some(port) = provider.and_then(|p| p.port) {
+        lines.push(Line::from(vec![
+            Span::styled("Port   ", label),
+            Span::styled(
+                format!(":{port}  (pinned listener)"),
+                Style::default().fg(t::TEXT),
+            ),
+        ]));
+    }
+
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
@@ -597,6 +618,7 @@ mod tests {
                 api_version: None,
                 quota: None,
                 quota_command: None,
+                port: None,
             },
         );
 
@@ -617,7 +639,7 @@ mod tests {
             },
         );
 
-        let mut app = App {
+        let app = App {
             config: AppConfig {
                 current: "vllm".into(),
                 listen: "127.0.0.1:0".into(),

@@ -213,6 +213,11 @@ pub struct Provider {
     /// Shell command used by the Quota panel and main-table Quota column.
     #[serde(default, alias = "quota_curl", skip_serializing_if = "Option::is_none")]
     pub quota_command: Option<String>,
+    /// Optional dedicated listening port for this provider. When set and the
+    /// provider is enabled, ccs spawns a pinned listener on this port whose
+    /// requests are routed exclusively to this provider (no fallback).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -360,6 +365,37 @@ impl AppConfig {
             .collect()
     }
 
+    /// Parse the port number out of the global `listen` address.
+    /// Returns None if `listen` is malformed (we don't fail load on bad listen
+    /// here — the bind step will surface the error).
+    pub fn listen_port(&self) -> Option<u16> {
+        self.listen.rsplit(':').next()?.parse().ok()
+    }
+
+    /// Validate provider port assignments. Rejects:
+    /// - Two providers (regardless of enabled state) sharing the same port —
+    ///   keeping the rule strict avoids "enable flip" surprises at runtime.
+    /// - A provider port that collides with the global `listen` port.
+    pub fn validate_ports(&self) -> Result<()> {
+        let mut seen: HashMap<u16, &str> = HashMap::new();
+        let listen_port = self.listen_port();
+        for (name, provider) in &self.providers {
+            let Some(port) = provider.port else { continue };
+            if Some(port) == listen_port {
+                return Err(AppError::Config(format!(
+                    "Provider '{name}' port {port} conflicts with global listen address '{}'",
+                    self.listen
+                )));
+            }
+            if let Some(other) = seen.insert(port, name.as_str()) {
+                return Err(AppError::Config(format!(
+                    "Providers '{other}' and '{name}' both claim port {port}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub fn resolve_db_path(&self) -> String {
         self.db_path.clone().unwrap_or_else(|| {
             dirs::home_dir()
@@ -400,11 +436,13 @@ pub fn load_config() -> Result<AppConfig> {
     if needs_save {
         save_config(&config)?;
     }
+    config.validate_ports()?;
     Ok(config)
 }
 
 /// Save config to file atomically (write to temp file, then rename).
 pub fn save_config(config: &AppConfig) -> Result<()> {
+    config.validate_ports()?;
     let path = config_path()?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -594,6 +632,7 @@ mod tests {
             api_version: None,
             quota: None,
             quota_command: None,
+            port: None,
         }
     }
 

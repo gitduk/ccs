@@ -348,12 +348,10 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let notes_h = *field_heights.last().unwrap_or(&3);
-    let field_constraints: Vec<Constraint> = field_heights[..field_heights.len() - 1]
+    let field_constraints: Vec<Constraint> = field_heights
         .iter()
         .map(|&h| Constraint::Length(h))
         .chain(std::iter::once(Constraint::Length(routes_height)))
-        .chain(std::iter::once(Constraint::Length(notes_h)))
         .chain(std::iter::once(Constraint::Length(3)))
         .collect();
 
@@ -362,9 +360,8 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
         .constraints(field_constraints)
         .split(inner);
 
-    let notes_field_idx = form.fields.len() - 1;
     for (i, field) in form.fields.iter().enumerate() {
-        let ci = if i < notes_field_idx { i } else { i + 1 };
+        let ci = i;
         let is_focused = i == form.focused;
         let show_cursor =
             is_focused && field.editable && (form.vim_mode == VimMode::Insert || field.is_toggle);
@@ -518,7 +515,7 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
         f.render_widget(Paragraph::new(value_display), chunks[ci]);
     }
 
-    let routes_chunk = chunks[form.fields.len() - 1];
+    let routes_chunk = chunks[form.fields.len()];
     draw_routes_section(f, form, app, routes_chunk, prov_color, in_routes);
 
     let hint_idx = form.fields.len() + 1;

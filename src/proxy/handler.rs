@@ -134,6 +134,17 @@ pub async fn handle_models(
 async fn resolve_provider_pool(
     state: &SharedState,
 ) -> Result<(Vec<(String, crate::config::Provider)>, bool), AppError> {
+    // Pinned listeners bypass global current/fallback and go directly to their provider.
+    if let Some(name) = &state.pinned_provider {
+        let config = state.config.read().await;
+        let provider = config
+            .providers
+            .get(name)
+            .filter(|p| p.enabled)
+            .ok_or_else(|| AppError::ProviderNotFound(name.clone()))?;
+        return Ok((vec![(name.clone(), provider.clone())], false));
+    }
+
     let config = state.config.read().await;
 
     if config.fallback {
@@ -845,6 +856,7 @@ mod tests {
             api_version: Some(OpenAiApiVersion::Responses),
             quota: None,
             quota_command: None,
+            port: None,
         }
     }
 
@@ -856,6 +868,7 @@ mod tests {
             metrics: Arc::new(Mutex::new(crate::proxy::metrics::TokenMetrics::default())),
             request_log: Arc::new(Mutex::new(RequestLog::default())),
             db: Repository::open(&path),
+            pinned_provider: None,
         })
     }
 
