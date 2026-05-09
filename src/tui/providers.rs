@@ -243,18 +243,6 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
             .values()
             .map(|p| api_key_display_len(&p.api_key)),
     );
-    let notes_widths: Vec<usize> = app
-        .config
-        .providers
-        .values()
-        .map(|p| p.notes.lines().next().unwrap_or("").width())
-        .collect();
-    let has_notes = notes_widths.iter().any(|&w| w > 0);
-    let notes_col = if has_notes {
-        col_width("Notes", notes_widths.into_iter()).min(30)
-    } else {
-        0
-    };
     let has_fallback_col = app.config.fallback;
     let has_quota = app
         .config
@@ -285,9 +273,6 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
     }
     if has_quota {
         header_cells.push(Cell::from("Quota").style(hdr));
-    }
-    if has_notes {
-        header_cells.push(Cell::from("Notes").style(hdr));
     }
     let header = Row::new(header_cells).height(1);
 
@@ -340,19 +325,6 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                 Span::styled(indicator, indicator_style),
             ]));
 
-            let notes_first_line = provider.notes.lines().next().unwrap_or("");
-            let notes_text = if notes_first_line.width() > notes_col as usize {
-                format!(
-                    "{}…",
-                    &notes_first_line[..notes_first_line
-                        .char_indices()
-                        .map(|(i, _)| i)
-                        .nth(notes_col.saturating_sub(1) as usize)
-                        .unwrap_or(notes_first_line.len())]
-                )
-            } else {
-                notes_first_line.to_string()
-            };
             let mut cells = vec![
                 name_cell,
                 Cell::from(Span::styled(provider.api_format.to_string(), detail_style)),
@@ -370,9 +342,6 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     terminal_width,
                 ));
             }
-            if has_notes {
-                cells.push(Cell::from(Span::styled(notes_text, detail_style)));
-            }
             Row::new(cells)
         })
         .collect();
@@ -388,9 +357,6 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
     }
     if has_quota {
         col_constraints.push(Constraint::Length(20));
-    }
-    if has_notes {
-        col_constraints.push(Constraint::Length(notes_col));
     }
     let table = Table::new(rows, col_constraints)
         .header(header)
@@ -611,7 +577,6 @@ mod tests {
                 api_key: "test-key".into(),
                 api_format: ApiFormat::OpenAI,
                 model_map: Default::default(),
-                notes: String::new(),
                 routes: vec![],
                 enabled: true,
                 fallback: true,

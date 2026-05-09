@@ -1085,7 +1085,6 @@ mod tests {
             api_key: "key".into(),
             api_format: ApiFormat::OpenAI,
             model_map: HashMap::new(),
-            notes: String::new(),
             routes: Vec::new(),
             enabled: true,
             fallback: true,

@@ -192,8 +192,6 @@ pub struct Provider {
     pub api_format: ApiFormat,
     #[serde(default)]
     pub model_map: HashMap<String, String>,
-    #[serde(default)]
-    pub notes: String,
     /// Model-routing rules. The first enabled rule whose pattern matches the
     /// incoming request model causes this provider to be selected.
     #[serde(default)]
@@ -625,7 +623,6 @@ mod tests {
             api_key: api_key.to_string(),
             api_format,
             model_map: HashMap::new(),
-            notes: String::new(),
             routes: Vec::new(),
             enabled: true,
             fallback: true,

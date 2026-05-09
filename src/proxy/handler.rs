@@ -849,7 +849,6 @@ mod tests {
             api_key: "key".into(),
             api_format: ApiFormat::Anthropic,
             model_map: HashMap::new(),
-            notes: String::new(),
             routes: Vec::new(),
             enabled,
             fallback,

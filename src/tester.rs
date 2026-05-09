@@ -180,7 +180,6 @@ mod tests {
             api_key: "test-key".into(),
             api_format: ApiFormat::OpenAI,
             model_map: Default::default(),
-            notes: String::new(),
             routes: vec![],
             enabled: true,
             fallback: true,

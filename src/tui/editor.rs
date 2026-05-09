@@ -3,15 +3,13 @@
 //! This module keeps provider form rendering and editing behavior together,
 //! including route-rule editing and model suggestions.
 
+use crate::config::RouteRule;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
-use unicode_width::UnicodeWidthStr;
-
-use crate::config::RouteRule;
 
 use super::App;
 use super::ServerHandle;
@@ -127,22 +125,10 @@ pub(super) fn handle_key(
                 form.fields[form.focused].end();
             }
             KeyCode::Char('j') | KeyCode::Down => {
-                if form.fields[form.focused].is_multiline {
-                    if !form.fields[form.focused].move_down() {
-                        form.focus_next();
-                    }
-                } else {
-                    form.focus_next();
-                }
+                form.focus_next();
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                if form.fields[form.focused].is_multiline {
-                    if !form.fields[form.focused].move_up() {
-                        form.focus_prev();
-                    }
-                } else {
-                    form.focus_prev();
-                }
+                form.focus_prev();
             }
             KeyCode::Tab => form.focus_next(),
             KeyCode::BackTab => form.focus_prev(),
@@ -169,25 +155,6 @@ pub(super) fn handle_key(
             }
             KeyCode::Home | KeyCode::Char('0') => form.fields[form.focused].home(),
             KeyCode::End | KeyCode::Char('$') => form.fields[form.focused].end(),
-            KeyCode::Char('o') if form.fields[form.focused].is_multiline => {
-                let f = &mut form.fields[form.focused];
-                if f.value.is_empty() {
-                    form.vim_mode = VimMode::Insert;
-                } else {
-                    let rest = f.value[f.cursor..].find('\n');
-                    f.cursor = rest.map_or(f.value.len(), |r| f.cursor + r);
-                    f.insert_newline();
-                    form.vim_mode = VimMode::Insert;
-                }
-            }
-            KeyCode::Char('d') if form.fields[form.focused].is_multiline => {
-                if prev == Some('d') {
-                    let focused = form.focused;
-                    form.fields[focused].delete_current_line();
-                    return Ok(());
-                }
-                form.pending_key = Some(('d', std::time::Instant::now()));
-            }
             KeyCode::Char('y') => {
                 if prev == Some('y') {
                     let value = form.fields[form.focused].value.clone();
@@ -222,41 +189,19 @@ pub(super) fn handle_key(
             return Ok(());
         }
         KeyCode::Char('j') if ctrl => {
-            if form.fields[form.focused].is_multiline {
-                form.fields[form.focused].insert_newline();
-            } else {
-                form.focus_next();
-            }
+            form.focus_next();
             return Ok(());
         }
         KeyCode::Char('k') if ctrl => {
-            if form.fields[form.focused].is_multiline {
-                if !form.fields[form.focused].move_up() {
-                    form.focus_prev();
-                }
-            } else {
-                form.focus_prev();
-            }
+            form.focus_prev();
             return Ok(());
         }
         KeyCode::Down => {
-            if form.fields[form.focused].is_multiline {
-                if !form.fields[form.focused].move_down() {
-                    form.focus_next();
-                }
-            } else {
-                form.focus_next();
-            }
+            form.focus_next();
             return Ok(());
         }
         KeyCode::Up => {
-            if form.fields[form.focused].is_multiline {
-                if !form.fields[form.focused].move_up() {
-                    form.focus_prev();
-                }
-            } else {
-                form.focus_prev();
-            }
+            form.focus_prev();
             return Ok(());
         }
         _ => {}
@@ -312,19 +257,7 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
         vim_tag
     );
 
-    let field_heights: Vec<u16> = form
-        .fields
-        .iter()
-        .enumerate()
-        .map(|(i, field)| {
-            if field.is_multiline && i == form.focused {
-                let line_count = field.value.chars().filter(|&c| c == '\n').count() + 1;
-                (line_count as u16 + 2).max(3)
-            } else {
-                3
-            }
-        })
-        .collect();
+    let field_heights: Vec<u16> = vec![2; form.fields.len()];
     let fields_total: u16 = field_heights.iter().sum();
     let routes_items = form.routes.len().max(1) as u16;
     let suggest_section = if suggest_items > 0 {
@@ -392,87 +325,6 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
                 spans.push(Span::styled(format!(" {opt} "), style));
             }
             Line::from(spans)
-        } else if field.is_multiline {
-            if show_cursor {
-                let cursor_pos = field.cursor.min(field.value.len());
-                let before_cursor = &field.value[..cursor_pos];
-                let cursor_row = before_cursor.chars().filter(|&c| c == '\n').count() as u16;
-                let last_nl = before_cursor.rfind('\n').map(|p| p + 1).unwrap_or(0);
-                let cursor_col = before_cursor[last_nl..].width() as u16;
-                let lines: Vec<Line> = field
-                    .value
-                    .split('\n')
-                    .enumerate()
-                    .map(|(row, line)| {
-                        if row == cursor_row as usize {
-                            let col = cursor_col as usize;
-                            let byte_col = line
-                                .char_indices()
-                                .nth(col)
-                                .map(|(b, _)| b)
-                                .unwrap_or(line.len());
-                            let before = &line[..byte_col];
-                            let cursor_char = line[byte_col..].chars().next().unwrap_or(' ');
-                            let after_start =
-                                byte_col + cursor_char.len_utf8().min(line.len() - byte_col);
-                            let after = &line[after_start..];
-                            Line::from(vec![
-                                Span::raw(before.to_string()),
-                                Span::styled(
-                                    cursor_char.to_string(),
-                                    Style::default()
-                                        .fg(prov_color)
-                                        .add_modifier(Modifier::REVERSED),
-                                ),
-                                Span::raw(after.to_string()),
-                            ])
-                        } else {
-                            Line::from(line.to_string())
-                        }
-                    })
-                    .collect();
-                let label_line =
-                    Line::from(Span::styled(format!("{:<10}", field.label), label_style));
-                let mut all_lines = vec![label_line];
-                all_lines.extend(lines);
-                f.render_widget(Paragraph::new(all_lines), chunks[ci]);
-                continue;
-            } else if is_focused {
-                let cursor_pos = field.cursor.min(field.value.len());
-                let before_cursor = &field.value[..cursor_pos];
-                let cursor_row = before_cursor.chars().filter(|&c| c == '\n').count();
-                let label_line =
-                    Line::from(Span::styled(format!("{:<10}", field.label), label_style));
-                let lines: Vec<Line> = field
-                    .value
-                    .split('\n')
-                    .enumerate()
-                    .map(|(row, l)| {
-                        if row == cursor_row {
-                            Line::from(Span::styled(l.to_string(), Style::default().fg(prov_color)))
-                        } else {
-                            Line::from(Span::raw(l.to_string()))
-                        }
-                    })
-                    .collect();
-                let mut all_lines = vec![label_line];
-                all_lines.extend(lines);
-                f.render_widget(Paragraph::new(all_lines), chunks[ci]);
-                continue;
-            }
-            let first_line = field.value.lines().next().unwrap_or("");
-            let label_line = Line::from(Span::styled(format!("{:<10}", field.label), label_style));
-            let content_chars: Vec<char> = first_line.chars().collect();
-            let max_w = chunks[ci].width.saturating_sub(2) as usize;
-            let display_str = if content_chars.len() > max_w && max_w > 1 {
-                let truncated: String = content_chars[..max_w - 1].iter().collect();
-                format!("{}\u{2026}", truncated)
-            } else {
-                first_line.to_string()
-            };
-            let content_line = Line::from(Span::styled(display_str, Style::default().fg(t::MUTED)));
-            f.render_widget(Paragraph::new(vec![label_line, content_line]), chunks[ci]);
-            continue;
         } else {
             let display_val = if field.label == "API Key" && !is_focused {
                 mask_api_key_str(&field.value).unwrap_or_else(|| field.value.clone())
@@ -567,24 +419,13 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
                 ])
             }
         } else if form.vim_mode == VimMode::Insert {
-            let focused_field = &form.fields[form.focused];
-            if focused_field.is_multiline {
-                Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled("Esc", Style::default().fg(t::WARNING)),
-                    Span::styled(" Normal  ", Style::default().fg(t::MUTED)),
-                    Span::styled("^J", Style::default().fg(t::PRIMARY)),
-                    Span::styled(" Newline", Style::default().fg(t::MUTED)),
-                ])
-            } else {
-                Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled("Esc", Style::default().fg(t::WARNING)),
-                    Span::styled(" Normal  ", Style::default().fg(t::MUTED)),
-                    Span::styled("Tab", Style::default().fg(t::PRIMARY)),
-                    Span::styled(" Next field", Style::default().fg(t::MUTED)),
-                ])
-            }
+            Line::from(vec![
+                Span::raw("   "),
+                Span::styled("Esc", Style::default().fg(t::WARNING)),
+                Span::styled(" Normal  ", Style::default().fg(t::MUTED)),
+                Span::styled("Tab", Style::default().fg(t::PRIMARY)),
+                Span::styled(" Next field", Style::default().fg(t::MUTED)),
+            ])
         } else {
             Line::from(vec![
                 Span::raw("   "),

@@ -2,8 +2,7 @@ use crate::config::{self, ApiFormat, OpenAiApiVersion};
 use crate::error::Result;
 
 use super::{
-    App, ConfirmAction, FALLBACK_FIELD_IDX, MessageKind, Mode, NOTES_FIELD_IDX, PORT_FIELD_IDX,
-    ProviderForm,
+    App, ConfirmAction, FALLBACK_FIELD_IDX, MessageKind, Mode, PORT_FIELD_IDX, ProviderForm,
 };
 
 impl App {
@@ -42,10 +41,6 @@ impl App {
         let api_key = form.fields[2].value.trim().to_string();
         let format_str = form.fields[3].value.trim().to_string();
         let fallback = form.fields[FALLBACK_FIELD_IDX].value.trim() == "yes";
-        let notes = form.fields[NOTES_FIELD_IDX]
-            .value
-            .trim_matches('\n')
-            .to_string();
         let port_raw = form.fields[PORT_FIELD_IDX].value.trim().to_string();
         let is_new = form.original_name.is_none();
         let original_name = form.original_name.clone();
@@ -125,7 +120,6 @@ impl App {
             api_key,
             api_format,
             model_map,
-            notes: notes.clone(),
             routes,
             enabled,
             fallback,
@@ -208,9 +202,6 @@ impl App {
                 f.clamp_route_cursor();
                 f.original_name = Some(new_name);
                 f.error = None;
-                f.fields[NOTES_FIELD_IDX].cursor =
-                    f.fields[NOTES_FIELD_IDX].cursor.min(notes.len());
-                f.fields[NOTES_FIELD_IDX].value = notes;
             }
         }
 

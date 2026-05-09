@@ -3,9 +3,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 pub(super) const FALLBACK_FIELD_IDX: usize = 4;
-pub(super) const NOTES_FIELD_IDX: usize = 5;
 /// Index of the Port field inside `ProviderForm::fields`.
-pub(super) const PORT_FIELD_IDX: usize = 6;
+pub(super) const PORT_FIELD_IDX: usize = 5;
 
 use ratatui::widgets::TableState;
 
@@ -265,7 +264,6 @@ pub struct FormField {
     pub cursor: usize,
     pub editable: bool,
     pub is_toggle: bool,
-    pub is_multiline: bool,
     /// Valid only when `is_toggle = true`. Lists the values the toggle cycles through (first = left, second = right).
     pub toggle_options: &'static [&'static str],
 }
@@ -281,7 +279,6 @@ impl FormField {
             cursor: 0,
             editable: true,
             is_toggle: false,
-            is_multiline: false,
             toggle_options: &[],
         }
     }
@@ -293,7 +290,6 @@ impl FormField {
             cursor: value.len(),
             editable: true,
             is_toggle: false,
-            is_multiline: false,
             toggle_options: &[],
         }
     }
@@ -314,49 +310,13 @@ impl FormField {
             cursor: 0,
             editable: true,
             is_toggle: true,
-            is_multiline: false,
             toggle_options: options,
-        }
-    }
-
-    pub(super) fn multiline(label: &'static str, value: &str) -> Self {
-        Self {
-            label,
-            value: value.to_string(),
-            cursor: value.len(),
-            editable: true,
-            is_toggle: false,
-            is_multiline: true,
-            toggle_options: &[],
         }
     }
 
     pub fn insert_newline(&mut self) {
         self.value.insert(self.cursor, '\n');
         self.cursor += 1;
-    }
-
-    /// Delete the line the cursor is on. The adjacent newline is also removed.
-    pub fn delete_current_line(&mut self) {
-        if self.value.is_empty() {
-            return;
-        }
-        let before = &self.value[..self.cursor];
-        let line_start = before.rfind('\n').map(|p| p + 1).unwrap_or(0);
-        let line_end = self.value[self.cursor..]
-            .find('\n')
-            .map(|p| self.cursor + p)
-            .unwrap_or(self.value.len());
-        // Include the adjacent newline so we don't leave a blank line behind.
-        let (remove_start, remove_end) = if line_end < self.value.len() {
-            (line_start, line_end + 1) // consume trailing '\n'
-        } else if line_start > 0 {
-            (line_start - 1, line_end) // consume preceding '\n'
-        } else {
-            (line_start, line_end) // only line — clear entirely
-        };
-        self.value.drain(remove_start..remove_end);
-        self.cursor = remove_start.min(self.value.len());
     }
 
     /// Move cursor up one line within a multiline field.
@@ -526,7 +486,7 @@ impl ProviderForm {
     /// Create a new form for adding or editing a provider.
     pub(super) fn new(name: &str, provider: Option<&Provider>) -> Self {
         use crate::config::{ApiFormat, OpenAiApiVersion};
-        let (base_url, api_key, format, fallback, notes, port_str, routes) = match provider {
+        let (base_url, api_key, format, fallback, port_str, routes) = match provider {
             Some(p) => {
                 let fmt = match p.api_format {
                     ApiFormat::Anthropic => "anthropic",
@@ -548,12 +508,11 @@ impl ProviderForm {
                     p.api_key.as_str(),
                     fmt,
                     fb,
-                    p.notes.as_str(),
                     port,
                     p.routes.clone(),
                 )
             }
-            None => ("", "", "anthropic", "no", "", String::new(), vec![]),
+            None => ("", "", "anthropic", "no", String::new(), vec![]),
         };
         Self {
             original_name: if name.is_empty() {
@@ -571,7 +530,6 @@ impl ProviderForm {
                     &["anthropic", "openai-chat", "openai-responses"],
                 ),
                 FormField::toggle("Fallback", fallback, &["yes", "no"]),
-                FormField::multiline("Notes", notes),
                 FormField::text("Port", &port_str),
             ],
             focused: 0,
@@ -614,14 +572,14 @@ impl ProviderForm {
     }
 
     /// Move focus to the next editable slot.
-    /// Visual order: Name → Base URL → API Key → Format → Fallback → Notes → Port → Routes → (wrap)
+    /// Visual order: Name → Base URL → API Key → Format → Fallback → Port → Routes → (wrap)
     pub fn focus_next(&mut self) {
         let routes_slot = self.fields.len(); // virtual index for Routes (past last regular field)
 
         let next = if self.focused == routes_slot {
             0 // Routes → Name (wrap)
         } else {
-            self.focused + 1 // sequential: Port(6) → Routes(7) naturally
+            self.focused + 1 // sequential: Port(5) → Routes(6) naturally
         };
 
         self.focused = next;
@@ -635,14 +593,14 @@ impl ProviderForm {
     }
 
     /// Move focus to the previous editable slot.
-    /// Visual order (reverse): Routes → Port → Notes → Fallback → Format → API Key → Base URL → Name → (wrap)
+    /// Visual order (reverse): Routes → Port → Fallback → Format → API Key → Base URL → Name → (wrap)
     pub fn focus_prev(&mut self) {
         let routes_slot = self.fields.len();
 
         let prev = if self.focused == 0 {
             routes_slot // Name → Routes (wrap)
         } else {
-            self.focused - 1 // sequential: Routes(7) → Port(6) → Notes(5) → ...
+            self.focused - 1 // sequential: Routes(6) → Port(5) → ...
         };
 
         self.focused = prev;
@@ -662,7 +620,7 @@ impl QuotaForm {
     pub(super) fn new(provider_name: &str, saved_curl: Option<&str>) -> Self {
         Self {
             provider_name: provider_name.to_string(),
-            curl_field: FormField::multiline("cURL", saved_curl.unwrap_or("")),
+            curl_field: FormField::text("cURL", saved_curl.unwrap_or("")),
             vim_mode: VimMode::Normal,
             pending_key: None,
             error: None,
@@ -701,7 +659,6 @@ mod tests {
                 api_key: "test-key".into(),
                 api_format: ApiFormat::OpenAI,
                 model_map: Default::default(),
-                notes: String::new(),
                 routes: vec![],
                 enabled: true,
                 fallback: true,
