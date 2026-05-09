@@ -209,19 +209,17 @@ pub async fn start_server(config: AppConfig) -> crate::error::Result<()> {
             while sig.recv().await.is_some() {
                 match crate::config::load_config() {
                     Ok(new_cfg) => {
-                        let mut cfg = reload_config.write().await;
-                        if cfg.listen != new_cfg.listen {
-                            tracing::warn!("SIGHUP: listen address changed — restart required");
-                        }
-                        *cfg = new_cfg.clone();
+                        let desired = {
+                            let mut cfg = reload_config.write().await;
+                            if cfg.listen != new_cfg.listen {
+                                tracing::warn!("SIGHUP: listen address changed — restart required");
+                            }
+                            *cfg = new_cfg;
+                            desired_pinned(&cfg)
+                        };
                         tracing::info!("SIGHUP: config reloaded");
-                        reconcile_pinned(
-                            desired_pinned(&new_cfg),
-                            &mut *pinned.lock().await,
-                            &host,
-                            &base_state,
-                        )
-                        .await;
+                        reconcile_pinned(desired, &mut *pinned.lock().await, &host, &base_state)
+                            .await;
                     }
                     Err(e) => tracing::error!("SIGHUP: failed to reload config: {e}"),
                 }
