@@ -332,7 +332,7 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                 masked_api_key(&provider.api_key),
             ];
             if has_port {
-                let port_text = provider.port.map(|p| format!(":{p}")).unwrap_or_default();
+                let port_text = provider.port.map(|p| p.to_string()).unwrap_or_default();
                 cells.push(Cell::from(Span::styled(port_text, detail_style)));
             }
             if has_quota {
