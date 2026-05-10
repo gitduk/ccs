@@ -203,8 +203,20 @@ pub(super) fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
             .unwrap_or(1);
         let log_max = ((max_total + 1) as f64).ln();
 
-        for ((_model, input, output), display_name) in
-            model_entries.iter().zip(display_names.iter())
+        let lines_so_far = lines.len();
+        let available = (inner.height as usize).saturating_sub(lines_so_far + 1);
+        let (visible_count, hidden_count) = if model_entries.len() <= available {
+            (model_entries.len(), 0)
+        } else {
+            (
+                available.saturating_sub(1),
+                model_entries.len() - available.saturating_sub(1),
+            )
+        };
+
+        for ((_model, input, output), display_name) in model_entries[..visible_count]
+            .iter()
+            .zip(display_names[..visible_count].iter())
         {
             let total = input + output;
             let total_bar = if bar_area > 0 && total > 0 {
@@ -245,7 +257,14 @@ pub(super) fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
                 ),
             ]));
         }
+        if hidden_count > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("… {} more", hidden_count),
+                muted,
+            )));
+        }
     }
 
+    lines.push(Line::from(""));
     f.render_widget(Paragraph::new(lines), inner);
 }
