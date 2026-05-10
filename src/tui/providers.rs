@@ -17,8 +17,8 @@ use crate::tester::TestStatus;
 use super::state::{App, ConfirmAction, MessageKind, Mode, QuotaStatus};
 use super::theme::{self as t};
 use super::ui::format::{
-    all_providers_detail_height, api_key_display_len, col_width, config_path_display, fmt_latency,
-    masked_api_key, pack_routes, truncate_chars, truncate_error,
+    api_key_display_len, col_width, config_path_display, fmt_latency, masked_api_key,
+    truncate_chars, truncate_error,
 };
 use super::{ServerHandle, server};
 
@@ -508,42 +508,7 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &mut App, area: Rect) {
         ]));
     }
 
-    let provider = app.config.providers.get(name.as_str());
-    let enabled_routes: Vec<&crate::config::RouteRule> = provider
-        .map(|p| p.routes.iter().filter(|r| r.enabled).collect())
-        .unwrap_or_default();
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Routes",
-        Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD),
-    )));
-    if enabled_routes.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("Press ", Style::default().fg(t::MUTED)),
-            Span::styled(
-                "[e]",
-                Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" to edit and add routes", Style::default().fg(t::MUTED)),
-        ]));
-    } else {
-        let avail = (area.width as usize).saturating_sub(4);
-        for group in pack_routes(&enabled_routes, avail) {
-            let mut spans: Vec<Span> = vec![];
-            for (i, route) in group.iter().enumerate() {
-                if i > 0 {
-                    spans.push(Span::raw("  "));
-                }
-                spans.push(Span::styled(&route.pattern, Style::default().fg(t::TEXT)));
-                spans.push(Span::styled(" → ", Style::default().fg(t::MUTED)));
-                spans.push(Span::raw(&route.target));
-            }
-            lines.push(Line::from(spans));
-        }
-    }
-
-    let avail = (area.width as usize).saturating_sub(4);
-    app.detail_line_count = all_providers_detail_height(app.config.providers.values(), avail);
+    app.detail_line_count = super::ui::format::DETAIL_HEIGHT;
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 

@@ -38,13 +38,7 @@ impl App {
 
         let bg_proxy_pid = super::bg_proxy::load_bg_proxy_pid();
 
-        let term_avail = crossterm::terminal::size()
-            .map(|(w, _)| (w as usize).saturating_sub(4))
-            .unwrap_or(76);
-        let detail_line_count = {
-            use crate::tui::ui::format::all_providers_detail_height;
-            all_providers_detail_height(config.providers.values(), term_avail)
-        };
+        let detail_line_count = crate::tui::ui::format::DETAIL_HEIGHT;
 
         Ok(Self {
             config,
