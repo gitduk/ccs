@@ -20,7 +20,7 @@ use crate::proxy::metrics::RequestLogEntry;
 pub(super) fn handle_key(
     app: &mut App,
     code: KeyCode,
-    modifiers: KeyModifiers,
+    _modifiers: KeyModifiers,
 ) -> crate::error::Result<()> {
     let total = app
         .request_log
@@ -54,10 +54,10 @@ pub(super) fn handle_key(
             app.logs.selected = 0;
             app.logs.detail_scroll = 0;
         }
-        KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char('J') => {
             app.logs.detail_scroll = app.logs.detail_scroll.saturating_add(1);
         }
-        KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char('K') => {
             app.logs.detail_scroll = app.logs.detail_scroll.saturating_sub(1);
         }
         _ => {}
@@ -134,7 +134,7 @@ pub(super) fn draw_popup(f: &mut Frame, app: &mut App) {
     draw_detail(f, &entries[selected], detail_inner, app.logs.detail_scroll);
 
     let footer = format!(
-        " {} requests  [j/k] navigate  [Ctrl+D/U] scroll detail  [q/Esc] close",
+        " {} requests  [j/k] navigate  [Shift+J/K] scroll detail  [q/Esc] close",
         total
     );
     draw_footer(f, area, &footer);
@@ -506,8 +506,50 @@ fn format_time(ts: std::time::SystemTime) -> String {
 }
 
 fn pretty_json(s: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(s)
-        .ok()
-        .and_then(|v| serde_json::to_string_pretty(&v).ok())
-        .unwrap_or_else(|| s.to_string())
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
+        return serde_json::to_string_pretty(&v).unwrap_or_else(|_| s.to_string());
+    }
+    // Truncated JSON: count unclosed delimiters and close them
+    let mut in_string = false;
+    let mut escape = false;
+    let mut brace_depth: i32 = 0;
+    let mut bracket_depth: i32 = 0;
+    for ch in s.chars() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if in_string {
+            match ch {
+                '\\' => escape = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+        } else {
+            match ch {
+                '"' => in_string = true,
+                '{' => brace_depth += 1,
+                '}' => brace_depth -= 1,
+                '[' => bracket_depth += 1,
+                ']' => bracket_depth -= 1,
+                _ => {}
+            }
+        }
+    }
+    let mut repaired = s.to_string();
+    if in_string {
+        repaired.push('"');
+    }
+    for _ in 0..bracket_depth.max(0) {
+        repaired.push(']');
+    }
+    for _ in 0..brace_depth.max(0) {
+        repaired.push('}');
+    }
+    if repaired.len() > s.len()
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&repaired)
+    {
+        return serde_json::to_string_pretty(&v).unwrap_or_else(|_| s.to_string());
+    }
+    s.to_string()
 }
