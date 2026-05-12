@@ -14,6 +14,20 @@ use crate::proxy::executor::{
 use crate::proxy::metrics::{RequestLogEntry, SharedRequestLog};
 use crate::proxy::transform;
 
+const REQUEST_BODY_MAX: usize = 4096;
+const RESPONSE_BODY_MAX: usize = 2048;
+
+fn truncate_body(bytes: &[u8], max: usize) -> String {
+    let s = String::from_utf8_lossy(bytes);
+    if s.len() <= max {
+        s.into_owned()
+    } else {
+        let mut truncated = s[..max].to_string();
+        truncated.push_str("…[truncated]");
+        truncated
+    }
+}
+
 /// Wire format expected by the *client* (the caller of this proxy). The proxy
 /// always normalises to Anthropic internally, then converts to the client
 /// format on the way out.
@@ -208,6 +222,8 @@ async fn try_providers(
         .unwrap_or("")
         .to_string();
 
+    let request_body_str = truncate_body(ctx.body, REQUEST_BODY_MAX);
+
     let record_failure = |state: &SharedState, pkey: &ProviderKey| {
         state.db.persist_stats_async(
             &pkey.id,
@@ -228,7 +244,12 @@ async fn try_providers(
             }
         };
 
-    let push_request_log = |provider: &str, status: u16, latency_ms: u64, error: String| {
+    let push_request_log = |provider: &str,
+                            status: u16,
+                            latency_ms: u64,
+                            error: String,
+                            req_body: Option<String>,
+                            resp_body: Option<String>| {
         let entry = RequestLogEntry {
             id: 0,
             timestamp: std::time::SystemTime::now(),
@@ -240,6 +261,8 @@ async fn try_providers(
             output_tokens: 0,
             is_stream: ctx.is_stream,
             error: Some(error),
+            request_body: req_body,
+            response_body: resp_body,
         };
         if let Ok(id) = state
             .request_log
@@ -359,7 +382,14 @@ async fn try_providers(
             last_error_body = Some(error_body.clone());
             auth_failures += 1;
             if !do_cycle || auth_failures >= max_auth_failures {
-                push_request_log(provider_name, status_u16, latency_ms, preview);
+                push_request_log(
+                    provider_name,
+                    status_u16,
+                    latency_ms,
+                    preview,
+                    Some(request_body_str.clone()),
+                    Some(truncate_body(&error_body, RESPONSE_BODY_MAX)),
+                );
                 return Ok(
                     (status, [("content-type", "application/json")], error_body).into_response()
                 );
@@ -382,7 +412,14 @@ async fn try_providers(
             tracing::warn!("Upstream returned {status}: {preview}");
             record_failure(state, &pkey);
             record_error_metric(state, provider_name, status_u16, &preview, &route_pattern);
-            push_request_log(provider_name, status_u16, latency_ms, preview);
+            push_request_log(
+                provider_name,
+                status_u16,
+                latency_ms,
+                preview,
+                Some(request_body_str.clone()),
+                Some(truncate_body(&error_body, RESPONSE_BODY_MAX)),
+            );
             return Ok((status, [("content-type", "application/json")], error_body).into_response());
         }
 
@@ -408,6 +445,8 @@ async fn try_providers(
             output_tokens: 0,
             is_stream: ctx.is_stream,
             error: None,
+            request_body: Some(request_body_str.clone()),
+            response_body: None,
         };
         let entry_id = if let Ok(mut log) = state.request_log.lock() {
             let id = log.push(initial_entry.clone());
@@ -481,6 +520,10 @@ async fn try_providers(
         final_status.as_u16(),
         t0.elapsed().as_millis() as u64,
         "all providers failed".into(),
+        Some(request_body_str.clone()),
+        last_error_body
+            .as_ref()
+            .map(|b| truncate_body(b, RESPONSE_BODY_MAX)),
     );
 
     let body =
@@ -572,6 +615,19 @@ async fn handle_buffered_response(
         name: provider_name,
     } = pkey;
     let body = response.bytes().await?;
+
+    // Capture the raw upstream response for diagnostics.
+    let resp_body_str = truncate_body(&body, RESPONSE_BODY_MAX);
+    log_entry.response_body = Some(resp_body_str.clone());
+    if let Ok(mut log) = request_log.lock()
+        && let Some(entry) = log
+            .entries_mut()
+            .iter_mut()
+            .rev()
+            .find(|e| e.id == entry_id)
+    {
+        entry.response_body = Some(resp_body_str);
+    }
 
     // Normalise provider response to the Anthropic canonical form for token
     // extraction. Keep the raw bytes around so the Anthropic→Anthropic
@@ -905,6 +961,8 @@ mod tests {
                 output_tokens: 0,
                 is_stream: true,
                 error: None,
+                request_body: None,
+                response_body: None,
             })
         };
 

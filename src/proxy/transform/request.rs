@@ -110,19 +110,20 @@ pub fn to_openai(req: &Value, provider: &Provider, api_version: OpenAiApiVersion
         && let Some(enabled) = thinking.get("enabled").and_then(|e| e.as_bool())
         && enabled
     {
-        // Responses API sets reasoning_effort unconditionally;
-        // Chat Completions only sets it when budget_tokens is present.
+        // Responses API uses reasoning.effort nested object;
+        // Chat Completions uses top-level reasoning_effort.
         if let Some(budget) = thinking.get("budget_tokens") {
-            result["reasoning_effort"] = json!("high");
             if is_responses {
+                result["reasoning"] = json!({"effort": "high"});
                 if result.get("max_output_tokens").is_none() {
                     result["max_output_tokens"] = budget.clone();
                 }
             } else {
+                result["reasoning_effort"] = json!("high");
                 result["max_completion_tokens"] = budget.clone();
             }
         } else if is_responses {
-            result["reasoning_effort"] = json!("high");
+            result["reasoning"] = json!({"effort": "high"});
         }
     }
 
@@ -1487,7 +1488,7 @@ mod tests {
             "thinking": {"enabled": true, "budget_tokens": 77}
         });
         let out = anthropic_to_openai_request(&req, &provider_responses()).unwrap();
-        assert_eq!(out["reasoning_effort"], "high");
+        assert_eq!(out["reasoning"]["effort"], "high");
         assert_eq!(out["max_output_tokens"], 77);
         assert!(out.get("max_completion_tokens").is_none());
     }

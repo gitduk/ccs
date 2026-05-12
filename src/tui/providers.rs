@@ -656,6 +656,7 @@ mod tests {
             logs: LogsState {
                 selected: 0,
                 scroll: 0,
+                detail_scroll: 0,
             },
             message_log: std::collections::VecDeque::new(),
             seen_provider_errors: std::collections::HashMap::new(),

@@ -154,6 +154,8 @@ pub struct LogsState {
     pub selected: usize,
     /// Scroll offset (rows) for the log list.
     pub scroll: u16,
+    /// Scroll offset (rows) for the detail panel.
+    pub detail_scroll: u16,
 }
 
 /// Command execution result shown in the Quota column.
@@ -714,6 +716,7 @@ mod tests {
             logs: super::LogsState {
                 selected: 0,
                 scroll: 0,
+                detail_scroll: 0,
             },
             message_log: std::collections::VecDeque::new(),
             seen_provider_errors: std::collections::HashMap::new(),

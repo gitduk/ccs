@@ -34,7 +34,7 @@ pub(super) fn handle_key(
             app.mode = Mode::Normal;
             Ok(())
         }
-        Mode::Logs => super::logs::handle_key(app, code),
+        Mode::Logs => super::logs::handle_key(app, code, modifiers),
         Mode::Models => super::models::handle_key(app, code, modifiers),
     }
 }

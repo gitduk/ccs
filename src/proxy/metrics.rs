@@ -81,6 +81,10 @@ pub struct RequestLogEntry {
     pub output_tokens: u64,
     pub is_stream: bool,
     pub error: Option<String>,
+    /// Truncated JSON body sent to the upstream provider.
+    pub request_body: Option<String>,
+    /// Truncated JSON body returned by the upstream provider (error or success).
+    pub response_body: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -172,6 +176,8 @@ mod tests {
             output_tokens: 0,
             is_stream: false,
             error: None,
+            request_body: None,
+            response_body: None,
         }
     }
 
@@ -189,6 +195,8 @@ mod tests {
             output_tokens: 0,
             is_stream: false,
             error: None,
+            request_body: None,
+            response_body: None,
         });
 
         log.backfill(id, 1234, 5678, Some("gpt-5.4"));

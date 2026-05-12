@@ -64,7 +64,9 @@ fn init_schema(conn: &Connection) -> Result<()> {
             input_tokens  INTEGER NOT NULL DEFAULT 0,
             output_tokens INTEGER NOT NULL DEFAULT 0,
             is_stream     INTEGER NOT NULL DEFAULT 0,
-            error         TEXT
+            error         TEXT,
+            request_body  TEXT,
+            response_body TEXT
         );",
     )?;
     // Add latency_total column to existing DBs that predate this field.
@@ -72,6 +74,11 @@ fn init_schema(conn: &Connection) -> Result<()> {
         "ALTER TABLE provider_stats ADD COLUMN latency_total INTEGER NOT NULL DEFAULT 0",
     )
     .ok(); // Ignore error — column already exists on fresh DBs.
+    // Migrate older DBs that predate request/response body columns.
+    conn.execute_batch("ALTER TABLE request_log ADD COLUMN request_body TEXT")
+        .ok();
+    conn.execute_batch("ALTER TABLE request_log ADD COLUMN response_body TEXT")
+        .ok();
     Ok(())
 }
 
@@ -385,8 +392,8 @@ pub fn insert_request_log(
     conn.execute(
         "INSERT OR IGNORE INTO request_log
              (id, timestamp_ms, provider_name, model, status, latency_ms,
-              input_tokens, output_tokens, is_stream, error)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+              input_tokens, output_tokens, is_stream, error, request_body, response_body)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             entry.id,
             ts,
@@ -398,6 +405,8 @@ pub fn insert_request_log(
             entry.output_tokens,
             entry.is_stream as i64,
             entry.error.as_deref(),
+            entry.request_body.as_deref(),
+            entry.response_body.as_deref(),
         ],
     )?;
     Ok(())
@@ -427,7 +436,7 @@ pub fn load_recent_request_logs(
 ) -> Vec<crate::proxy::metrics::RequestLogEntry> {
     let Ok(mut stmt) = conn.prepare(
         "SELECT id, timestamp_ms, provider_name, model, status, latency_ms,
-                input_tokens, output_tokens, is_stream, error
+                input_tokens, output_tokens, is_stream, error, request_body, response_body
          FROM request_log
          ORDER BY timestamp_ms DESC, id DESC
          LIMIT ?1",
@@ -439,6 +448,8 @@ pub fn load_recent_request_logs(
         let ts_ms: i64 = row.get(1)?;
         let is_stream: i64 = row.get(8)?;
         let error: Option<String> = row.get(9)?;
+        let request_body: Option<String> = row.get(10)?;
+        let response_body: Option<String> = row.get(11)?;
         Ok(crate::proxy::metrics::RequestLogEntry {
             id: row.get(0)?,
             timestamp: std::time::SystemTime::UNIX_EPOCH
@@ -451,6 +462,8 @@ pub fn load_recent_request_logs(
             output_tokens: row.get(7)?,
             is_stream: is_stream != 0,
             error,
+            request_body,
+            response_body,
         })
     });
 

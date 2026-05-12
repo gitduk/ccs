@@ -3,7 +3,7 @@
 //! This module renders both the request log viewer and the right-column
 //! logs/messages panel on the main screen.
 
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -17,7 +17,11 @@ use super::ui::format::{fmt_latency, format_tokens, shorten_model_name};
 use super::ui::layout::{BORDER_INNER_DIVIDER, DASH, TITLE_SIDE, centered_rect};
 use crate::proxy::metrics::RequestLogEntry;
 
-pub(super) fn handle_key(app: &mut App, code: KeyCode) -> crate::error::Result<()> {
+pub(super) fn handle_key(
+    app: &mut App,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> crate::error::Result<()> {
     let total = app
         .request_log
         .lock()
@@ -31,20 +35,30 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode) -> crate::error::Result<(
         KeyCode::Up | KeyCode::Char('k') => {
             if app.logs.selected > 0 {
                 app.logs.selected -= 1;
+                app.logs.detail_scroll = 0;
             }
         }
         KeyCode::Down | KeyCode::Char('j') => {
             if total > 0 && app.logs.selected < total - 1 {
                 app.logs.selected += 1;
+                app.logs.detail_scroll = 0;
             }
         }
         KeyCode::Char('G') => {
             if total > 0 {
                 app.logs.selected = total - 1;
+                app.logs.detail_scroll = 0;
             }
         }
         KeyCode::Char('g') => {
             app.logs.selected = 0;
+            app.logs.detail_scroll = 0;
+        }
+        KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
+            app.logs.detail_scroll = app.logs.detail_scroll.saturating_add(1);
+        }
+        KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
+            app.logs.detail_scroll = app.logs.detail_scroll.saturating_sub(1);
         }
         _ => {}
     }
@@ -117,9 +131,12 @@ pub(super) fn draw_popup(f: &mut Frame, app: &mut App) {
         .padding(Padding::new(1, 0, 0, 0));
     let detail_inner = detail_block.inner(detail_area);
     f.render_widget(detail_block, detail_area);
-    draw_detail(f, &entries[selected], detail_inner);
+    draw_detail(f, &entries[selected], detail_inner, app.logs.detail_scroll);
 
-    let footer = format!(" {} requests  [j/k] navigate  [q/Esc] close", total);
+    let footer = format!(
+        " {} requests  [j/k] navigate  [Ctrl+D/U] scroll detail  [q/Esc] close",
+        total
+    );
     draw_footer(f, area, &footer);
 }
 
@@ -175,7 +192,7 @@ fn render_log_list(
     f.render_widget(Paragraph::new(lines), area);
 }
 
-fn draw_detail(f: &mut Frame, entry: &RequestLogEntry, area: Rect) {
+fn draw_detail(f: &mut Frame, entry: &RequestLogEntry, area: Rect, detail_scroll: u16) {
     let label = Style::default().fg(t::MUTED);
     let value = Style::default().fg(t::TEXT);
     let status_style = if entry.error.is_some() || entry.status >= 400 {
@@ -219,22 +236,41 @@ fn draw_detail(f: &mut Frame, entry: &RequestLogEntry, area: Rect) {
         ]),
     ];
 
-    if let Some(err) = &entry.error {
+    // Request body
+    if let Some(req_body) = &entry.request_body {
         lines.push(Line::raw(""));
         lines.push(Line::from(Span::styled(
-            "Error:",
-            Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD),
+            "Request:",
+            Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD),
         )));
+        let pretty = pretty_json(req_body);
         let avail = area.width.saturating_sub(2) as usize;
-        for chunk in wrap_text(err, avail) {
+        for chunk in wrap_text(&pretty, avail) {
             lines.push(Line::from(Span::styled(
                 format!("  {chunk}"),
-                Style::default().fg(t::ERROR),
+                Style::default().fg(t::MUTED),
             )));
         }
     }
 
-    f.render_widget(Paragraph::new(lines), area);
+    // Response body
+    if let Some(resp_body) = &entry.response_body {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "Response:",
+            Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD),
+        )));
+        let pretty = pretty_json(resp_body);
+        let avail = area.width.saturating_sub(2) as usize;
+        for chunk in wrap_text(&pretty, avail) {
+            lines.push(Line::from(Span::styled(
+                format!("  {chunk}"),
+                Style::default().fg(t::MUTED),
+            )));
+        }
+    }
+
+    f.render_widget(Paragraph::new(lines).scroll((detail_scroll, 0)), area);
 }
 
 pub(super) fn draw_panel(f: &mut Frame, app: &App, area: Rect, messages_height: u16) {
@@ -467,4 +503,11 @@ fn format_time(ts: std::time::SystemTime) -> String {
     } else {
         format!("{}h", secs / 3600)
     }
+}
+
+fn pretty_json(s: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(s)
+        .ok()
+        .and_then(|v| serde_json::to_string_pretty(&v).ok())
+        .unwrap_or_else(|| s.to_string())
 }
