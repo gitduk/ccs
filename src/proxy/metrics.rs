@@ -69,7 +69,7 @@ pub type SharedMetrics = Arc<Mutex<TokenMetrics>>;
 
 const REQUEST_LOG_CAPACITY: usize = 200;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestLogEntry {
     pub id: u64,
     pub timestamp: SystemTime,

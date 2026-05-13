@@ -20,7 +20,7 @@ mod server;
 mod testing;
 
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::execute;
@@ -36,25 +36,154 @@ use crate::error::Result;
 use state::App;
 
 use event_loop::{
-    check_bg_proxy_status, check_server_status, reload_metrics_from_db, start_db_watcher,
+    MetricsSnapshot, apply_metrics_snapshot, check_bg_proxy_status, check_server_status,
+    replace_request_logs_if_changed, start_db_watcher,
 };
 use server::start_server_background;
 use testing::start_quota_queries;
 
 const MAX_EVENTS_PER_FRAME: usize = 32;
+const ASYNC_DRAIN_INTERVAL: Duration = Duration::from_millis(50);
+const DB_WATCHER_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const BG_PROXY_CHECK_INTERVAL: Duration = Duration::from_millis(250);
+const BG_PROXY_LOG_SYNC_INTERVAL: Duration = Duration::from_millis(100);
+const METRICS_RELOAD_INTERVAL: Duration = Duration::from_secs(1);
 
 fn should_read_next_event(processed_events: usize, has_waiting_event: bool) -> bool {
     processed_events < MAX_EVENTS_PER_FRAME && has_waiting_event
 }
 
+struct RenderScheduler {
+    next_async_drain: Instant,
+    next_db_watcher_poll: Instant,
+    next_bg_proxy_check: Instant,
+    next_bg_proxy_log_sync: Instant,
+    next_metrics_reload: Instant,
+}
+
+impl RenderScheduler {
+    fn new(now: Instant) -> Self {
+        Self {
+            next_async_drain: now,
+            next_db_watcher_poll: now,
+            next_bg_proxy_check: now,
+            next_bg_proxy_log_sync: now,
+            next_metrics_reload: now,
+        }
+    }
+
+    fn next_wake_in(
+        &self,
+        now: Instant,
+        message_deadline: Option<Instant>,
+        bg_proxy_active: bool,
+    ) -> Duration {
+        let mut next = self
+            .next_async_drain
+            .min(self.next_db_watcher_poll)
+            .min(self.next_bg_proxy_check)
+            .min(self.next_metrics_reload);
+        if let Some(deadline) = message_deadline {
+            next = next.min(deadline);
+        }
+        if bg_proxy_active {
+            next = next.min(self.next_bg_proxy_log_sync);
+        }
+        next.saturating_duration_since(now)
+    }
+}
+
 #[cfg(test)]
-fn frame_actions(has_event: bool) -> Vec<&'static str> {
+fn frame_actions(
+    has_event: bool,
+    scheduled_dirty: bool,
+    initially_dirty: bool,
+) -> Vec<&'static str> {
     let mut actions = Vec::new();
+    let mut dirty = initially_dirty;
     if has_event {
         actions.push("input");
+        dirty = true;
     }
-    actions.push("draw");
+    if scheduled_dirty {
+        actions.push("scheduled");
+        dirty = true;
+    }
+    if dirty {
+        actions.push("draw");
+    }
     actions
+}
+
+enum BgDbResult {
+    Metrics(MetricsSnapshot),
+    RequestLogs(Vec<crate::proxy::metrics::RequestLogEntry>),
+}
+
+struct BgDbJobs {
+    tx: std::sync::mpsc::Sender<BgDbResult>,
+    rx: std::sync::mpsc::Receiver<BgDbResult>,
+    metrics_running: bool,
+    request_logs_running: bool,
+}
+
+impl BgDbJobs {
+    fn new() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        Self {
+            tx,
+            rx,
+            metrics_running: false,
+            request_logs_running: false,
+        }
+    }
+
+    fn start_metrics_reload(&mut self, app: &App) {
+        if self.metrics_running {
+            return;
+        }
+        self.metrics_running = true;
+        let tx = self.tx.clone();
+        let db = app.db.clone();
+        tokio::task::spawn_blocking(move || {
+            let (metrics, provider_models) = db.load_all();
+            let _ = tx.send(BgDbResult::Metrics(MetricsSnapshot {
+                metrics,
+                provider_models,
+            }));
+        });
+    }
+
+    fn start_request_log_sync(&mut self, app: &App) {
+        if self.request_logs_running {
+            return;
+        }
+        self.request_logs_running = true;
+        let tx = self.tx.clone();
+        let db = app.db.clone();
+        let request_log_limit = app.config.request_log_limit;
+        tokio::task::spawn_blocking(move || {
+            let logs = db.load_recent_request_logs(request_log_limit);
+            let _ = tx.send(BgDbResult::RequestLogs(logs));
+        });
+    }
+
+    fn drain_results(&mut self, app: &mut App) -> bool {
+        let mut dirty = false;
+        while let Ok(result) = self.rx.try_recv() {
+            match result {
+                BgDbResult::Metrics(snapshot) => {
+                    self.metrics_running = false;
+                    dirty |= apply_metrics_snapshot(app, snapshot);
+                }
+                BgDbResult::RequestLogs(logs) => {
+                    self.request_logs_running = false;
+                    dirty |= replace_request_logs_if_changed(app, logs);
+                }
+            }
+        }
+        dirty
+    }
 }
 
 struct ServerHandle {
@@ -110,80 +239,153 @@ fn run_loop(
     server: &mut Option<ServerHandle>,
     db_change_rx: Option<std::sync::mpsc::Receiver<()>>,
 ) -> Result<()> {
-    let mut proc_tick: u8 = 0;
-    let mut metrics_tick: u8 = 0;
+    let mut scheduler = RenderScheduler::new(Instant::now());
+    let mut bg_db_jobs = BgDbJobs::new();
+    let mut dirty = true;
     loop {
-        check_server_status(app, server);
-        if proc_tick == 0 {
-            check_bg_proxy_status(app);
+        let now = Instant::now();
+        let mut input_dirty = false;
+        if event::poll(scheduler.next_wake_in(
+            now,
+            message_deadline(app),
+            app.bg_proxy_pid.is_some(),
+        ))? {
+            input_dirty = process_input_events(app, server)?;
+            dirty |= input_dirty;
         }
-        proc_tick = proc_tick.wrapping_add(1) % 8;
-
-        let mut db_changed = false;
-        if let Some(rx) = db_change_rx.as_ref() {
-            while rx.try_recv().is_ok() {
-                db_changed = true;
-            }
-        }
-
-        // Reload metrics every 4 frames (~1s) in all modes; also reload immediately
-        // when the DB watcher fires (bg_proxy mode only).
-        // In bg-proxy mode, also sync request logs every frame to ensure low latency.
-        if db_changed || metrics_tick == 0 {
-            reload_metrics_from_db(app);
-        } else if app.bg_proxy_pid.is_some() {
-            // Sync request logs only (lightweight) every frame in bg-proxy mode.
-            let logs = app
-                .db
-                .load_recent_request_logs(app.config.request_log_limit);
-            if let Ok(mut log) = app.request_log.lock() {
-                log.replace(logs);
-            }
-        }
-        metrics_tick = metrics_tick.wrapping_add(1) % 4;
-
-        if event::poll(Duration::from_millis(16))? {
-            let mut processed_events = 0;
-            loop {
-                match event::read()? {
-                    Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        input::handle_key(app, key.code, key.modifiers, server)?;
-                    }
-                    Event::Paste(text) => {
-                        input::handle_paste(app, &text)?;
-                    }
-                    Event::FocusGained => {
-                        app.terminal_focused = true;
-                    }
-                    Event::FocusLost => {
-                        app.terminal_focused = false;
-                    }
-                    _ => {}
-                }
-                processed_events += 1;
-
-                if !should_read_next_event(processed_events, event::poll(Duration::from_millis(0))?)
-                {
-                    break;
-                }
-            }
-        }
-
-        app.drain_test_results();
-        app.tick_message();
-
-        terminal.draw(|f| ui::draw(f, app))?;
 
         if app.should_quit {
             break;
+        }
+
+        if input_dirty {
+            terminal.draw(|f| ui::draw(f, app))?;
+            dirty = false;
+        }
+
+        dirty |= run_due_scheduled_tasks(
+            app,
+            server,
+            db_change_rx.as_ref(),
+            &mut scheduler,
+            &mut bg_db_jobs,
+        );
+
+        if app.should_quit {
+            break;
+        }
+
+        if dirty {
+            terminal.draw(|f| ui::draw(f, app))?;
+            dirty = false;
         }
     }
     Ok(())
 }
 
+fn process_input_events(app: &mut App, server: &mut Option<ServerHandle>) -> Result<bool> {
+    let mut processed_events = 0;
+    let mut dirty = false;
+    loop {
+        match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                input::handle_key(app, key.code, key.modifiers, server)?;
+                dirty = true;
+            }
+            Event::Paste(text) => {
+                input::handle_paste(app, &text)?;
+                dirty = true;
+            }
+            Event::FocusGained => {
+                app.terminal_focused = true;
+                dirty = true;
+            }
+            Event::FocusLost => {
+                app.terminal_focused = false;
+                dirty = true;
+            }
+            Event::Resize(_, _) => {
+                dirty = true;
+            }
+            _ => {}
+        }
+        processed_events += 1;
+
+        if !should_read_next_event(processed_events, event::poll(Duration::from_millis(0))?) {
+            break;
+        }
+    }
+    Ok(dirty)
+}
+
+fn run_due_scheduled_tasks(
+    app: &mut App,
+    server: &mut Option<ServerHandle>,
+    db_change_rx: Option<&std::sync::mpsc::Receiver<()>>,
+    scheduler: &mut RenderScheduler,
+    bg_db_jobs: &mut BgDbJobs,
+) -> bool {
+    let now = Instant::now();
+    let mut dirty = bg_db_jobs.drain_results(app);
+    dirty |= check_server_status(app, server);
+
+    if now >= scheduler.next_bg_proxy_check {
+        dirty |= check_bg_proxy_status(app);
+        scheduler.next_bg_proxy_check = now + BG_PROXY_CHECK_INTERVAL;
+    }
+
+    let db_changed = if now >= scheduler.next_db_watcher_poll {
+        scheduler.next_db_watcher_poll = now + DB_WATCHER_POLL_INTERVAL;
+        db_changed(db_change_rx)
+    } else {
+        false
+    };
+
+    if db_changed || now >= scheduler.next_metrics_reload {
+        bg_db_jobs.start_metrics_reload(app);
+        if now >= scheduler.next_metrics_reload {
+            scheduler.next_metrics_reload = now + METRICS_RELOAD_INTERVAL;
+        }
+    }
+
+    if app.bg_proxy_pid.is_some() && now >= scheduler.next_bg_proxy_log_sync {
+        bg_db_jobs.start_request_log_sync(app);
+        scheduler.next_bg_proxy_log_sync = now + BG_PROXY_LOG_SYNC_INTERVAL;
+    }
+
+    if now >= scheduler.next_async_drain {
+        dirty |= app.drain_test_results();
+        scheduler.next_async_drain = now + ASYNC_DRAIN_INTERVAL;
+    }
+
+    dirty |= app.tick_message();
+    dirty
+}
+
+fn db_changed(rx: Option<&std::sync::mpsc::Receiver<()>>) -> bool {
+    let mut changed = false;
+    if let Some(rx) = rx {
+        while rx.try_recv().is_ok() {
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn message_deadline(app: &App) -> Option<Instant> {
+    app.message
+        .as_ref()
+        .map(|(_, _, created)| *created + Duration::from_secs(state::MESSAGE_TIMEOUT_SECS))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{MAX_EVENTS_PER_FRAME, frame_actions, should_read_next_event};
+    use super::{
+        ASYNC_DRAIN_INTERVAL, BG_PROXY_CHECK_INTERVAL, DB_WATCHER_POLL_INTERVAL,
+        MAX_EVENTS_PER_FRAME, METRICS_RELOAD_INTERVAL, RenderScheduler, frame_actions,
+        should_read_next_event,
+    };
+    use std::time::{Duration, Instant};
 
     #[test]
     fn queued_events_yield_after_frame_budget() {
@@ -195,7 +397,32 @@ mod tests {
 
     #[test]
     fn input_is_processed_before_draw_when_available() {
-        assert_eq!(frame_actions(true), vec!["input", "draw"]);
-        assert_eq!(frame_actions(false), vec!["draw"]);
+        assert_eq!(frame_actions(true, false, false), vec!["input", "draw"]);
+        assert_eq!(frame_actions(false, false, true), vec!["draw"]);
+    }
+
+    #[test]
+    fn idle_without_dirty_state_does_not_draw() {
+        assert!(frame_actions(false, false, false).is_empty());
+    }
+
+    #[test]
+    fn scheduled_change_draws_without_input() {
+        assert_eq!(frame_actions(false, true, false), vec!["scheduled", "draw"]);
+    }
+
+    #[test]
+    fn inactive_bg_proxy_log_sync_does_not_force_immediate_wake() {
+        let now = Instant::now();
+        let mut scheduler = RenderScheduler::new(now);
+        scheduler.next_async_drain = now + ASYNC_DRAIN_INTERVAL;
+        scheduler.next_db_watcher_poll = now + DB_WATCHER_POLL_INTERVAL;
+        scheduler.next_bg_proxy_check = now + BG_PROXY_CHECK_INTERVAL;
+        scheduler.next_metrics_reload = now + METRICS_RELOAD_INTERVAL;
+
+        assert_eq!(
+            scheduler.next_wake_in(now + Duration::from_millis(1), None, false),
+            ASYNC_DRAIN_INTERVAL - Duration::from_millis(1)
+        );
     }
 }

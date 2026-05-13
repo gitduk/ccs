@@ -641,7 +641,7 @@ impl QuotaForm {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use indexmap::IndexMap;
 
@@ -752,7 +752,7 @@ mod tests {
             })
             .unwrap();
 
-        app.drain_test_results();
+        assert!(app.drain_test_results());
 
         assert!(!app.tests.pending.contains("vllm"));
         assert_eq!(
@@ -763,5 +763,33 @@ mod tests {
             app.tests.testing_model.get("vllm").map(String::as_str),
             Some("sonnet-4-6")
         );
+    }
+
+    #[tokio::test]
+    async fn drain_test_results_returns_false_when_empty() {
+        let path = format!("/tmp/ccs-state-empty-drain-{}.db", uuid::Uuid::new_v4());
+        let mut app = App::new().unwrap();
+        app.config.db_path = Some(path);
+        assert!(!app.drain_test_results());
+    }
+
+    #[tokio::test]
+    async fn tick_message_reports_when_message_expires() {
+        let mut app = App::new().unwrap();
+        app.message = Some((
+            "old".into(),
+            super::MessageKind::Info,
+            Instant::now() - Duration::from_secs(super::MESSAGE_TIMEOUT_SECS + 1),
+        ));
+        assert!(app.tick_message());
+        assert!(app.message.is_none());
+    }
+
+    #[tokio::test]
+    async fn tick_message_reports_false_for_fresh_message() {
+        let mut app = App::new().unwrap();
+        app.set_message("fresh", super::MessageKind::Info);
+        assert!(!app.tick_message());
+        assert!(app.message.is_some());
     }
 }

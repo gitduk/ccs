@@ -388,9 +388,10 @@ impl App {
 
     /// Drain background test events: update in-progress model display or
     /// finalise completed results.
-    pub fn drain_test_results(&mut self) {
+    pub fn drain_test_results(&mut self) -> bool {
         use super::TestEvent;
         let events: Vec<_> = self.tests.drain().collect();
+        let changed = !events.is_empty();
         for event in events {
             match event {
                 TestEvent::ModelSelected { provider, model } => {
@@ -477,5 +478,6 @@ impl App {
                 }
             }
         }
+        changed
     }
 }

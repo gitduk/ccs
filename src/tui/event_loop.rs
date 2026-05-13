@@ -1,16 +1,21 @@
+use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
+
+use crate::proxy::metrics::TokenMetrics;
 
 use super::App;
 use super::ServerHandle;
 use super::state::{MessageKind, ServerStatus, is_process_alive};
 
-pub(super) fn check_bg_proxy_status(app: &mut App) {
+pub(super) fn check_bg_proxy_status(app: &mut App) -> bool {
     if let Some(pid) = app.bg_proxy_pid
         && !is_process_alive(pid)
     {
         app.on_bg_proxy_died();
         app.set_message("Background proxy exited", MessageKind::Info);
+        return true;
     }
+    false
 }
 
 pub(super) fn start_db_watcher(app: &App) -> Option<(Receiver<()>, notify::RecommendedWatcher)> {
@@ -51,14 +56,28 @@ pub(super) fn start_db_watcher(app: &App) -> Option<(Receiver<()>, notify::Recom
     Some((event_rx, watcher))
 }
 
-pub(crate) fn reload_metrics_from_db(app: &mut App) {
-    let (fresh, fresh_models) = app.db.load_all();
+pub(crate) struct MetricsSnapshot {
+    pub metrics: TokenMetrics,
+    pub provider_models: HashMap<String, Vec<String>>,
+}
 
-    // Snapshot current last_errors before releasing the lock.
+pub(crate) fn load_metrics_snapshot(app: &App) -> MetricsSnapshot {
+    let (metrics, provider_models) = app.db.load_all();
+    MetricsSnapshot {
+        metrics,
+        provider_models,
+    }
+}
+
+pub(crate) fn apply_metrics_snapshot(app: &mut App, snapshot: MetricsSnapshot) -> bool {
+    let MetricsSnapshot {
+        metrics,
+        provider_models,
+    } = snapshot;
+
     let error_snapshot: Vec<(String, u16, String)> = if let Ok(mut m) = app.metrics.lock() {
-        // Preserve last_error — it's ephemeral session state, not stored in DB.
         let saved_errors = std::mem::take(&mut m.last_error);
-        *m = fresh;
+        *m = metrics;
         m.last_error = saved_errors;
         m.last_error
             .iter()
@@ -68,12 +87,9 @@ pub(crate) fn reload_metrics_from_db(app: &mut App) {
         vec![]
     };
 
-    // If an error was cleared (successful request), forget its key so the next
-    // occurrence of the same error is logged again.
     app.seen_provider_errors
         .retain(|p, _| error_snapshot.iter().any(|(ep, _, _)| ep == p));
 
-    // Push newly seen or changed errors into the message log.
     for (provider, status, message) in error_snapshot {
         let key = format!("{status}:{message}");
         if app
@@ -91,25 +107,36 @@ pub(crate) fn reload_metrics_from_db(app: &mut App) {
         }
     }
 
-    app.models.provider_models = fresh_models;
-    // NOTE: models_scroll is intentionally NOT reset here.
-    // draw_models already clamps scroll to max_scroll on every frame,
-    // so stale offsets are harmless. Resetting would jump the viewport
-    // back to the top every time the DB watcher fires.
-
-    // In bg-proxy mode the proxy runs in a separate process and writes its own
-    // in-memory request log. Sync from DB so the TUI sees those entries.
-    if app.bg_proxy_pid.is_some() {
-        let logs = app
-            .db
-            .load_recent_request_logs(app.config.request_log_limit);
-        if let Ok(mut log) = app.request_log.lock() {
-            log.replace(logs);
-        }
-    }
+    app.models.provider_models = provider_models;
+    true
 }
 
-pub(super) fn check_server_status(app: &mut App, server: &mut Option<ServerHandle>) {
+pub(crate) fn reload_metrics_from_db(app: &mut App) {
+    let snapshot = load_metrics_snapshot(app);
+    apply_metrics_snapshot(app, snapshot);
+}
+
+pub(crate) fn replace_request_logs_if_changed(
+    app: &mut App,
+    logs: Vec<crate::proxy::metrics::RequestLogEntry>,
+) -> bool {
+    let Ok(mut current) = app.request_log.lock() else {
+        return false;
+    };
+    if current.entries().len() == logs.len()
+        && current
+            .entries()
+            .iter()
+            .zip(logs.iter())
+            .all(|(a, b)| a == b)
+    {
+        return false;
+    }
+    current.replace(logs);
+    true
+}
+
+pub(super) fn check_server_status(app: &mut App, server: &mut Option<ServerHandle>) -> bool {
     if let Some(handle) = server.as_ref()
         && handle.task.is_finished()
     {
@@ -132,5 +159,7 @@ pub(super) fn check_server_status(app: &mut App, server: &mut Option<ServerHandl
                 app.set_message(msg, MessageKind::Error);
             }
         }
+        return true;
     }
+    false
 }

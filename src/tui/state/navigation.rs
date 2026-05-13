@@ -175,12 +175,14 @@ impl App {
     }
 
     /// Clear message if it has expired (after MESSAGE_TIMEOUT_SECS seconds).
-    pub fn tick_message(&mut self) {
+    pub fn tick_message(&mut self) -> bool {
         if let Some((_, _, created)) = &self.message
             && created.elapsed() > std::time::Duration::from_secs(MESSAGE_TIMEOUT_SECS)
         {
             self.message = None;
+            return true;
         }
+        false
     }
 
     /// Reload configuration from disk.
