@@ -265,6 +265,33 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         .any(|p| p.quota_command.is_some())
         || !app.quota_status.is_empty();
     let has_port = app.config.providers.values().any(|p| p.port.is_some());
+    let terminal_width = area.width;
+    let compact_quota = terminal_width < 120;
+    let quota_col = col_width(
+        "Quota",
+        app.config
+            .providers
+            .values()
+            .map(|p| match app.quota_status.get(&p.id) {
+                None => 0,
+                Some(QuotaStatus::Running) => "-".width(),
+                Some(QuotaStatus::Success(result)) => {
+                    let text = super::quota_command::cell_text(result);
+                    if compact_quota {
+                        truncate_chars(&text, 10).width()
+                    } else {
+                        truncate_chars(&text, 18).width()
+                    }
+                }
+                Some(QuotaStatus::Error(msg)) => {
+                    if compact_quota {
+                        truncate_chars(msg, 10).width()
+                    } else {
+                        truncate_chars(msg, 18).width()
+                    }
+                }
+            }),
+    );
     let max_name_len = app
         .providers
         .names
@@ -282,15 +309,14 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         Cell::from("Base URL").style(hdr),
         Cell::from("API Key").style(hdr),
     ];
-    if has_port {
-        header_cells.push(Cell::from("Port").style(hdr));
-    }
     if has_quota {
         header_cells.push(Cell::from("Quota").style(hdr));
     }
+    if has_port {
+        header_cells.push(Cell::from("Port").style(hdr));
+    }
     let header = Row::new(header_cells).height(1);
 
-    let terminal_width = area.width;
     let quota_status = &app.quota_status;
 
     let rows: Vec<Row> = app
@@ -332,16 +358,16 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                 Cell::from(Span::styled(provider.base_url.as_str(), detail_style)),
                 masked_api_key(&provider.api_key),
             ];
-            if has_port {
-                let port_text = provider.port.map(|p| p.to_string()).unwrap_or_default();
-                cells.push(Cell::from(Span::styled(port_text, detail_style)));
-            }
             if has_quota {
                 cells.push(render_quota_cell(
                     quota_status,
                     &provider.id,
                     terminal_width,
                 ));
+            }
+            if has_port {
+                let port_text = provider.port.map(|p| p.to_string()).unwrap_or_default();
+                cells.push(Cell::from(Span::styled(port_text, detail_style)));
             }
             Row::new(cells)
         })
@@ -353,11 +379,11 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         Constraint::Length(url_col),
         Constraint::Length(key_col),
     ];
+    if has_quota {
+        col_constraints.push(Constraint::Length(quota_col));
+    }
     if has_port {
         col_constraints.push(Constraint::Length(port_col));
-    }
-    if has_quota {
-        col_constraints.push(Constraint::Length(20));
     }
     let table = Table::new(rows, col_constraints)
         .header(header)
@@ -504,7 +530,7 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &mut App, area: Rect) {
                 "[t]",
                 Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" to test connectivity", Style::default().fg(t::MUTED)),
+            Span::styled(" to test provider", Style::default().fg(t::MUTED)),
         ]));
     }
 
@@ -542,10 +568,7 @@ fn render_quota_cell(
 
     match quota_status.get(provider_id) {
         None => Cell::from(""),
-        Some(QuotaStatus::Running) => {
-            let text = if compact { "[...]" } else { "[running...]" };
-            Cell::from(text).style(Style::default().fg(t::MUTED))
-        }
+        Some(QuotaStatus::Running) => Cell::from("-").style(Style::default().fg(t::MUTED)),
         Some(QuotaStatus::Success(result)) => {
             let text = super::quota_command::cell_text(result);
             let text = if compact {
@@ -571,12 +594,163 @@ mod tests {
     use std::time::Instant;
 
     use indexmap::IndexMap;
-    use ratatui::{Terminal, backend::TestBackend, layout::Rect, widgets::TableState};
+    use ratatui::{
+        Terminal,
+        backend::TestBackend,
+        layout::{Constraint, Rect},
+        widgets::{Row, Table, TableState},
+    };
 
-    use super::draw_detail_panel;
+    use super::{draw_detail_panel, draw_table, render_quota_cell};
     use crate::config::{ApiFormat, AppConfig, Provider};
     use crate::tester::{TestResult, TestStatus};
-    use crate::tui::state::{App, LogsState, ModelsState, ProviderList, TestState};
+    use crate::tui::state::{App, LogsState, ModelsState, ProviderList, QuotaStatus, TestState};
+
+    #[test]
+    fn provider_table_keeps_port_close_to_empty_quota() {
+        let path = format!("/tmp/ccs-provider-table-test-{}.db", uuid::Uuid::new_v4());
+        let mut providers = IndexMap::new();
+        providers.insert(
+            "vllm".to_string(),
+            Provider {
+                id: "vllm-id".into(),
+                base_url: "http://127.0.0.1:8008".into(),
+                api_key: String::new(),
+                api_format: ApiFormat::OpenAI,
+                model_map: Default::default(),
+                routes: vec![],
+                enabled: true,
+                fallback: false,
+                api_version: None,
+                quota: None,
+                quota_command: None,
+                port: Some(8002),
+            },
+        );
+        providers.insert(
+            "yc".to_string(),
+            Provider {
+                id: "yc-id".into(),
+                base_url: "https://yunyi.cfd/codex".into(),
+                api_key: "secret-key".into(),
+                api_format: ApiFormat::OpenAI,
+                model_map: Default::default(),
+                routes: vec![],
+                enabled: true,
+                fallback: false,
+                api_version: None,
+                quota: None,
+                quota_command: Some("echo 9292".into()),
+                port: None,
+            },
+        );
+
+        let db = crate::repo::Repository::open(&path);
+        let mut table_state = TableState::default();
+        table_state.select(Some(0));
+        let mut app = App {
+            config: AppConfig {
+                current: "vllm".into(),
+                listen: "127.0.0.1:0".into(),
+                providers,
+                fallback: false,
+                db_path: Some(path),
+                request_log_limit: 100,
+            },
+            mode: crate::tui::state::Mode::Normal,
+            terminal_focused: true,
+            providers: ProviderList {
+                table_state,
+                names: vec!["vllm".into(), "yc".into()],
+            },
+            form: None,
+            message: None,
+            confirm_action: None,
+            should_quit: false,
+            server_status: crate::tui::state::ServerStatus::Stopped,
+            metrics: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+            tests: TestState::new(),
+            db,
+            bg_proxy_pid: None,
+            models: ModelsState {
+                provider_models: std::collections::HashMap::new(),
+                search_field: crate::tui::state::FormField::search(),
+                search_active: true,
+                selected: 0,
+                scroll: 0,
+                pending_key: None,
+            },
+            request_log: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::proxy::metrics::RequestLog::default(),
+            )),
+            logs: LogsState {
+                selected: 0,
+                scroll: 0,
+                detail_scroll: 0,
+                detail_view_height: 0,
+                pending_key: None,
+            },
+            message_log: std::collections::VecDeque::new(),
+            seen_provider_errors: std::collections::HashMap::new(),
+            pending_key: None,
+            quota_status: std::collections::HashMap::new(),
+            quota_form: None,
+            detail_line_count: 0,
+        };
+
+        let backend = TestBackend::new(100, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| draw_table(f, &mut app, Rect::new(0, 0, 100, 6)))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        let rows = rendered
+            .chars()
+            .collect::<Vec<_>>()
+            .chunks(100)
+            .map(|chunk| chunk.iter().collect::<String>())
+            .collect::<Vec<_>>();
+        let header_line = rows.iter().find(|line| line.contains("Name")).unwrap();
+        let vllm_line = rows.iter().find(|line| line.contains("vllm")).unwrap();
+        let header_gap = header_line.find("Port").unwrap() - header_line.find("Quota").unwrap();
+        let row_gap = vllm_line.find("8002").unwrap() - header_line.find("Quota").unwrap();
+
+        assert_eq!(
+            row_gap, header_gap,
+            "empty quota cells should not widen the gap before Port: {vllm_line:?}"
+        );
+    }
+
+    #[test]
+    fn provider_table_shows_dash_for_running_quota() {
+        let mut quota_status = std::collections::HashMap::new();
+        quota_status.insert("provider-id".to_string(), QuotaStatus::Running);
+
+        let backend = TestBackend::new(8, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let row = Row::new(vec![render_quota_cell(&quota_status, "provider-id", 120)]);
+                let table = Table::new(vec![row], [Constraint::Length(8)]);
+                f.render_widget(table, Rect::new(0, 0, 8, 1));
+            })
+            .unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert_eq!(rendered.trim(), "-");
+    }
 
     #[test]
     fn detail_panel_shows_used_model_for_failed_test() {

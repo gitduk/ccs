@@ -20,7 +20,7 @@ pub(super) fn draw_help(f: &mut Frame, _app: &App) {
                 ("a / o", "Add new provider"),
                 ("e / Enter", "Edit selected provider"),
                 ("dd", "Delete selected provider"),
-                ("t", "Test provider connectivity"),
+                ("t", "Test provider availability"),
                 ("yy", "Copy provider base URL to clipboard"),
                 ("yc", "Copy test curl command to clipboard"),
                 ("K / J", "Move provider up / down"),
