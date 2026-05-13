@@ -3,6 +3,8 @@
 //! This module renders both the request log viewer and the right-column
 //! logs/messages panel on the main screen.
 
+use std::time::Instant;
+
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -11,11 +13,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::state::{App, MessageKind, Mode};
+use super::state::{App, LogsState, MessageKind, Mode};
 use super::theme::{self as t};
 use super::ui::format::{fmt_latency, format_tokens, shorten_model_name};
 use super::ui::layout::{BORDER_INNER_DIVIDER, DASH, TITLE_SIDE, centered_rect};
 use crate::proxy::metrics::RequestLogEntry;
+
+const TRUNCATED_BODY_MARKER: &str = "…[truncated]";
 
 pub(super) fn handle_key(
     app: &mut App,
@@ -27,6 +31,14 @@ pub(super) fn handle_key(
         .lock()
         .map(|l| l.entries().len())
         .unwrap_or(0);
+    let prev = super::input::insert::consume_pending_key(&mut app.logs.pending_key);
+
+    if let Some('g') = prev
+        && code == KeyCode::Char('g')
+    {
+        app.logs.detail_scroll = 0;
+        return Ok(());
+    }
 
     match code {
         KeyCode::Esc | KeyCode::Char('q') => {
@@ -45,24 +57,32 @@ pub(super) fn handle_key(
             }
         }
         KeyCode::Char('G') => {
-            if total > 0 {
-                app.logs.selected = total - 1;
-                app.logs.detail_scroll = 0;
-            }
+            app.logs.detail_scroll = u16::MAX;
         }
         KeyCode::Char('g') => {
-            app.logs.selected = 0;
+            app.logs.pending_key = Some(('g', Instant::now()));
+        }
+        KeyCode::Home => {
             app.logs.detail_scroll = 0;
         }
+        KeyCode::End => {
+            app.logs.detail_scroll = u16::MAX;
+        }
         KeyCode::Char('J') => {
-            app.logs.detail_scroll = app.logs.detail_scroll.saturating_add(1);
+            let step = detail_scroll_half_page(app);
+            app.logs.detail_scroll = app.logs.detail_scroll.saturating_add(step);
         }
         KeyCode::Char('K') => {
-            app.logs.detail_scroll = app.logs.detail_scroll.saturating_sub(1);
+            let step = detail_scroll_half_page(app);
+            app.logs.detail_scroll = app.logs.detail_scroll.saturating_sub(step);
         }
         _ => {}
     }
     Ok(())
+}
+
+fn detail_scroll_half_page(app: &App) -> u16 {
+    (app.logs.detail_view_height / 2).max(1)
 }
 
 pub(super) fn draw_popup(f: &mut Frame, app: &mut App) {
@@ -131,10 +151,10 @@ pub(super) fn draw_popup(f: &mut Frame, app: &mut App) {
         .padding(Padding::new(1, 0, 0, 0));
     let detail_inner = detail_block.inner(detail_area);
     f.render_widget(detail_block, detail_area);
-    draw_detail(f, &entries[selected], detail_inner, app.logs.detail_scroll);
+    draw_detail(f, &entries[selected], detail_inner, &mut app.logs);
 
     let footer = format!(
-        " {} requests  [j/k] navigate  [Shift+J/K] scroll detail  [q/Esc] close",
+        " {} requests  [j/k] navigate  [Shift+J/K] half-page detail  [gg/G] detail top/bottom  [q/Esc] close",
         total
     );
     draw_footer(f, area, &footer);
@@ -192,7 +212,9 @@ fn render_log_list(
     f.render_widget(Paragraph::new(lines), area);
 }
 
-fn draw_detail(f: &mut Frame, entry: &RequestLogEntry, area: Rect, detail_scroll: u16) {
+fn draw_detail(f: &mut Frame, entry: &RequestLogEntry, area: Rect, logs: &mut LogsState) {
+    logs.detail_view_height = area.height;
+
     let label = Style::default().fg(t::MUTED);
     let value = Style::default().fg(t::TEXT);
     let status_style = if entry.error.is_some() || entry.status >= 400 {
@@ -236,41 +258,257 @@ fn draw_detail(f: &mut Frame, entry: &RequestLogEntry, area: Rect, detail_scroll
         ]),
     ];
 
-    // Request body
     if let Some(req_body) = &entry.request_body {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            "Request:",
-            Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD),
-        )));
-        let pretty = pretty_json(req_body);
-        let avail = area.width.saturating_sub(2) as usize;
-        for chunk in wrap_text(&pretty, avail) {
-            lines.push(Line::from(Span::styled(
-                format!("  {chunk}"),
-                Style::default().fg(t::MUTED),
-            )));
-        }
+        push_body_section(&mut lines, "Request", req_body, area.width);
     }
 
-    // Response body
     if let Some(resp_body) = &entry.response_body {
-        lines.push(Line::raw(""));
+        push_body_section(&mut lines, "Response", resp_body, area.width);
+    }
+
+    let max_scroll = lines.len().saturating_sub(area.height as usize) as u16;
+    logs.detail_scroll = logs.detail_scroll.min(max_scroll);
+
+    f.render_widget(Paragraph::new(lines).scroll((logs.detail_scroll, 0)), area);
+}
+
+fn push_body_section<'a>(lines: &mut Vec<Line<'a>>, title: &'static str, body: &str, width: u16) {
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        format!("{title}:"),
+        Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD),
+    )));
+
+    let avail = width.saturating_sub(4) as usize;
+    let body = body.strip_suffix(TRUNCATED_BODY_MARKER).unwrap_or(body);
+
+    match parse_log_json(body) {
+        Some(value) => push_json_summary(lines, &value, avail),
+        None => push_wrapped_lines(lines, body, 2, avail, Style::default().fg(t::MUTED)),
+    }
+}
+
+fn push_json_summary<'a>(lines: &mut Vec<Line<'a>>, value: &serde_json::Value, avail: usize) {
+    let Some(obj) = value.as_object() else {
+        push_wrapped_lines(
+            lines,
+            &compact_json(value),
+            2,
+            avail,
+            Style::default().fg(t::MUTED),
+        );
+        return;
+    };
+
+    push_scalar_field(lines, obj, "model", avail);
+    push_scalar_field(lines, obj, "stream", avail);
+    push_scalar_field(lines, obj, "max_tokens", avail);
+    push_scalar_field(lines, obj, "max_output_tokens", avail);
+
+    if let Some(error) = obj.get("error") {
         lines.push(Line::from(Span::styled(
-            "Response:",
-            Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD),
+            "  error:",
+            Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD),
         )));
-        let pretty = pretty_json(resp_body);
-        let avail = area.width.saturating_sub(2) as usize;
-        for chunk in wrap_text(&pretty, avail) {
-            lines.push(Line::from(Span::styled(
-                format!("  {chunk}"),
-                Style::default().fg(t::MUTED),
-            )));
+        push_json_value(lines, error, 4, avail.saturating_sub(2), true);
+    }
+
+    if let Some(messages) = obj.get("messages").and_then(|v| v.as_array()) {
+        lines.push(Line::from(Span::styled(
+            "  messages:",
+            Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD),
+        )));
+        for (idx, message) in messages.iter().enumerate() {
+            push_message(lines, idx, message, avail.saturating_sub(2));
         }
     }
 
-    f.render_widget(Paragraph::new(lines).scroll((detail_scroll, 0)), area);
+    if let Some(content) = obj.get("content") {
+        lines.push(Line::from(Span::styled(
+            "  content:",
+            Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD),
+        )));
+        push_content(lines, content, 4, avail.saturating_sub(2));
+    }
+
+    if let Some(tools) = obj.get("tools").and_then(|v| v.as_array()) {
+        let names = tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(|v| v.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !names.is_empty() {
+            push_key_value(lines, "tools", &names, avail);
+        }
+    }
+
+    let rendered = [
+        "model",
+        "stream",
+        "max_tokens",
+        "max_output_tokens",
+        "error",
+        "messages",
+        "content",
+        "tools",
+    ];
+    let rest = obj
+        .iter()
+        .filter(|(key, _)| !rendered.contains(&key.as_str()))
+        .collect::<Vec<_>>();
+    if !rest.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  other:",
+            Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD),
+        )));
+        for (key, value) in rest {
+            push_key_value(lines, key, &compact_json(value), avail);
+        }
+    }
+}
+
+fn push_scalar_field<'a>(
+    lines: &mut Vec<Line<'a>>,
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &'static str,
+    avail: usize,
+) {
+    if let Some(value) = obj.get(key).filter(|v| !v.is_object() && !v.is_array()) {
+        push_key_value(lines, key, &scalar_text(value), avail);
+    }
+}
+
+fn push_message<'a>(
+    lines: &mut Vec<Line<'a>>,
+    idx: usize,
+    message: &serde_json::Value,
+    avail: usize,
+) {
+    let role = message
+        .get("role")
+        .and_then(|v| v.as_str())
+        .unwrap_or("message");
+    lines.push(Line::from(Span::styled(
+        format!("    #{idx} {role}"),
+        Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD),
+    )));
+
+    if let Some(content) = message.get("content") {
+        push_content(lines, content, 6, avail.saturating_sub(4));
+    } else {
+        push_wrapped_lines(
+            lines,
+            &compact_json(message),
+            6,
+            avail.saturating_sub(4),
+            Style::default().fg(t::MUTED),
+        );
+    }
+}
+
+fn push_content<'a>(
+    lines: &mut Vec<Line<'a>>,
+    content: &serde_json::Value,
+    indent: usize,
+    avail: usize,
+) {
+    match content {
+        serde_json::Value::String(text) => {
+            push_wrapped_lines(lines, text, indent, avail, Style::default().fg(t::TEXT));
+        }
+        serde_json::Value::Array(parts) => {
+            for part in parts {
+                if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                    let kind = part.get("type").and_then(|v| v.as_str()).unwrap_or("text");
+                    lines.push(Line::from(Span::styled(
+                        format!("{}[{kind}]", " ".repeat(indent)),
+                        Style::default().fg(t::MUTED),
+                    )));
+                    push_wrapped_lines(
+                        lines,
+                        text,
+                        indent + 2,
+                        avail.saturating_sub(2),
+                        Style::default().fg(t::TEXT),
+                    );
+                } else {
+                    push_json_value(lines, part, indent, avail, false);
+                }
+            }
+        }
+        _ => push_json_value(lines, content, indent, avail, false),
+    }
+}
+
+fn push_json_value<'a>(
+    lines: &mut Vec<Line<'a>>,
+    value: &serde_json::Value,
+    indent: usize,
+    avail: usize,
+    error_style: bool,
+) {
+    let style = if error_style {
+        Style::default().fg(t::ERROR)
+    } else {
+        Style::default().fg(t::MUTED)
+    };
+    if let Some(obj) = value.as_object() {
+        for (key, value) in obj {
+            if value.is_object() || value.is_array() {
+                lines.push(Line::from(Span::styled(
+                    format!("{}{}:", " ".repeat(indent), key),
+                    style.add_modifier(Modifier::BOLD),
+                )));
+                push_json_value(
+                    lines,
+                    value,
+                    indent + 2,
+                    avail.saturating_sub(2),
+                    error_style,
+                );
+            } else {
+                push_wrapped_lines(
+                    lines,
+                    &format!("{key}: {}", scalar_text(value)),
+                    indent,
+                    avail,
+                    style,
+                );
+            }
+        }
+    } else {
+        push_wrapped_lines(lines, &compact_json(value), indent, avail, style);
+    }
+}
+
+fn push_key_value<'a>(lines: &mut Vec<Line<'a>>, key: &str, value: &str, avail: usize) {
+    push_wrapped_lines(
+        lines,
+        &format!("{key}: {value}"),
+        2,
+        avail,
+        Style::default().fg(t::MUTED),
+    );
+}
+
+fn push_wrapped_lines<'a>(
+    lines: &mut Vec<Line<'a>>,
+    text: &str,
+    indent: usize,
+    avail: usize,
+    style: Style,
+) {
+    let prefix = " ".repeat(indent);
+    let width = avail.saturating_sub(indent).max(1);
+    for raw_line in text.lines() {
+        if raw_line.is_empty() {
+            lines.push(Line::from(Span::raw(prefix.clone())));
+            continue;
+        }
+        for chunk in wrap_text(raw_line, width) {
+            lines.push(Line::from(Span::styled(format!("{prefix}{chunk}"), style)));
+        }
+    }
 }
 
 pub(super) fn draw_panel(f: &mut Frame, app: &App, area: Rect, messages_height: u16) {
@@ -505,11 +743,14 @@ fn format_time(ts: std::time::SystemTime) -> String {
     }
 }
 
-fn pretty_json(s: &str) -> String {
+fn parse_log_json(s: &str) -> Option<serde_json::Value> {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
-        return serde_json::to_string_pretty(&v).unwrap_or_else(|_| s.to_string());
+        return Some(v);
     }
-    // Truncated JSON: count unclosed delimiters and close them
+
+    // Request/response bodies are intentionally truncated before storage. Close
+    // the common dangling string/object/array shape so the detail view can still
+    // present the readable prefix as structured JSON.
     let mut in_string = false;
     let mut escape = false;
     let mut brace_depth: i32 = 0;
@@ -549,7 +790,21 @@ fn pretty_json(s: &str) -> String {
     if repaired.len() > s.len()
         && let Ok(v) = serde_json::from_str::<serde_json::Value>(&repaired)
     {
-        return serde_json::to_string_pretty(&v).unwrap_or_else(|_| s.to_string());
+        return Some(v);
     }
-    s.to_string()
+    None
+}
+
+fn scalar_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(v) => v.to_string(),
+        serde_json::Value::Number(v) => v.to_string(),
+        _ => compact_json(value),
+    }
+}
+
+fn compact_json(value: &serde_json::Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
 }

@@ -156,6 +156,10 @@ pub struct LogsState {
     pub scroll: u16,
     /// Scroll offset (rows) for the detail panel.
     pub detail_scroll: u16,
+    /// Last rendered detail viewport height, used for half-page scrolling.
+    pub detail_view_height: u16,
+    /// Pending first key of a two-key sequence inside the logs panel.
+    pub pending_key: Option<(char, std::time::Instant)>,
 }
 
 /// Command execution result shown in the Quota column.
@@ -717,6 +721,8 @@ mod tests {
                 selected: 0,
                 scroll: 0,
                 detail_scroll: 0,
+                detail_view_height: 0,
+                pending_key: None,
             },
             message_log: std::collections::VecDeque::new(),
             seen_provider_errors: std::collections::HashMap::new(),

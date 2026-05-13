@@ -14,18 +14,8 @@ use crate::proxy::executor::{
 use crate::proxy::metrics::{RequestLogEntry, SharedRequestLog};
 use crate::proxy::transform;
 
-const REQUEST_BODY_MAX: usize = 4096;
-const RESPONSE_BODY_MAX: usize = 2048;
-
-fn truncate_body(bytes: &[u8], max: usize) -> String {
-    let s = String::from_utf8_lossy(bytes);
-    if s.len() <= max {
-        s.into_owned()
-    } else {
-        let mut truncated = s[..max].to_string();
-        truncated.push_str("…[truncated]");
-        truncated
-    }
+fn body_to_string(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 /// Wire format expected by the *client* (the caller of this proxy). The proxy
@@ -222,7 +212,7 @@ async fn try_providers(
         .unwrap_or("")
         .to_string();
 
-    let request_body_str = truncate_body(ctx.body, REQUEST_BODY_MAX);
+    let request_body_str = body_to_string(ctx.body);
 
     let record_failure = |state: &SharedState, pkey: &ProviderKey| {
         state.db.persist_stats_async(
@@ -388,7 +378,7 @@ async fn try_providers(
                     latency_ms,
                     preview,
                     Some(request_body_str.clone()),
-                    Some(truncate_body(&error_body, RESPONSE_BODY_MAX)),
+                    Some(body_to_string(&error_body)),
                 );
                 return Ok(
                     (status, [("content-type", "application/json")], error_body).into_response()
@@ -418,7 +408,7 @@ async fn try_providers(
                 latency_ms,
                 preview,
                 Some(request_body_str.clone()),
-                Some(truncate_body(&error_body, RESPONSE_BODY_MAX)),
+                Some(body_to_string(&error_body)),
             );
             return Ok((status, [("content-type", "application/json")], error_body).into_response());
         }
@@ -521,9 +511,7 @@ async fn try_providers(
         t0.elapsed().as_millis() as u64,
         "all providers failed".into(),
         Some(request_body_str.clone()),
-        last_error_body
-            .as_ref()
-            .map(|b| truncate_body(b, RESPONSE_BODY_MAX)),
+        last_error_body.as_ref().map(|b| body_to_string(b)),
     );
 
     let body =
@@ -617,7 +605,7 @@ async fn handle_buffered_response(
     let body = response.bytes().await?;
 
     // Capture the raw upstream response for diagnostics.
-    let resp_body_str = truncate_body(&body, RESPONSE_BODY_MAX);
+    let resp_body_str = body_to_string(&body);
     log_entry.response_body = Some(resp_body_str.clone());
     if let Ok(mut log) = request_log.lock()
         && let Some(entry) = log

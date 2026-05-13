@@ -10,10 +10,15 @@ const FILTERED_HEADERS: &[&str] = &[
     "host",
     "authorization",
     "x-api-key",
+    "content-type",
     "content-length",
     "transfer-encoding",
     "connection",
 ];
+
+fn should_forward_header(name: &str) -> bool {
+    !FILTERED_HEADERS.contains(&name) && !name.starts_with("anthropic-")
+}
 
 /// Forward a request to the upstream provider.
 pub async fn forward_request(
@@ -50,7 +55,7 @@ pub async fn forward_request(
     // Forward non-filtered headers (HeaderName is already lowercase)
     for (name, value) in incoming_headers.iter() {
         let n = name.as_str();
-        if !FILTERED_HEADERS.contains(&n) && !n.starts_with("anthropic-") {
+        if should_forward_header(n) {
             request = request.header(name, value);
         }
     }
@@ -60,4 +65,36 @@ pub async fn forward_request(
 
     let response = request.send().await?;
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_forward_header;
+
+    #[test]
+    fn filters_hop_auth_and_payload_headers() {
+        for header in [
+            "host",
+            "authorization",
+            "x-api-key",
+            "content-type",
+            "content-length",
+            "transfer-encoding",
+            "connection",
+            "anthropic-version",
+            "anthropic-beta",
+        ] {
+            assert!(
+                !should_forward_header(header),
+                "{header} should be filtered"
+            );
+        }
+    }
+
+    #[test]
+    fn forwards_regular_headers() {
+        assert!(should_forward_header("accept"));
+        assert!(should_forward_header("user-agent"));
+        assert!(should_forward_header("x-request-id"));
+    }
 }

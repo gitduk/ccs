@@ -131,21 +131,27 @@ fn run_loop(
 
         terminal.draw(|f| ui::draw(f, app))?;
 
-        if event::poll(Duration::from_millis(250))? {
-            match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    input::handle_key(app, key.code, key.modifiers, server)?;
+        if event::poll(Duration::from_millis(16))? {
+            loop {
+                match event::read()? {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        input::handle_key(app, key.code, key.modifiers, server)?;
+                    }
+                    Event::Paste(text) => {
+                        input::handle_paste(app, &text)?;
+                    }
+                    Event::FocusGained => {
+                        app.terminal_focused = true;
+                    }
+                    Event::FocusLost => {
+                        app.terminal_focused = false;
+                    }
+                    _ => {}
                 }
-                Event::Paste(text) => {
-                    input::handle_paste(app, &text)?;
+
+                if !event::poll(Duration::from_millis(0))? {
+                    break;
                 }
-                Event::FocusGained => {
-                    app.terminal_focused = true;
-                }
-                Event::FocusLost => {
-                    app.terminal_focused = false;
-                }
-                _ => {}
             }
         }
 
