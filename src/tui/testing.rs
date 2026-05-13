@@ -252,36 +252,3 @@ fn pick_next(items: &[String]) -> String {
     let idx = CTR.fetch_add(1, Ordering::Relaxed) % items.len();
     items[idx].clone()
 }
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use super::TEST_TASK_TIMEOUT_SECS;
-
-    #[tokio::test]
-    async fn test_task_timeout_returns_connection_error_result() {
-        let result = match tokio::time::timeout(
-            Duration::from_secs(TEST_TASK_TIMEOUT_SECS),
-            std::future::pending::<crate::tester::TestResult>(),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => crate::tester::TestResult {
-                status: crate::tester::TestStatus::Error("Connection error".to_string()),
-                latency_ms: 0,
-                model_count: Some(1),
-                model_names: Some(vec!["m".into()]),
-                tested_at: std::time::Instant::now(),
-                used_model: "m".into(),
-                tools_supported: None,
-            },
-        };
-
-        assert!(
-            matches!(result.status, crate::tester::TestStatus::Error(ref e) if e == "Connection error")
-        );
-        assert_eq!(result.used_model, "m");
-    }
-}

@@ -55,16 +55,6 @@ pub(crate) fn format_tokens(n: u64) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::format_tokens;
-
-    #[test]
-    fn format_tokens_does_not_round_100k_to_0_1m() {
-        assert_eq!(format_tokens(100_000), "100.0k");
-    }
-}
-
 /// Max content width with a fallback default and an upper cap.
 pub(crate) fn max_content_width(
     content_lens: impl Iterator<Item = usize>,

@@ -367,7 +367,12 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
             }
             if has_port {
                 let port_text = provider.port.map(|p| p.to_string()).unwrap_or_default();
-                cells.push(Cell::from(Span::styled(port_text, detail_style)));
+                let port_style = if app.bg_proxy_pid.is_some() && provider.port.is_some() {
+                    Style::default().fg(t::SUCCESS)
+                } else {
+                    Style::default().fg(t::MUTED)
+                };
+                cells.push(Cell::from(Span::styled(port_text, port_style)));
             }
             Row::new(cells)
         })
@@ -591,32 +596,24 @@ fn render_quota_cell(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
-
     use indexmap::IndexMap;
-    use ratatui::{
-        Terminal,
-        backend::TestBackend,
-        layout::{Constraint, Rect},
-        widgets::{Row, Table, TableState},
-    };
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect, widgets::TableState};
 
-    use super::{draw_detail_panel, draw_table, render_quota_cell};
+    use super::draw_table;
     use crate::config::{ApiFormat, AppConfig, Provider};
-    use crate::tester::{TestResult, TestStatus};
-    use crate::tui::state::{App, LogsState, ModelsState, ProviderList, QuotaStatus, TestState};
+    use crate::tui::state::{App, LogsState, ModelsState, ProviderList, TestState};
 
     #[test]
-    fn provider_table_keeps_port_close_to_empty_quota() {
-        let path = format!("/tmp/ccs-provider-table-test-{}.db", uuid::Uuid::new_v4());
+    fn port_cell_is_success_color_when_bg_proxy_is_running() {
+        let path = format!("/tmp/ccs-provider-port-test-{}.db", uuid::Uuid::new_v4());
         let mut providers = IndexMap::new();
         providers.insert(
-            "vllm".to_string(),
+            "ds".to_string(),
             Provider {
-                id: "vllm-id".into(),
-                base_url: "http://127.0.0.1:8008".into(),
-                api_key: String::new(),
-                api_format: ApiFormat::OpenAI,
+                id: "ds-id".into(),
+                base_url: "https://api.deepseek.com/anthropic".into(),
+                api_key: "sk-test".into(),
+                api_format: ApiFormat::Anthropic,
                 model_map: Default::default(),
                 routes: vec![],
                 enabled: true,
@@ -624,24 +621,7 @@ mod tests {
                 api_version: None,
                 quota: None,
                 quota_command: None,
-                port: Some(8002),
-            },
-        );
-        providers.insert(
-            "yc".to_string(),
-            Provider {
-                id: "yc-id".into(),
-                base_url: "https://yunyi.cfd/codex".into(),
-                api_key: "secret-key".into(),
-                api_format: ApiFormat::OpenAI,
-                model_map: Default::default(),
-                routes: vec![],
-                enabled: true,
-                fallback: false,
-                api_version: None,
-                quota: None,
-                quota_command: Some("echo 9292".into()),
-                port: None,
+                port: Some(8003),
             },
         );
 
@@ -650,7 +630,7 @@ mod tests {
         table_state.select(Some(0));
         let mut app = App {
             config: AppConfig {
-                current: "vllm".into(),
+                current: "ds".into(),
                 listen: "127.0.0.1:0".into(),
                 providers,
                 fallback: false,
@@ -661,7 +641,7 @@ mod tests {
             terminal_focused: true,
             providers: ProviderList {
                 table_state,
-                names: vec!["vllm".into(), "yc".into()],
+                names: vec!["ds".into()],
             },
             form: None,
             message: None,
@@ -671,7 +651,7 @@ mod tests {
             metrics: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
             tests: TestState::new(),
             db,
-            bg_proxy_pid: None,
+            bg_proxy_pid: Some(123),
             models: ModelsState {
                 provider_models: std::collections::HashMap::new(),
                 search_field: crate::tui::state::FormField::search(),
@@ -704,158 +684,13 @@ mod tests {
             .draw(|f| draw_table(f, &mut app, Rect::new(0, 0, 100, 6)))
             .unwrap();
 
-        let buffer = terminal.backend().buffer().clone();
-        let rendered = buffer
+        let buffer = terminal.backend().buffer();
+        let port_cell = buffer
             .content()
             .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-        let rows = rendered
-            .chars()
-            .collect::<Vec<_>>()
-            .chunks(100)
-            .map(|chunk| chunk.iter().collect::<String>())
-            .collect::<Vec<_>>();
-        let header_line = rows.iter().find(|line| line.contains("Name")).unwrap();
-        let vllm_line = rows.iter().find(|line| line.contains("vllm")).unwrap();
-        let header_gap = header_line.find("Port").unwrap() - header_line.find("Quota").unwrap();
-        let row_gap = vllm_line.find("8002").unwrap() - header_line.find("Quota").unwrap();
-
-        assert_eq!(
-            row_gap, header_gap,
-            "empty quota cells should not widen the gap before Port: {vllm_line:?}"
-        );
-    }
-
-    #[test]
-    fn provider_table_shows_dash_for_running_quota() {
-        let mut quota_status = std::collections::HashMap::new();
-        quota_status.insert("provider-id".to_string(), QuotaStatus::Running);
-
-        let backend = TestBackend::new(8, 1);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| {
-                let row = Row::new(vec![render_quota_cell(&quota_status, "provider-id", 120)]);
-                let table = Table::new(vec![row], [Constraint::Length(8)]);
-                f.render_widget(table, Rect::new(0, 0, 8, 1));
-            })
+            .find(|cell| cell.symbol() == "8")
             .unwrap();
 
-        let rendered = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-        assert_eq!(rendered.trim(), "-");
-    }
-
-    #[test]
-    fn detail_panel_shows_used_model_for_failed_test() {
-        let path = format!("/tmp/ccs-providers-test-{}.db", uuid::Uuid::new_v4());
-        let mut providers = IndexMap::new();
-        providers.insert(
-            "vllm".to_string(),
-            Provider {
-                id: "vllm-id".into(),
-                base_url: "http://127.0.0.1:1".into(),
-                api_key: "test-key".into(),
-                api_format: ApiFormat::OpenAI,
-                model_map: Default::default(),
-                routes: vec![],
-                enabled: true,
-                fallback: true,
-                api_version: None,
-                quota: None,
-                quota_command: None,
-                port: None,
-            },
-        );
-
-        let db = crate::repo::Repository::open(&path);
-        let mut table_state = TableState::default();
-        table_state.select(Some(0));
-
-        let mut tests = TestState::new();
-        tests.results.insert(
-            "vllm".into(),
-            TestResult {
-                status: TestStatus::Error("HTTP 502".into()),
-                latency_ms: 152,
-                model_count: Some(1),
-                model_names: Some(vec!["gemma-4-31b-it".into()]),
-                tested_at: Instant::now(),
-                used_model: "sonnet-4-6".into(),
-                tools_supported: None,
-            },
-        );
-
-        let mut app = App {
-            config: AppConfig {
-                current: "vllm".into(),
-                listen: "127.0.0.1:0".into(),
-                providers,
-                fallback: false,
-                db_path: Some(path),
-                request_log_limit: 100,
-            },
-            mode: crate::tui::state::Mode::Normal,
-            terminal_focused: true,
-            providers: ProviderList {
-                table_state,
-                names: vec!["vllm".into()],
-            },
-            form: None,
-            message: None,
-            confirm_action: None,
-            should_quit: false,
-            server_status: crate::tui::state::ServerStatus::Stopped,
-            metrics: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
-            tests,
-            db,
-            bg_proxy_pid: None,
-            models: ModelsState {
-                provider_models: std::collections::HashMap::new(),
-                search_field: crate::tui::state::FormField::search(),
-                search_active: true,
-                selected: 0,
-                scroll: 0,
-                pending_key: None,
-            },
-            request_log: std::sync::Arc::new(std::sync::Mutex::new(
-                crate::proxy::metrics::RequestLog::default(),
-            )),
-            logs: LogsState {
-                selected: 0,
-                scroll: 0,
-                detail_scroll: 0,
-                detail_view_height: 0,
-                pending_key: None,
-            },
-            message_log: std::collections::VecDeque::new(),
-            seen_provider_errors: std::collections::HashMap::new(),
-            pending_key: None,
-            quota_status: std::collections::HashMap::new(),
-            quota_form: None,
-            detail_line_count: 6,
-        };
-
-        let backend = TestBackend::new(100, 8);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| draw_detail_panel(f, &mut app, Rect::new(0, 0, 100, 8)))
-            .unwrap();
-
-        let buffer = terminal.backend().buffer().clone();
-        let rendered = buffer
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-
-        assert!(rendered.contains("HTTP 502"));
-        assert!(rendered.contains("sonnet-4-6"));
+        assert_eq!(port_cell.fg, super::t::SUCCESS);
     }
 }

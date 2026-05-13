@@ -41,6 +41,22 @@ use event_loop::{
 use server::start_server_background;
 use testing::start_quota_queries;
 
+const MAX_EVENTS_PER_FRAME: usize = 32;
+
+fn should_read_next_event(processed_events: usize, has_waiting_event: bool) -> bool {
+    processed_events < MAX_EVENTS_PER_FRAME && has_waiting_event
+}
+
+#[cfg(test)]
+fn frame_actions(has_event: bool) -> Vec<&'static str> {
+    let mut actions = Vec::new();
+    if has_event {
+        actions.push("input");
+    }
+    actions.push("draw");
+    actions
+}
+
 struct ServerHandle {
     task: JoinHandle<crate::error::Result<()>>,
     shutdown_tx: watch::Sender<bool>,
@@ -126,12 +142,8 @@ fn run_loop(
         }
         metrics_tick = metrics_tick.wrapping_add(1) % 4;
 
-        app.drain_test_results();
-        app.tick_message();
-
-        terminal.draw(|f| ui::draw(f, app))?;
-
         if event::poll(Duration::from_millis(16))? {
+            let mut processed_events = 0;
             loop {
                 match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -148,16 +160,42 @@ fn run_loop(
                     }
                     _ => {}
                 }
+                processed_events += 1;
 
-                if !event::poll(Duration::from_millis(0))? {
+                if !should_read_next_event(processed_events, event::poll(Duration::from_millis(0))?)
+                {
                     break;
                 }
             }
         }
+
+        app.drain_test_results();
+        app.tick_message();
+
+        terminal.draw(|f| ui::draw(f, app))?;
 
         if app.should_quit {
             break;
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_EVENTS_PER_FRAME, frame_actions, should_read_next_event};
+
+    #[test]
+    fn queued_events_yield_after_frame_budget() {
+        assert!(should_read_next_event(0, true));
+        assert!(should_read_next_event(MAX_EVENTS_PER_FRAME - 1, true));
+        assert!(!should_read_next_event(MAX_EVENTS_PER_FRAME, true));
+        assert!(!should_read_next_event(0, false));
+    }
+
+    #[test]
+    fn input_is_processed_before_draw_when_available() {
+        assert_eq!(frame_actions(true), vec!["input", "draw"]);
+        assert_eq!(frame_actions(false), vec!["draw"]);
+    }
 }

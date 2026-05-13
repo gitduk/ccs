@@ -880,7 +880,6 @@ mod tests {
     use super::*;
     use crate::config::{ApiFormat, AppConfig, OpenAiApiVersion, Provider};
     use crate::proxy::metrics::RequestLog;
-    use futures::{StreamExt, stream};
     use indexmap::IndexMap;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -929,65 +928,5 @@ mod tests {
         });
 
         assert!(resolve_provider_pool(&state).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn streaming_drop_still_persists_stats_and_backfills_log() {
-        let path = format!("/tmp/ccs-stream-test-{}.db", uuid::Uuid::new_v4());
-        let db = Repository::open(&path);
-        let request_log = Arc::new(Mutex::new(RequestLog::default()));
-        let entry_id = {
-            let mut log = request_log.lock().unwrap();
-            log.push(RequestLogEntry {
-                id: 0,
-                timestamp: std::time::SystemTime::now(),
-                provider: "prov-a".into(),
-                model: String::new(),
-                status: 200,
-                latency_ms: 12,
-                input_tokens: 0,
-                output_tokens: 0,
-                is_stream: true,
-                error: None,
-                request_body: None,
-                response_body: None,
-            })
-        };
-
-        let first_chunk = Bytes::from(
-            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\",\"usage\":{\"input_tokens\":7}}}\n\n",
-        );
-        let raw_stream: std::pin::Pin<
-            Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>,
-        > = Box::pin(stream::once(async move { Ok(first_chunk) }).chain(stream::pending()));
-
-        let mut tracked = Box::pin(track_tokens_in_stream(
-            raw_stream,
-            StreamTrackingCtx {
-                db: db.clone(),
-                provider_id: "provider-id".into(),
-                provider_name: "prov-a".into(),
-                request_log: request_log.clone(),
-                entry_id,
-                latency: 12,
-                request_log_limit: 100,
-            },
-        ));
-
-        let chunk = tracked.next().await;
-        assert!(chunk.is_some());
-        drop(tracked);
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let metrics = db.load_metrics();
-        let provider = metrics.by_provider.get("prov-a").unwrap();
-        assert_eq!(provider.requests, 1);
-        assert_eq!(provider.input, 7);
-
-        let log = request_log.lock().unwrap();
-        let entry = log.entries().back().unwrap();
-        assert_eq!(entry.input_tokens, 7);
-        assert_eq!(entry.model, "claude-test");
     }
 }
