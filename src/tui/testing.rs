@@ -197,27 +197,26 @@ pub(super) fn test_provider_after_add(app: &mut App, name: &str) {
     });
 }
 
-pub(super) fn start_background_tests(app: &mut App) {
-    let names: Vec<String> = app.config.providers.keys().cloned().collect();
-    for name in names {
-        test_provider_by_name(app, &name);
-    }
-
-    // Also run quota commands for providers that have them configured
-    start_quota_queries(app);
-}
-
 /// Run quota commands for all providers that have one configured.
-fn start_quota_queries(app: &mut App) {
-    let names: Vec<String> = app.config.providers.keys().cloned().collect();
-    for name in names {
-        run_quota_for_name(app, &name);
+pub(super) fn start_quota_queries(app: &mut App) {
+    let jobs: Vec<(String, String)> = app
+        .config
+        .providers
+        .values()
+        .filter_map(|provider| {
+            provider
+                .quota_command
+                .as_ref()
+                .map(|command| (provider.id.clone(), command.clone()))
+        })
+        .collect();
+
+    for (provider_id, command) in jobs {
+        start_quota_query(app, provider_id, command);
     }
 }
 
 pub(super) fn run_quota_for_name(app: &mut App, name: &str) {
-    use super::state::QuotaStatus;
-
     let Some(provider) = app.config.providers.get(name) else {
         return;
     };
@@ -225,8 +224,12 @@ pub(super) fn run_quota_for_name(app: &mut App, name: &str) {
         return;
     };
 
-    let provider_id = provider.id.clone();
-    let command = command.clone();
+    start_quota_query(app, provider.id.clone(), command.clone());
+}
+
+fn start_quota_query(app: &mut App, provider_id: String, command: String) {
+    use super::state::QuotaStatus;
+
     let tx = app.tests.tx.clone();
 
     app.quota_status
@@ -242,7 +245,7 @@ pub(super) fn run_quota_for_name(app: &mut App, name: &str) {
 }
 
 /// Pick a model from a non-empty slice using a module-level counter so
-/// consecutive calls (e.g. during start_background_tests) cycle through
+/// consecutive calls cycle through
 /// models rather than all landing on the same index.
 fn pick_next(items: &[String]) -> String {
     static CTR: AtomicUsize = AtomicUsize::new(0);

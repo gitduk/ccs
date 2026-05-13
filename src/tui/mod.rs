@@ -39,7 +39,7 @@ use event_loop::{
     check_bg_proxy_status, check_server_status, reload_metrics_from_db, start_db_watcher,
 };
 use server::start_server_background;
-use testing::start_background_tests;
+use testing::start_quota_queries;
 
 struct ServerHandle {
     task: JoinHandle<crate::error::Result<()>>,
@@ -68,7 +68,7 @@ pub fn run_tui() -> Result<()> {
     if app.bg_proxy_pid.is_none() {
         start_server_background(&mut app, &mut server);
     }
-    start_background_tests(&mut app);
+    start_quota_queries(&mut app);
 
     let result = run_loop(&mut terminal, &mut app, &mut server, db_change_rx);
 
