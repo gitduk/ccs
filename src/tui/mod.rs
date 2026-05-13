@@ -40,7 +40,7 @@ use event_loop::{
     replace_request_logs_if_changed, start_db_watcher,
 };
 use server::start_server_background;
-use testing::start_quota_queries;
+use testing::start_background_tests;
 
 const MAX_EVENTS_PER_FRAME: usize = 32;
 const ASYNC_DRAIN_INTERVAL: Duration = Duration::from_millis(50);
@@ -213,7 +213,7 @@ pub fn run_tui() -> Result<()> {
     if app.bg_proxy_pid.is_none() {
         start_server_background(&mut app, &mut server);
     }
-    start_quota_queries(&mut app);
+    start_background_tests(&mut app);
 
     let result = run_loop(&mut terminal, &mut app, &mut server, db_change_rx);
 

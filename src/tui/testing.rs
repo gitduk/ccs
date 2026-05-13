@@ -197,6 +197,12 @@ pub(super) fn test_provider_after_add(app: &mut App, name: &str) {
     });
 }
 
+pub(super) fn start_background_tests(app: &mut App) {
+    let name = app.config.current.clone();
+    test_provider_by_name(app, &name);
+    start_quota_queries(app);
+}
+
 /// Run quota commands for all providers that have one configured.
 pub(super) fn start_quota_queries(app: &mut App) {
     let jobs: Vec<(String, String)> = app
@@ -251,4 +257,112 @@ fn pick_next(items: &[String]) -> String {
     static CTR: AtomicUsize = AtomicUsize::new(0);
     let idx = CTR.fetch_add(1, Ordering::Relaxed) % items.len();
     items[idx].clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ApiFormat, AppConfig, Provider};
+    use crate::tui::state::{
+        App, FormField, LogsState, Mode, ModelsState, ProviderList, ServerStatus, TestState,
+    };
+    use indexmap::IndexMap;
+    use ratatui::widgets::TableState;
+
+    fn provider(id: &str) -> Provider {
+        Provider {
+            id: id.to_string(),
+            base_url: "http://127.0.0.1:9".to_string(),
+            api_key: "sk-test".to_string(),
+            api_format: ApiFormat::Anthropic,
+            model_map: Default::default(),
+            routes: vec![],
+            enabled: true,
+            fallback: true,
+            api_version: None,
+            quota: None,
+            quota_command: None,
+            port: None,
+        }
+    }
+
+    fn app_with_current(current: &str) -> App {
+        let path = format!("/tmp/ccs-startup-test-{}.db", uuid::Uuid::new_v4());
+        let mut providers = IndexMap::new();
+        providers.insert("first".to_string(), provider("first-id"));
+        providers.insert("second".to_string(), provider("second-id"));
+
+        let db = crate::repo::Repository::open(&path);
+        let mut table_state = TableState::default();
+        table_state.select(Some(0));
+
+        let mut app = App {
+            config: AppConfig {
+                current: current.to_string(),
+                listen: "127.0.0.1:0".to_string(),
+                providers,
+                fallback: false,
+                db_path: Some(path),
+                request_log_limit: 100,
+            },
+            mode: Mode::Normal,
+            terminal_focused: true,
+            providers: ProviderList {
+                table_state,
+                names: vec!["first".to_string(), "second".to_string()],
+            },
+            form: None,
+            message: None,
+            confirm_action: None,
+            should_quit: false,
+            server_status: ServerStatus::Stopped,
+            metrics: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+            tests: TestState::new(),
+            db,
+            bg_proxy_pid: None,
+            models: ModelsState {
+                provider_models: std::collections::HashMap::from([
+                    ("first".to_string(), vec!["first-model".to_string()]),
+                    ("second".to_string(), vec!["second-model".to_string()]),
+                ]),
+                search_field: FormField::search(),
+                search_active: true,
+                selected: 0,
+                scroll: 0,
+                pending_key: None,
+            },
+            request_log: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::proxy::metrics::RequestLog::default(),
+            )),
+            logs: LogsState {
+                selected: 0,
+                scroll: 0,
+                detail_scroll: 0,
+                detail_view_height: 0,
+                pending_key: None,
+            },
+            message_log: std::collections::VecDeque::new(),
+            seen_provider_errors: std::collections::HashMap::new(),
+            pending_key: None,
+            quota_status: std::collections::HashMap::new(),
+            quota_form: None,
+            detail_line_count: 0,
+        };
+        app.tests.client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(10))
+            .connect_timeout(Duration::from_millis(10))
+            .build()
+            .unwrap();
+        app
+    }
+
+    #[tokio::test]
+    async fn startup_tests_only_current_provider() {
+        let mut app = app_with_current("second");
+
+        start_background_tests(&mut app);
+
+        assert!(app.tests.pending.contains("second"));
+        assert!(!app.tests.pending.contains("first"));
+    }
 }
