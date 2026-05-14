@@ -103,12 +103,8 @@ impl<'a> RequestPipeline<'a> {
             request_body: Some(self.request_body_str.clone()),
             response_body: resp_body,
         };
-        if let Ok(id) = self
-            .state
-            .request_log
-            .lock()
-            .map(|mut log| log.push(entry.clone()))
-        {
+        if let Ok(mut log) = self.state.request_log.lock() {
+            let id = log.push(entry.clone());
             let mut persisted = entry;
             persisted.id = id;
             self.state

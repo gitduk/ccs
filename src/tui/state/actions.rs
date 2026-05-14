@@ -494,31 +494,30 @@ impl App {
                     result,
                 } => {
                     use super::QuotaStatus;
-                    let current_provider_id = provider_id.clone();
+                    let is_form_provider = self
+                        .quota_form
+                        .as_ref()
+                        .and_then(|form| self.config.providers.get(&form.provider_name))
+                        .map(|p| p.id == provider_id)
+                        .unwrap_or(false);
                     let status = match &result {
                         Ok(quota_result) => QuotaStatus::Success(quota_result.clone()),
                         Err(e) => QuotaStatus::Error(e.clone()),
                     };
                     self.quota_status.insert(provider_id, status);
-                    if let Some(form) = self.quota_form.as_mut() {
-                        let is_current_provider = self
-                            .config
-                            .providers
-                            .get(&form.provider_name)
-                            .map(|p| p.id.as_str())
-                            == Some(current_provider_id.as_str());
-                        if is_current_provider {
-                            form.preview_loading = false;
-                            form.preview_scroll = 0;
-                            match result {
-                                Ok(quota_result) => {
-                                    form.preview = Some(quota_result.output);
-                                    form.error = None;
-                                }
-                                Err(e) => {
-                                    form.preview = None;
-                                    form.error = Some(e);
-                                }
+                    if let Some(form) = self.quota_form.as_mut()
+                        && is_form_provider
+                    {
+                        form.preview_loading = false;
+                        form.preview_scroll = 0;
+                        match result {
+                            Ok(quota_result) => {
+                                form.preview = Some(quota_result.output);
+                                form.error = None;
+                            }
+                            Err(e) => {
+                                form.preview = None;
+                                form.error = Some(e);
                             }
                         }
                     }

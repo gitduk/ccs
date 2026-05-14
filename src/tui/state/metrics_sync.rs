@@ -28,12 +28,13 @@ impl App {
                 .map(|(p, e)| (p.clone(), e.status, e.message.clone()))
                 .collect()
         } else {
-            vec![]
+            return false;
         };
 
         self.seen_provider_errors
             .retain(|p, _| error_snapshot.iter().any(|(ep, _, _)| ep == p));
 
+        let mut dirty = false;
         for (provider, status, message) in error_snapshot {
             let key = format!("{status}:{message}");
             if self
@@ -48,11 +49,15 @@ impl App {
                     format!("[{provider}] HTTP {status} — {message}")
                 };
                 self.push_message_log(text, MessageKind::Error);
+                dirty = true;
             }
         }
 
-        self.models.provider_models = provider_models;
-        true
+        if self.models.provider_models != provider_models {
+            self.models.provider_models = provider_models;
+            dirty = true;
+        }
+        dirty
     }
 
     /// Convenience: load a snapshot from DB and apply it immediately (synchronous path).
