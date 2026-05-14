@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::db::{self, SharedDb};
-use crate::proxy::metrics::{TokenMetrics, sync_next_request_log_id};
+use crate::metrics::{TokenMetrics, sync_next_request_log_id};
 
 /// Repository wraps the shared DB connection and owns all locking and SQL dispatch.
 /// Callers never touch `SharedDb` or `crate::db::*` directly.
@@ -175,7 +175,7 @@ impl Repository {
     /// 200 is enforced so a small `request_log_limit` never truncates history too aggressively.
     pub(crate) fn persist_request_log_async(
         &self,
-        entry: crate::proxy::metrics::RequestLogEntry,
+        entry: crate::metrics::RequestLogEntry,
         keep: usize,
     ) {
         let repo = self.clone();
@@ -218,10 +218,7 @@ impl Repository {
     }
 
     /// Load the most recent `limit` request log entries (oldest-first).
-    pub fn load_recent_request_logs(
-        &self,
-        limit: usize,
-    ) -> Vec<crate::proxy::metrics::RequestLogEntry> {
+    pub fn load_recent_request_logs(&self, limit: usize) -> Vec<crate::metrics::RequestLogEntry> {
         match self.0.lock() {
             Ok(conn) => db::load_recent_request_logs(&conn, limit),
             Err(_) => {

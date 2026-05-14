@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, Result, params};
 
-use crate::proxy::metrics::TokenMetrics;
+use crate::metrics::TokenMetrics;
 
 pub type SharedDb = Arc<Mutex<Connection>>;
 
@@ -382,7 +382,7 @@ pub fn clear_provider(conn: &mut Connection, provider_id: &str) -> Result<()> {
 /// in-process and bg-proxy entries share the same ID space within a session.
 pub fn insert_request_log(
     conn: &Connection,
-    entry: &crate::proxy::metrics::RequestLogEntry,
+    entry: &crate::metrics::RequestLogEntry,
 ) -> Result<()> {
     let ts = entry
         .timestamp
@@ -433,7 +433,7 @@ pub fn update_request_log_tokens(
 pub fn load_recent_request_logs(
     conn: &Connection,
     limit: usize,
-) -> Vec<crate::proxy::metrics::RequestLogEntry> {
+) -> Vec<crate::metrics::RequestLogEntry> {
     let Ok(mut stmt) = conn.prepare(
         "SELECT id, timestamp_ms, provider_name, model, status, latency_ms,
                 input_tokens, output_tokens, is_stream, error, request_body, response_body
@@ -450,7 +450,7 @@ pub fn load_recent_request_logs(
         let error: Option<String> = row.get(9)?;
         let request_body: Option<String> = row.get(10)?;
         let response_body: Option<String> = row.get(11)?;
-        Ok(crate::proxy::metrics::RequestLogEntry {
+        Ok(crate::metrics::RequestLogEntry {
             id: row.get(0)?,
             timestamp: std::time::SystemTime::UNIX_EPOCH
                 + std::time::Duration::from_millis(ts_ms as u64),

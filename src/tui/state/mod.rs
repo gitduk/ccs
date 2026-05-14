@@ -9,7 +9,7 @@ pub(super) const PORT_FIELD_IDX: usize = 5;
 use ratatui::widgets::TableState;
 
 use crate::config::{AppConfig, Provider, RouteRule};
-use crate::proxy::metrics::{SharedMetrics, SharedRequestLog};
+use crate::metrics::{SharedMetrics, SharedRequestLog};
 use crate::repo::Repository;
 use crate::tester::TestResult;
 
@@ -19,10 +19,17 @@ pub(super) const MESSAGE_TIMEOUT_SECS: u64 = 3;
 mod actions;
 mod bg_proxy;
 mod filter;
+mod metrics_sync;
 mod navigation;
 
 pub use bg_proxy::{is_process_alive, send_sighup};
 pub use filter::filter_suggestions;
+
+/// Snapshot of DB-backed metrics loaded off the hot path for non-blocking TUI redraws.
+pub(crate) struct MetricsSnapshot {
+    pub metrics: crate::metrics::TokenMetrics,
+    pub provider_models: std::collections::HashMap<String, Vec<String>>,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Mode {
@@ -715,7 +722,7 @@ mod tests {
                 pending_key: None,
             },
             request_log: std::sync::Arc::new(std::sync::Mutex::new(
-                crate::proxy::metrics::RequestLog::default(),
+                crate::metrics::RequestLog::default(),
             )),
             logs: super::LogsState {
                 selected: 0,

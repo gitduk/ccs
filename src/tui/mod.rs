@@ -33,11 +33,10 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::error::Result;
-use state::App;
+use state::{App, MetricsSnapshot};
 
 use event_loop::{
-    MetricsSnapshot, apply_metrics_snapshot, check_bg_proxy_status, check_server_status,
-    replace_request_logs_if_changed, start_db_watcher,
+    check_bg_proxy_status, check_server_status, replace_request_logs_if_changed, start_db_watcher,
 };
 use server::start_server_background;
 use testing::start_background_tests;
@@ -117,7 +116,7 @@ fn frame_actions(
 
 enum BgDbResult {
     Metrics(MetricsSnapshot),
-    RequestLogs(Vec<crate::proxy::metrics::RequestLogEntry>),
+    RequestLogs(Vec<crate::metrics::RequestLogEntry>),
 }
 
 struct BgDbJobs {
@@ -174,7 +173,7 @@ impl BgDbJobs {
             match result {
                 BgDbResult::Metrics(snapshot) => {
                     self.metrics_running = false;
-                    dirty |= apply_metrics_snapshot(app, snapshot);
+                    dirty |= app.apply_metrics_snapshot(snapshot);
                 }
                 BgDbResult::RequestLogs(logs) => {
                     self.request_logs_running = false;

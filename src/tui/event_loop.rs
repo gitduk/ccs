@@ -1,7 +1,4 @@
-use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
-
-use crate::proxy::metrics::TokenMetrics;
 
 use super::App;
 use super::ServerHandle;
@@ -56,69 +53,13 @@ pub(super) fn start_db_watcher(app: &App) -> Option<(Receiver<()>, notify::Recom
     Some((event_rx, watcher))
 }
 
-pub(crate) struct MetricsSnapshot {
-    pub metrics: TokenMetrics,
-    pub provider_models: HashMap<String, Vec<String>>,
-}
-
-pub(crate) fn load_metrics_snapshot(app: &App) -> MetricsSnapshot {
-    let (metrics, provider_models) = app.db.load_all();
-    MetricsSnapshot {
-        metrics,
-        provider_models,
-    }
-}
-
-pub(crate) fn apply_metrics_snapshot(app: &mut App, snapshot: MetricsSnapshot) -> bool {
-    let MetricsSnapshot {
-        metrics,
-        provider_models,
-    } = snapshot;
-
-    let error_snapshot: Vec<(String, u16, String)> = if let Ok(mut m) = app.metrics.lock() {
-        let saved_errors = std::mem::take(&mut m.last_error);
-        *m = metrics;
-        m.last_error = saved_errors;
-        m.last_error
-            .iter()
-            .map(|(p, e)| (p.clone(), e.status, e.message.clone()))
-            .collect()
-    } else {
-        vec![]
-    };
-
-    app.seen_provider_errors
-        .retain(|p, _| error_snapshot.iter().any(|(ep, _, _)| ep == p));
-
-    for (provider, status, message) in error_snapshot {
-        let key = format!("{status}:{message}");
-        if app
-            .seen_provider_errors
-            .get(&provider)
-            .is_none_or(|k| k != &key)
-        {
-            app.seen_provider_errors.insert(provider.clone(), key);
-            let text = if status == 0 {
-                format!("[{provider}] network error — {message}")
-            } else {
-                format!("[{provider}] HTTP {status} — {message}")
-            };
-            app.push_message_log(text, MessageKind::Error);
-        }
-    }
-
-    app.models.provider_models = provider_models;
-    true
-}
-
-pub(crate) fn reload_metrics_from_db(app: &mut App) {
-    let snapshot = load_metrics_snapshot(app);
-    apply_metrics_snapshot(app, snapshot);
-}
+// MetricsSnapshot, load_metrics_snapshot, apply_metrics_snapshot, and
+// reload_metrics_from_db are App methods defined in state/metrics_sync.rs.
+// tui/mod.rs imports MetricsSnapshot directly from state.
 
 pub(crate) fn replace_request_logs_if_changed(
     app: &mut App,
-    logs: Vec<crate::proxy::metrics::RequestLogEntry>,
+    logs: Vec<crate::metrics::RequestLogEntry>,
 ) -> bool {
     let Ok(mut current) = app.request_log.lock() else {
         return false;

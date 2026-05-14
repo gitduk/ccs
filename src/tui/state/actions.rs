@@ -1,9 +1,92 @@
-use crate::config::{self, ApiFormat, OpenAiApiVersion};
+use crate::config::{self, ApiFormat, OpenAiApiVersion, RouteRule};
 use crate::error::Result;
 
 use super::{
     App, ConfirmAction, FALLBACK_FIELD_IDX, MessageKind, Mode, PORT_FIELD_IDX, ProviderForm,
 };
+
+/// Parsed and validated fields extracted from a [`ProviderForm`].
+/// Produced by [`parse_provider_form`]; consumed by [`App::do_save_form`].
+struct ParsedProviderFields {
+    name: String,
+    base_url: String,
+    api_key: String,
+    api_format: ApiFormat,
+    api_version: Option<OpenAiApiVersion>,
+    fallback: bool,
+    port: Option<u16>,
+    routes: Vec<RouteRule>,
+    is_new: bool,
+    original_name: Option<String>,
+}
+
+/// Extract, parse, and validate the provider form fields that can be checked
+/// without App state (name uniqueness and port collisions are checked by the caller).
+/// Returns `Err(message)` with a user-facing error string on the first failure.
+fn parse_provider_form(
+    form: &ProviderForm,
+    known_models: &[String],
+) -> std::result::Result<ParsedProviderFields, String> {
+    let name = form.fields[0].value.trim().to_string();
+    let base_url = form.fields[1]
+        .value
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+    let api_key = form.fields[2].value.trim().to_string();
+    let format_str = form.fields[3].value.trim().to_string();
+    let fallback = form.fields[FALLBACK_FIELD_IDX].value.trim() == "yes";
+    let port_raw = form.fields[PORT_FIELD_IDX].value.trim().to_string();
+    let is_new = form.original_name.is_none();
+    let original_name = form.original_name.clone();
+
+    let routes: Vec<RouteRule> = form
+        .routes
+        .iter()
+        .filter(|r| r.is_valid(known_models))
+        .cloned()
+        .collect();
+
+    let port: Option<u16> = if port_raw.is_empty() {
+        None
+    } else {
+        match port_raw.parse::<u16>() {
+            Ok(p) => Some(p),
+            Err(_) => {
+                return Err(format!("Port must be a number (1–65535), got '{port_raw}'"));
+            }
+        }
+    };
+
+    if name.is_empty() {
+        return Err("Name cannot be empty".to_string());
+    }
+    if base_url.is_empty() {
+        return Err("Base URL cannot be empty".to_string());
+    }
+    if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+        return Err("Base URL must start with http:// or https://".to_string());
+    }
+
+    let (api_format, api_version) = match format_str.as_str() {
+        "openai-chat" => (ApiFormat::OpenAI, Some(OpenAiApiVersion::ChatCompletions)),
+        "openai-responses" => (ApiFormat::OpenAI, Some(OpenAiApiVersion::Responses)),
+        _ => (ApiFormat::Anthropic, None),
+    };
+
+    Ok(ParsedProviderFields {
+        name,
+        base_url,
+        api_key,
+        api_format,
+        api_version,
+        fallback,
+        port,
+        routes,
+        is_new,
+        original_name,
+    })
+}
 
 impl App {
     pub fn add(&mut self) {
@@ -32,111 +115,74 @@ impl App {
             return Ok(());
         };
 
-        let new_name = form.fields[0].value.trim().to_string();
-        let base_url = form.fields[1]
-            .value
-            .trim()
-            .trim_end_matches('/')
-            .to_string();
-        let api_key = form.fields[2].value.trim().to_string();
-        let format_str = form.fields[3].value.trim().to_string();
-        let fallback = form.fields[FALLBACK_FIELD_IDX].value.trim() == "yes";
-        let port_raw = form.fields[PORT_FIELD_IDX].value.trim().to_string();
-        let is_new = form.original_name.is_none();
-        let original_name = form.original_name.clone();
-        // Look up the known model list for this provider (used for route validation).
+        // Look up the known model list for route validation.
         // If not yet loaded we skip the target check (conservative).
-        let models_key = original_name.as_deref().unwrap_or(new_name.as_str());
+        let models_key = form
+            .original_name
+            .as_deref()
+            .unwrap_or_else(|| form.fields[0].value.trim());
         let known_models: Vec<String> = self
             .models
             .provider_models
             .get(models_key)
             .cloned()
             .unwrap_or_default();
-        // Drop invalid routes (empty pattern/target, or target not in known models).
-        let routes: Vec<_> = form
-            .routes
-            .iter()
-            .filter(|r| r.is_valid(&known_models))
-            .cloned()
-            .collect();
 
-        let is_rename = !is_new && original_name.as_deref() != Some(new_name.as_str());
-
-        let port: Option<u16> = if port_raw.is_empty() {
-            None
-        } else {
-            match port_raw.parse::<u16>() {
-                Ok(p) => Some(p),
-                Err(_) => {
-                    if let Some(f) = self.form.as_mut() {
-                        f.error =
-                            Some(format!("Port must be a number (1–65535), got '{port_raw}'"));
-                    }
-                    return Ok(());
+        let fields = match parse_provider_form(form, &known_models) {
+            Ok(f) => f,
+            Err(err) => {
+                if let Some(f) = self.form.as_mut() {
+                    f.error = Some(err);
                 }
+                return Ok(());
             }
         };
+        // `form` borrow ends here (NLL).
 
-        let validation_error = if new_name.is_empty() {
-            Some("Name cannot be empty".to_string())
-        } else if base_url.is_empty() {
-            Some("Base URL cannot be empty".to_string())
-        } else if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
-            Some("Base URL must start with http:// or https://".to_string())
-        } else if (is_new || is_rename) && self.config.providers.contains_key(&new_name) {
-            Some(format!("Provider '{new_name}' already exists"))
-        } else {
-            None
-        };
-        if let Some(err) = validation_error {
+        let is_rename =
+            !fields.is_new && fields.original_name.as_deref() != Some(fields.name.as_str());
+
+        if (fields.is_new || is_rename) && self.config.providers.contains_key(&fields.name) {
             if let Some(f) = self.form.as_mut() {
-                f.error = Some(err);
+                f.error = Some(format!("Provider '{}' already exists", fields.name));
             }
             return Ok(());
         }
 
-        let (api_format, api_version) = match format_str.as_str() {
-            "openai-chat" => (ApiFormat::OpenAI, Some(OpenAiApiVersion::ChatCompletions)),
-            "openai-responses" => (ApiFormat::OpenAI, Some(OpenAiApiVersion::Responses)),
-            _ => (ApiFormat::Anthropic, None),
-        };
-
-        let lookup_name = original_name.as_deref().unwrap_or(&new_name);
+        let lookup_name = fields.original_name.as_deref().unwrap_or(&fields.name);
         let existing = self.config.providers.get(lookup_name);
         let provider_id = existing
             .map(|p| p.id.clone())
             .filter(|id| !id.is_empty())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let model_map = existing.map(|p| p.model_map.clone()).unwrap_or_default();
-
         let enabled = existing.map(|p| p.enabled).unwrap_or(true);
         // fallback is set via the form field; don't inherit from existing.
         let quota = existing.and_then(|p| p.quota.clone());
         let quota_command = existing.and_then(|p| p.quota_command.clone());
         let provider = crate::config::Provider {
             id: provider_id.clone(),
-            base_url,
-            api_key,
-            api_format,
+            base_url: fields.base_url,
+            api_key: fields.api_key,
+            api_format: fields.api_format,
             model_map,
-            routes,
+            routes: fields.routes.clone(),
             enabled,
-            fallback,
-            api_version,
+            fallback: fields.fallback,
+            api_version: fields.api_version,
             quota,
             quota_command,
-            port,
+            port: fields.port,
         };
 
         // Port collision check — apply the proposed change to a temp config and let
         // validate_ports() enforce all rules centrally, so this path stays in sync.
-        if port.is_some() {
+        if fields.port.is_some() {
             let mut temp = self.config.clone();
-            if let Some(old_name) = original_name.as_deref() {
+            if let Some(old_name) = fields.original_name.as_deref() {
                 temp.providers.shift_remove(old_name);
             }
-            temp.providers.insert(new_name.clone(), provider.clone());
+            temp.providers.insert(fields.name.clone(), provider.clone());
             if let Err(e) = temp.validate_ports() {
                 if let Some(f) = self.form.as_mut() {
                     f.error = Some(e.to_string());
@@ -146,12 +192,12 @@ impl App {
         }
 
         if is_rename {
-            let old_name = original_name.as_deref().unwrap();
+            let old_name = fields.original_name.as_deref().unwrap();
             self.config.providers = std::mem::take(&mut self.config.providers)
                 .into_iter()
                 .map(|(k, v)| {
                     if k == old_name {
-                        (new_name.clone(), provider.clone())
+                        (fields.name.clone(), provider.clone())
                     } else {
                         (k, v)
                     }
@@ -159,34 +205,36 @@ impl App {
                 .collect();
 
             if self.config.current == old_name {
-                self.config.current = new_name.clone();
+                self.config.current = fields.name.clone();
             }
 
-            self.db.rename_provider(&provider_id, &new_name);
+            self.db.rename_provider(&provider_id, &fields.name);
 
             if let Some(models) = self.models.provider_models.remove(old_name) {
-                self.models.provider_models.insert(new_name.clone(), models);
+                self.models
+                    .provider_models
+                    .insert(fields.name.clone(), models);
             }
             if let Some(result) = self.tests.results.remove(old_name) {
-                self.tests.results.insert(new_name.clone(), result);
+                self.tests.results.insert(fields.name.clone(), result);
             }
             if self.tests.pending.remove(old_name) {
-                self.tests.pending.insert(new_name.clone());
+                self.tests.pending.insert(fields.name.clone());
             }
             if let Some(model) = self.tests.testing_model.remove(old_name) {
-                self.tests.testing_model.insert(new_name.clone(), model);
+                self.tests.testing_model.insert(fields.name.clone(), model);
             }
         } else {
             let is_first = self.config.providers.is_empty();
-            self.config.providers.insert(new_name.clone(), provider);
+            self.config.providers.insert(fields.name.clone(), provider);
             if is_first {
-                self.config.current = new_name.clone();
+                self.config.current = fields.name.clone();
             }
         }
 
         config::save_config(&self.config)?;
         self.refresh_ids();
-        if let Some(idx) = self.providers.names.iter().position(|s| s == &new_name) {
+        if let Some(idx) = self.providers.names.iter().position(|s| s == &fields.name) {
             self.providers.table_state.select(Some(idx));
         }
 
@@ -197,10 +245,9 @@ impl App {
             // Keep the form open; if this was a brand-new provider, mark it as
             // an edit from now on so subsequent autosaves don't try to re-insert.
             if let Some(f) = &mut self.form {
-                // Mirror the cleanup: remove invalid routes from the live form too.
                 f.routes.retain(|r| r.is_valid(&known_models));
                 f.clamp_route_cursor();
-                f.original_name = Some(new_name);
+                f.original_name = Some(fields.name);
                 f.error = None;
             }
         }
@@ -226,7 +273,7 @@ impl App {
         }
         // Reload immediately so the TUI reflects the cleared state right away
         // instead of waiting up to ~1s for the next periodic reload.
-        crate::tui::event_loop::reload_metrics_from_db(self);
+        self.reload_metrics_from_db();
         self.set_message("Usage data cleared", MessageKind::Success);
     }
 
@@ -242,7 +289,7 @@ impl App {
         if let Ok(mut m) = self.metrics.lock() {
             m.clear_error(&name);
         }
-        crate::tui::event_loop::reload_metrics_from_db(self);
+        self.reload_metrics_from_db();
         self.set_message(
             format!("Usage data cleared for '{name}'"),
             MessageKind::Success,

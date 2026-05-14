@@ -23,7 +23,7 @@ pub(super) fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let Ok(m) = app.metrics.lock() else { return };
-    let mut provider_rows: Vec<(&str, crate::proxy::metrics::ProviderStats)> = app
+    let mut provider_rows: Vec<(&str, crate::metrics::ProviderStats)> = app
         .providers
         .names
         .iter()
@@ -43,7 +43,7 @@ pub(super) fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
     drop(m);
 
     provider_rows.sort_by(|(_, a), (_, b)| {
-        let rate = |s: &crate::proxy::metrics::ProviderStats| {
+        let rate = |s: &crate::metrics::ProviderStats| {
             if s.failures == 0 && s.requests == 0 {
                 f64::MAX
             } else if s.requests > 0 {

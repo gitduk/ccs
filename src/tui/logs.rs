@@ -17,7 +17,7 @@ use super::state::{App, LogsState, MessageKind, Mode};
 use super::theme::{self as t};
 use super::ui::format::{fmt_latency, format_tokens, shorten_model_name};
 use super::ui::layout::{BORDER_INNER_DIVIDER, DASH, TITLE_SIDE, centered_rect};
-use crate::proxy::metrics::RequestLogEntry;
+use crate::metrics::RequestLogEntry;
 
 const TRUNCATED_BODY_MARKER: &str = "…[truncated]";
 

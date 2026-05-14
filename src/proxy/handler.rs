@@ -47,6 +47,77 @@ struct ProviderKey {
 
 use crate::repo::{Repository, StatsDelta};
 
+/// Bundles per-request shared state for the provider iteration loop.
+/// Converts the three ad-hoc closures in `try_providers` into methods so
+/// each concern (failure recording, error metrics, request logging) is named
+/// and testable in isolation.
+struct RequestPipeline<'a> {
+    state: &'a SharedState,
+    req_model_hint: String,
+    request_body_str: String,
+    is_stream: bool,
+    request_log_limit: usize,
+}
+
+impl<'a> RequestPipeline<'a> {
+    fn record_failure(&self, pkey: &ProviderKey) {
+        self.state.db.persist_stats_async(
+            &pkey.id,
+            &pkey.name,
+            None,
+            StatsDelta {
+                requests: 1,
+                failures: 1,
+                ..Default::default()
+            },
+        );
+    }
+
+    fn record_error_metric(&self, name: &str, status: u16, msg: &str, pattern: &str) {
+        if let Ok(mut m) = self.state.metrics.lock() {
+            m.record_error(name, status, &self.req_model_hint, pattern, msg);
+        }
+    }
+
+    /// Log a failed request. The request body is taken from `self`; only the
+    /// response body (if any) is supplied by the caller.
+    fn push_request_log(
+        &self,
+        provider: &str,
+        status: u16,
+        latency_ms: u64,
+        error: String,
+        resp_body: Option<String>,
+    ) {
+        let entry = RequestLogEntry {
+            id: 0,
+            timestamp: std::time::SystemTime::now(),
+            provider: provider.to_owned(),
+            model: self.req_model_hint.clone(),
+            status,
+            latency_ms,
+            input_tokens: 0,
+            output_tokens: 0,
+            is_stream: self.is_stream,
+            error: Some(error),
+            request_body: Some(self.request_body_str.clone()),
+            response_body: resp_body,
+        };
+        if let Ok(id) = self
+            .state
+            .request_log
+            .lock()
+            .map(|mut log| log.push(entry.clone()))
+        {
+            let mut persisted = entry;
+            persisted.id = id;
+            self.state
+                .db
+                .persist_request_log_async(persisted, self.request_log_limit);
+        }
+    }
+}
+
 /// Health check endpoint.
 pub async fn health_check(State(state): State<SharedState>) -> impl IntoResponse {
     let config = state.config.read().await;
@@ -206,65 +277,17 @@ async fn try_providers(
     let mut auth_failures = 0usize;
     let mut last_status = None;
     let mut last_error_body: Option<Bytes> = None;
-    let req_model_hint = ctx
-        .req_json
-        .and_then(|v| v.get("model").and_then(|m| m.as_str()))
-        .unwrap_or("")
-        .to_string();
 
-    let request_body_str = body_to_string(ctx.body);
-
-    let record_failure = |state: &SharedState, pkey: &ProviderKey| {
-        state.db.persist_stats_async(
-            &pkey.id,
-            &pkey.name,
-            None,
-            StatsDelta {
-                requests: 1,
-                failures: 1,
-                ..Default::default()
-            },
-        );
-    };
-
-    let record_error_metric =
-        |state: &SharedState, name: &str, status: u16, msg: &str, pattern: &str| {
-            if let Ok(mut m) = state.metrics.lock() {
-                m.record_error(name, status, &req_model_hint, pattern, msg);
-            }
-        };
-
-    let push_request_log = |provider: &str,
-                            status: u16,
-                            latency_ms: u64,
-                            error: String,
-                            req_body: Option<String>,
-                            resp_body: Option<String>| {
-        let entry = RequestLogEntry {
-            id: 0,
-            timestamp: std::time::SystemTime::now(),
-            provider: provider.to_owned(),
-            model: req_model_hint.clone(),
-            status,
-            latency_ms,
-            input_tokens: 0,
-            output_tokens: 0,
-            is_stream: ctx.is_stream,
-            error: Some(error),
-            request_body: req_body,
-            response_body: resp_body,
-        };
-        if let Ok(id) = state
-            .request_log
-            .lock()
-            .map(|mut log| log.push(entry.clone()))
-        {
-            let mut persisted = entry;
-            persisted.id = id;
-            state
-                .db
-                .persist_request_log_async(persisted, request_log_limit);
-        }
+    let pipeline = RequestPipeline {
+        state,
+        req_model_hint: ctx
+            .req_json
+            .and_then(|v| v.get("model").and_then(|m| m.as_str()))
+            .unwrap_or("")
+            .to_string(),
+        request_body_str: body_to_string(ctx.body),
+        is_stream: ctx.is_stream,
+        request_log_limit,
     };
 
     let t0 = std::time::Instant::now();
@@ -278,7 +301,7 @@ async fn try_providers(
         // Per-provider route pattern for metrics: reflects which rule (if any)
         // of *this* provider matched the requested model.
         let route_pattern = provider
-            .resolve_model(&req_model_hint)
+            .resolve_model(&pipeline.req_model_hint)
             .1
             .unwrap_or_default();
 
@@ -286,8 +309,8 @@ async fn try_providers(
             Ok(k) => k,
             Err(e) => {
                 tracing::warn!("Skipping provider {}: {e}", provider.base_url);
-                record_failure(state, &pkey);
-                record_error_metric(state, provider_name, 0, &e.to_string(), &route_pattern);
+                pipeline.record_failure(&pkey);
+                pipeline.record_error_metric(provider_name, 0, &e.to_string(), &route_pattern);
                 consecutive_failures += 1;
                 if !do_cycle || consecutive_failures >= max_failures {
                     break;
@@ -312,8 +335,8 @@ async fn try_providers(
                     "Provider {} network error: {e}, trying next",
                     provider.base_url
                 );
-                record_failure(state, &pkey);
-                record_error_metric(state, provider_name, 0, &e.to_string(), &route_pattern);
+                pipeline.record_failure(&pkey);
+                pipeline.record_error_metric(provider_name, 0, &e.to_string(), &route_pattern);
                 consecutive_failures += 1;
                 if !do_cycle || consecutive_failures >= max_failures {
                     break;
@@ -338,8 +361,8 @@ async fn try_providers(
                 "Provider {} returned {status}, trying next",
                 provider.base_url
             );
-            record_failure(state, &pkey);
-            record_error_metric(state, provider_name, status_u16, &preview, &route_pattern);
+            pipeline.record_failure(&pkey);
+            pipeline.record_error_metric(provider_name, status_u16, &preview, &route_pattern);
             last_status = Some(status);
             last_error_body = Some(error_body);
             consecutive_failures += 1;
@@ -366,18 +389,17 @@ async fn try_providers(
                 provider.base_url,
                 preview
             );
-            record_failure(state, &pkey);
-            record_error_metric(state, provider_name, status_u16, &preview, &route_pattern);
+            pipeline.record_failure(&pkey);
+            pipeline.record_error_metric(provider_name, status_u16, &preview, &route_pattern);
             last_status = Some(status);
             last_error_body = Some(error_body.clone());
             auth_failures += 1;
             if !do_cycle || auth_failures >= max_auth_failures {
-                push_request_log(
+                pipeline.push_request_log(
                     provider_name,
                     status_u16,
                     latency_ms,
                     preview,
-                    Some(request_body_str.clone()),
                     Some(body_to_string(&error_body)),
                 );
                 return Ok(
@@ -400,14 +422,13 @@ async fn try_providers(
             };
             let preview = extract_error_message(&error_body);
             tracing::warn!("Upstream returned {status}: {preview}");
-            record_failure(state, &pkey);
-            record_error_metric(state, provider_name, status_u16, &preview, &route_pattern);
-            push_request_log(
+            pipeline.record_failure(&pkey);
+            pipeline.record_error_metric(provider_name, status_u16, &preview, &route_pattern);
+            pipeline.push_request_log(
                 provider_name,
                 status_u16,
                 latency_ms,
                 preview,
-                Some(request_body_str.clone()),
                 Some(body_to_string(&error_body)),
             );
             return Ok((status, [("content-type", "application/json")], error_body).into_response());
@@ -421,21 +442,20 @@ async fn try_providers(
                 .or_default()
                 .latency_total += latency_ms;
         }
-        // Log successful requests — tokens will be filled in by the response handlers,
-        // but we log the entry here for latency and provider info. For buffered responses,
-        // handle_buffered_response updates the log entry with token counts.
+        // Log successful requests — tokens will be filled in by the response handlers.
+        // For buffered responses, handle_buffered_response updates the log entry with token counts.
         let initial_entry = RequestLogEntry {
             id: 0, // assigned by push()
             timestamp: std::time::SystemTime::now(),
             provider: provider_name.clone(),
-            model: req_model_hint.clone(),
+            model: pipeline.req_model_hint.clone(),
             status: status_u16,
             latency_ms,
             input_tokens: 0,
             output_tokens: 0,
             is_stream: ctx.is_stream,
             error: None,
-            request_body: Some(request_body_str.clone()),
+            request_body: Some(pipeline.request_body_str.clone()),
             response_body: None,
         };
         let entry_id = if let Ok(mut log) = state.request_log.lock() {
@@ -447,7 +467,7 @@ async fn try_providers(
                 persisted.id = id;
                 state
                     .db
-                    .persist_request_log_async(persisted, request_log_limit);
+                    .persist_request_log_async(persisted, pipeline.request_log_limit);
             }
             // For buffered responses, the full entry (with tokens) is persisted inside
             // handle_buffered_response — no two-phase write needed.
@@ -458,8 +478,7 @@ async fn try_providers(
         let response = match outcome {
             ProviderRequestOutcome::Success { response, .. } => response,
             ProviderRequestOutcome::UpstreamError { body, .. } => {
-                // Defensive: this branch should not be reached for successful statuses,
-                // but if it is, log and return the error body rather than panic.
+                // Defensive: this branch should not be reached for successful statuses.
                 tracing::error!(
                     "BUG: Successful status {} but got UpstreamError outcome",
                     status
@@ -479,7 +498,7 @@ async fn try_providers(
                     request_log: state.request_log.clone(),
                     entry_id,
                     latency: latency_ms,
-                    request_log_limit,
+                    request_log_limit: pipeline.request_log_limit,
                 },
             )
             .await
@@ -496,7 +515,7 @@ async fn try_providers(
                         id: entry_id,
                         ..initial_entry
                     },
-                    request_log_limit,
+                    request_log_limit: pipeline.request_log_limit,
                 },
             )
             .await
@@ -505,12 +524,11 @@ async fn try_providers(
 
     // All providers failed — log the final failure.
     let final_status = last_status.unwrap_or(StatusCode::BAD_GATEWAY);
-    push_request_log(
+    pipeline.push_request_log(
         pool.first().map(|(n, _)| n.as_str()).unwrap_or_default(),
         final_status.as_u16(),
         t0.elapsed().as_millis() as u64,
         "all providers failed".into(),
-        Some(request_body_str.clone()),
         last_error_body.as_ref().map(|b| body_to_string(b)),
     );
 

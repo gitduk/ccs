@@ -661,7 +661,7 @@ mod tests {
                 pending_key: None,
             },
             request_log: std::sync::Arc::new(std::sync::Mutex::new(
-                crate::proxy::metrics::RequestLog::default(),
+                crate::metrics::RequestLog::default(),
             )),
             logs: LogsState {
                 selected: 0,
