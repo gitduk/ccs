@@ -3,6 +3,10 @@ use std::collections::HashMap;
 use crate::db::{self, SharedDb};
 use crate::metrics::{TokenMetrics, sync_next_request_log_id};
 
+/// Trim the request log every this many requests to amortize the SQL cost.
+/// Log size stays within `request_log_limit + TRIM_INTERVAL` rows.
+const TRIM_INTERVAL: u64 = 50;
+
 /// Repository wraps the shared DB connection and owns all locking and SQL dispatch.
 /// Callers never touch `SharedDb` or `crate::db::*` directly.
 #[derive(Clone)]
@@ -190,7 +194,7 @@ impl Repository {
                     );
                 }
                 // Amortize trim cost: run every 50 requests rather than on every insert.
-                if entry.id.is_multiple_of(50) {
+                if entry.id.is_multiple_of(TRIM_INTERVAL) {
                     db::trim_request_log(&conn, keep).ok();
                 }
             }
@@ -217,7 +221,7 @@ impl Repository {
                 }
                 // Trim only on every 50th request to amortize the cost; the insert
                 // path already trimmed once, so log size stays within ~keep+50 rows.
-                if id.is_multiple_of(50) {
+                if id.is_multiple_of(TRIM_INTERVAL) {
                     db::trim_request_log(&conn, keep).ok();
                 }
             }

@@ -482,12 +482,14 @@ pub fn load_recent_request_logs(
 
 /// Remove old entries, keeping only the most recent `keep` rows.
 pub fn trim_request_log(conn: &Connection, keep: usize) -> Result<()> {
-    // ORDER BY id DESC uses the primary-key index; avoids a full sort on timestamp_ms.
+    // Inner query walks the PK B-tree to find the cutoff id; outer DELETE uses a
+    // PK range scan — both index-only, no full table scan. If fewer than `keep`
+    // rows exist the inner query returns NULL and the DELETE is a no-op.
     conn.execute(
-        "DELETE FROM request_log WHERE id NOT IN (
-             SELECT id FROM request_log ORDER BY id DESC LIMIT ?1
+        "DELETE FROM request_log WHERE id < (
+             SELECT id FROM request_log ORDER BY id DESC LIMIT 1 OFFSET ?1
          )",
-        [keep as i64],
+        [(keep as i64) - 1],
     )?;
     Ok(())
 }

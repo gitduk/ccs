@@ -2,7 +2,7 @@ use clap::Parser;
 
 use ccs::cli::{Cli, Commands};
 
-#[tokio::main(worker_threads = 4)]
+#[tokio::main]
 async fn main() {
     let cli = Cli::parse();
 
