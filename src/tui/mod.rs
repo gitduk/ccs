@@ -42,11 +42,11 @@ use server::start_server_background;
 use testing::start_background_tests;
 
 const MAX_EVENTS_PER_FRAME: usize = 32;
-const ASYNC_DRAIN_INTERVAL: Duration = Duration::from_millis(50);
-const DB_WATCHER_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const BG_PROXY_CHECK_INTERVAL: Duration = Duration::from_millis(250);
-const BG_PROXY_LOG_SYNC_INTERVAL: Duration = Duration::from_millis(100);
-const METRICS_RELOAD_INTERVAL: Duration = Duration::from_secs(1);
+const ASYNC_DRAIN_INTERVAL: Duration = Duration::from_millis(200);
+const DB_WATCHER_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const BG_PROXY_CHECK_INTERVAL: Duration = Duration::from_millis(500);
+const BG_PROXY_LOG_SYNC_INTERVAL: Duration = Duration::from_millis(500);
+const METRICS_RELOAD_INTERVAL: Duration = Duration::from_secs(5);
 
 fn should_read_next_event(processed_events: usize, has_waiting_event: bool) -> bool {
     processed_events < MAX_EVENTS_PER_FRAME && has_waiting_event

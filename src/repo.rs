@@ -189,7 +189,10 @@ impl Repository {
                         "Failed to persist request log entry {}: {e}", entry.id
                     );
                 }
-                db::trim_request_log(&conn, keep).ok();
+                // Amortize trim cost: run every 50 requests rather than on every insert.
+                if entry.id.is_multiple_of(50) {
+                    db::trim_request_log(&conn, keep).ok();
+                }
             }
         });
     }
@@ -212,7 +215,11 @@ impl Repository {
                 {
                     tracing::warn!("Failed to update request log tokens for id {id}: {e}");
                 }
-                db::trim_request_log(&conn, keep).ok();
+                // Trim only on every 50th request to amortize the cost; the insert
+                // path already trimmed once, so log size stays within ~keep+50 rows.
+                if id.is_multiple_of(50) {
+                    db::trim_request_log(&conn, keep).ok();
+                }
             }
         });
     }

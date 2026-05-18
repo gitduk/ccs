@@ -438,7 +438,7 @@ pub fn load_recent_request_logs(
         "SELECT id, timestamp_ms, provider_name, model, status, latency_ms,
                 input_tokens, output_tokens, is_stream, error, request_body, response_body
          FROM request_log
-         ORDER BY timestamp_ms DESC, id DESC
+         ORDER BY id DESC
          LIMIT ?1",
     ) else {
         return vec![];
@@ -482,9 +482,10 @@ pub fn load_recent_request_logs(
 
 /// Remove old entries, keeping only the most recent `keep` rows.
 pub fn trim_request_log(conn: &Connection, keep: usize) -> Result<()> {
+    // ORDER BY id DESC uses the primary-key index; avoids a full sort on timestamp_ms.
     conn.execute(
         "DELETE FROM request_log WHERE id NOT IN (
-             SELECT id FROM request_log ORDER BY timestamp_ms DESC LIMIT ?1
+             SELECT id FROM request_log ORDER BY id DESC LIMIT ?1
          )",
         [keep as i64],
     )?;
