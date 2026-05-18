@@ -76,7 +76,6 @@ impl App {
             quota_status: std::collections::HashMap::new(),
             quota_form: None,
             detail_line_count,
-            sysinfo: crate::tui::sysinfo::SysInfo::default(),
             sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler::new(),
         })
     }

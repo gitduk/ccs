@@ -363,7 +363,7 @@ fn run_due_scheduled_tasks(
     }
 
     if now >= scheduler.next_sysinfo {
-        app.sysinfo = app.sysinfo_sampler.sample();
+        app.sysinfo_sampler.sample();
         scheduler.next_sysinfo = now + SYSINFO_INTERVAL;
         dirty = true;
     }

@@ -213,7 +213,6 @@ pub struct App {
     pub quota_form: Option<QuotaForm>,
     /// Line count from the last rendered detail panel, used to size the panel next frame.
     pub detail_line_count: u16,
-    pub sysinfo: crate::tui::sysinfo::SysInfo,
     pub(super) sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler,
 }
 
@@ -739,7 +738,6 @@ mod tests {
             quota_status: std::collections::HashMap::new(),
             quota_form: None,
             detail_line_count: 6,
-            sysinfo: crate::tui::sysinfo::SysInfo::default(),
             sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler::new(),
         };
 

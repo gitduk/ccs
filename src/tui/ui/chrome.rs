@@ -12,6 +12,7 @@ use ratatui::widgets::{Block, Borders};
 
 use crate::tui::state::App;
 use crate::tui::theme::{self as t};
+use crate::tui::ui::format::fmt_kbps;
 
 use super::layout::{BORDER_DASHED_TOP, ScreenPlan};
 
@@ -32,14 +33,6 @@ pub(super) fn draw(f: &mut Frame, plan: &ScreenPlan, app: &App) {
     f.render_widget(block, plan.left_frame);
 }
 
-fn fmt_kbps(kbps: f32) -> String {
-    if kbps >= 1024.0 {
-        format!("{:.1}MB/s", kbps / 1024.0)
-    } else {
-        format!("{:.0}KB/s", kbps)
-    }
-}
-
 fn make_app_title(app: &App) -> (Line<'static>, Line<'static>) {
     let left = Line::from(vec![
         Span::styled(
@@ -57,7 +50,7 @@ fn make_app_title(app: &App) -> (Line<'static>, Line<'static>) {
     } else {
         "Fallback off"
     };
-    let si = &app.sysinfo;
+    let si = app.sysinfo_sampler.current();
     let mem_str = if si.mem_mb >= 1024 {
         format!("{:.1}GB", si.mem_mb as f32 / 1024.0)
     } else {

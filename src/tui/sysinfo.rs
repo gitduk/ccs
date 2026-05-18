@@ -9,12 +9,14 @@ pub(crate) struct SysInfo {
     pub net_out_kbps: f32,
 }
 
-/// Holds the previous sample values needed to compute deltas.
+/// Samples CPU, memory, and network counters periodically and caches the
+/// latest snapshot. App holds one `SysInfoSampler`; chrome reads `current()`.
 pub(crate) struct SysInfoSampler {
     last_cpu_ticks: u64,
     last_sample: Instant,
     last_net_in: u64,
     last_net_out: u64,
+    current: SysInfo,
 }
 
 // Linux kernel clock frequency; nearly universal on modern kernels.
@@ -28,10 +30,12 @@ impl SysInfoSampler {
             last_sample: Instant::now(),
             last_net_in: net_in,
             last_net_out: net_out,
+            current: SysInfo::default(),
         }
     }
 
-    pub(crate) fn sample(&mut self) -> SysInfo {
+    /// Recompute the snapshot from current `/proc` data and network counters.
+    pub(crate) fn sample(&mut self) {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_sample).as_secs_f64();
 
@@ -46,28 +50,31 @@ impl SysInfoSampler {
         let mem_mb = read_vmrss_kb().unwrap_or(0) / 1024;
 
         let (net_in, net_out) = crate::metrics::net_bytes_snapshot();
-        let net_in_kbps = if elapsed > 0.0 {
-            (net_in.saturating_sub(self.last_net_in) as f64 / elapsed / 1024.0) as f32
-        } else {
-            0.0
-        };
-        let net_out_kbps = if elapsed > 0.0 {
-            (net_out.saturating_sub(self.last_net_out) as f64 / elapsed / 1024.0) as f32
-        } else {
-            0.0
-        };
+        let net_in_kbps = delta_kbps(net_in, self.last_net_in, elapsed);
+        let net_out_kbps = delta_kbps(net_out, self.last_net_out, elapsed);
 
         self.last_cpu_ticks = cpu_ticks;
         self.last_sample = now;
         self.last_net_in = net_in;
         self.last_net_out = net_out;
-
-        SysInfo {
+        self.current = SysInfo {
             cpu_pct,
             mem_mb,
             net_in_kbps,
             net_out_kbps,
-        }
+        };
+    }
+
+    pub(crate) fn current(&self) -> &SysInfo {
+        &self.current
+    }
+}
+
+fn delta_kbps(new: u64, old: u64, elapsed: f64) -> f32 {
+    if elapsed > 0.0 {
+        (new.saturating_sub(old) as f64 / elapsed / 1024.0) as f32
+    } else {
+        0.0
     }
 }
 
