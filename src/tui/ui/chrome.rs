@@ -12,7 +12,6 @@ use ratatui::widgets::{Block, Borders};
 
 use crate::tui::state::App;
 use crate::tui::theme::{self as t};
-use crate::tui::ui::format::fmt_kbps;
 
 use super::layout::{BORDER_DASHED_TOP, ScreenPlan};
 
@@ -56,13 +55,7 @@ fn make_app_title(app: &App) -> (Line<'static>, Line<'static>) {
     } else {
         format!("{}MB", si.mem_mb)
     };
-    let sysinfo_str = format!(
-        "cpu {:.1}%  mem {}  ↑{}  ↓{}",
-        si.cpu_pct,
-        mem_str,
-        fmt_kbps(si.net_in_kbps),
-        fmt_kbps(si.net_out_kbps),
-    );
+    let sysinfo_str = format!("cpu {:.1}%  mem {}", si.cpu_pct, mem_str);
     let right = Line::from(vec![
         Span::styled("╌╌ ", Style::default().fg(t::MUTED)),
         Span::styled(

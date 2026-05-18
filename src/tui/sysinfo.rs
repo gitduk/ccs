@@ -5,17 +5,12 @@ use std::time::Instant;
 pub(crate) struct SysInfo {
     pub cpu_pct: f32,
     pub mem_mb: u32,
-    pub net_in_kbps: f32,
-    pub net_out_kbps: f32,
 }
 
-/// Samples CPU, memory, and network counters periodically and caches the
-/// latest snapshot. App holds one `SysInfoSampler`; chrome reads `current()`.
+/// Samples CPU and memory periodically and caches the latest snapshot.
 pub(crate) struct SysInfoSampler {
     last_cpu_ticks: u64,
     last_sample: Instant,
-    last_net_in: u64,
-    last_net_out: u64,
     current: SysInfo,
 }
 
@@ -24,18 +19,15 @@ const HZ: f64 = 100.0;
 
 impl SysInfoSampler {
     pub(crate) fn new() -> Self {
-        let (net_in, net_out) = crate::metrics::net_bytes_snapshot();
         Self {
             last_cpu_ticks: read_cpu_ticks().unwrap_or(0),
             last_sample: Instant::now(),
-            last_net_in: net_in,
-            last_net_out: net_out,
             current: SysInfo::default(),
         }
     }
 
-    /// Recompute the snapshot from current `/proc` data and network counters.
-    pub(crate) fn sample(&mut self) {
+    /// Recompute the snapshot from current `/proc` data.
+    pub(crate) fn sample(&mut self) -> bool {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_sample).as_secs_f64();
 
@@ -46,23 +38,18 @@ impl SysInfoSampler {
         } else {
             0.0
         };
-
-        let mem_mb = read_vmrss_kb().unwrap_or(0) / 1024;
-
-        let (net_in, net_out) = crate::metrics::net_bytes_snapshot();
-        let net_in_kbps = delta_kbps(net_in, self.last_net_in, elapsed);
-        let net_out_kbps = delta_kbps(net_out, self.last_net_out, elapsed);
+        let next = SysInfo {
+            cpu_pct,
+            mem_mb: read_vmrss_kb().unwrap_or(0) / 1024,
+        };
+        let changed = display_key(&self.current) != display_key(&next);
 
         self.last_cpu_ticks = cpu_ticks;
         self.last_sample = now;
-        self.last_net_in = net_in;
-        self.last_net_out = net_out;
-        self.current = SysInfo {
-            cpu_pct,
-            mem_mb,
-            net_in_kbps,
-            net_out_kbps,
-        };
+        if changed {
+            self.current = next;
+        }
+        changed
     }
 
     pub(crate) fn current(&self) -> &SysInfo {
@@ -70,12 +57,8 @@ impl SysInfoSampler {
     }
 }
 
-fn delta_kbps(new: u64, old: u64, elapsed: f64) -> f32 {
-    if elapsed > 0.0 {
-        (new.saturating_sub(old) as f64 / elapsed / 1024.0) as f32
-    } else {
-        0.0
-    }
+fn display_key(info: &SysInfo) -> (u32, u32) {
+    ((info.cpu_pct * 10.0).round() as u32, info.mem_mb)
 }
 
 fn read_cpu_ticks() -> Option<u64> {

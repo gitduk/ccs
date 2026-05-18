@@ -8,7 +8,6 @@ use futures::StreamExt;
 use super::SharedState;
 use crate::config::{ApiFormat, OpenAiApiVersion};
 use crate::error::AppError;
-use crate::metrics::{add_net_bytes_in, add_net_bytes_out};
 use crate::proxy::executor::{
     ProviderRequestOutcome, execute_provider_request, extract_error_message,
 };
@@ -559,7 +558,6 @@ async fn dispatch_completion(
         .and_then(|v| v.get("stream").and_then(|s| s.as_bool()))
         .unwrap_or(false);
 
-    add_net_bytes_in(canonical_body.len() as u64);
     let (pool, do_cycle) = resolve_provider_pool(&state).await?;
 
     let ctx = RequestCtx {
@@ -691,7 +689,6 @@ async fn handle_buffered_response(
         db.persist_request_log_async(log_entry, request_log_limit);
     }
 
-    add_net_bytes_out(response_body.len() as u64);
     Ok((
         StatusCode::OK,
         [("content-type", "application/json")],
@@ -884,9 +881,6 @@ fn track_tokens_in_stream(
                 if start > 0 {
                     line_buf.drain(..start);
                 }
-            }
-            if let Ok(ref bytes) = chunk {
-                add_net_bytes_out(bytes.len() as u64);
             }
             yield chunk;
         }

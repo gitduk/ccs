@@ -43,15 +43,6 @@ pub(crate) fn fmt_latency(ms: u64) -> String {
     }
 }
 
-/// Format a KB/s rate, switching to MB/s above 1024 KB/s.
-pub(crate) fn fmt_kbps(kbps: f32) -> String {
-    if kbps >= 1024.0 {
-        format!("{:.1}MB/s", kbps / 1024.0)
-    } else {
-        format!("{:.0}KB/s", kbps)
-    }
-}
-
 pub(crate) fn format_tokens(n: u64) -> String {
     if n == 0 {
         "—".to_string()
