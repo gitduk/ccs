@@ -32,6 +32,14 @@ pub(super) fn draw(f: &mut Frame, plan: &ScreenPlan, app: &App) {
     f.render_widget(block, plan.left_frame);
 }
 
+fn fmt_kbps(kbps: f32) -> String {
+    if kbps >= 1024.0 {
+        format!("{:.1}MB/s", kbps / 1024.0)
+    } else {
+        format!("{:.0}KB/s", kbps)
+    }
+}
+
 fn make_app_title(app: &App) -> (Line<'static>, Line<'static>) {
     let left = Line::from(vec![
         Span::styled(
@@ -49,6 +57,19 @@ fn make_app_title(app: &App) -> (Line<'static>, Line<'static>) {
     } else {
         "Fallback off"
     };
+    let si = &app.sysinfo;
+    let mem_str = if si.mem_mb >= 1024 {
+        format!("{:.1}GB", si.mem_mb as f32 / 1024.0)
+    } else {
+        format!("{}MB", si.mem_mb)
+    };
+    let sysinfo_str = format!(
+        "cpu {:.1}%  mem {}  ↑{}  ↓{}",
+        si.cpu_pct,
+        mem_str,
+        fmt_kbps(si.net_in_kbps),
+        fmt_kbps(si.net_out_kbps),
+    );
     let right = Line::from(vec![
         Span::styled("╌╌ ", Style::default().fg(t::MUTED)),
         Span::styled(
@@ -68,6 +89,8 @@ fn make_app_title(app: &App) -> (Line<'static>, Line<'static>) {
                 Style::default().fg(t::MUTED)
             },
         ),
+        Span::styled("  │  ", Style::default().fg(t::MUTED)),
+        Span::styled(sysinfo_str, Style::default().fg(t::MUTED)),
         Span::styled(" ╌╌ ", Style::default().fg(t::MUTED)),
     ])
     .right_aligned();

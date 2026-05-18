@@ -5,6 +5,23 @@ use std::time::SystemTime;
 
 static NEXT_REQUEST_LOG_ID: AtomicU64 = AtomicU64::new(1);
 
+static NET_BYTES_IN: AtomicU64 = AtomicU64::new(0);
+static NET_BYTES_OUT: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn add_net_bytes_in(n: u64) {
+    NET_BYTES_IN.fetch_add(n, Ordering::Relaxed);
+}
+pub(crate) fn add_net_bytes_out(n: u64) {
+    NET_BYTES_OUT.fetch_add(n, Ordering::Relaxed);
+}
+/// Returns (bytes_in_total, bytes_out_total) since process start.
+pub(crate) fn net_bytes_snapshot() -> (u64, u64) {
+    (
+        NET_BYTES_IN.load(Ordering::Relaxed),
+        NET_BYTES_OUT.load(Ordering::Relaxed),
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct LastRequestError {
     pub status: u16,

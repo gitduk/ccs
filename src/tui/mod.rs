@@ -17,6 +17,7 @@ mod event_loop;
 mod input;
 mod quota_panel;
 mod server;
+mod sysinfo;
 mod testing;
 
 use std::io;
@@ -42,6 +43,7 @@ use server::start_server_background;
 use testing::start_background_tests;
 
 const MAX_EVENTS_PER_FRAME: usize = 32;
+const SYSINFO_INTERVAL: Duration = Duration::from_secs(2);
 const ASYNC_DRAIN_INTERVAL: Duration = Duration::from_millis(200);
 const DB_WATCHER_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const BG_PROXY_CHECK_INTERVAL: Duration = Duration::from_millis(500);
@@ -58,6 +60,7 @@ struct RenderScheduler {
     next_bg_proxy_check: Instant,
     next_bg_proxy_log_sync: Instant,
     next_metrics_reload: Instant,
+    next_sysinfo: Instant,
 }
 
 impl RenderScheduler {
@@ -68,6 +71,7 @@ impl RenderScheduler {
             next_bg_proxy_check: now,
             next_bg_proxy_log_sync: now,
             next_metrics_reload: now,
+            next_sysinfo: now,
         }
     }
 
@@ -81,7 +85,8 @@ impl RenderScheduler {
             .next_async_drain
             .min(self.next_db_watcher_poll)
             .min(self.next_bg_proxy_check)
-            .min(self.next_metrics_reload);
+            .min(self.next_metrics_reload)
+            .min(self.next_sysinfo);
         if let Some(deadline) = message_deadline {
             next = next.min(deadline);
         }
@@ -357,6 +362,12 @@ fn run_due_scheduled_tasks(
         scheduler.next_async_drain = now + ASYNC_DRAIN_INTERVAL;
     }
 
+    if now >= scheduler.next_sysinfo {
+        app.sysinfo = app.sysinfo_sampler.sample();
+        scheduler.next_sysinfo = now + SYSINFO_INTERVAL;
+        dirty = true;
+    }
+
     dirty |= app.tick_message();
     dirty
 }
@@ -381,8 +392,8 @@ fn message_deadline(app: &App) -> Option<Instant> {
 mod tests {
     use super::{
         ASYNC_DRAIN_INTERVAL, BG_PROXY_CHECK_INTERVAL, DB_WATCHER_POLL_INTERVAL,
-        MAX_EVENTS_PER_FRAME, METRICS_RELOAD_INTERVAL, RenderScheduler, frame_actions,
-        should_read_next_event,
+        MAX_EVENTS_PER_FRAME, METRICS_RELOAD_INTERVAL, RenderScheduler, SYSINFO_INTERVAL,
+        frame_actions, should_read_next_event,
     };
     use std::time::{Duration, Instant};
 
@@ -418,6 +429,7 @@ mod tests {
         scheduler.next_db_watcher_poll = now + DB_WATCHER_POLL_INTERVAL;
         scheduler.next_bg_proxy_check = now + BG_PROXY_CHECK_INTERVAL;
         scheduler.next_metrics_reload = now + METRICS_RELOAD_INTERVAL;
+        scheduler.next_sysinfo = now + SYSINFO_INTERVAL;
 
         assert_eq!(
             scheduler.next_wake_in(now + Duration::from_millis(1), None, false),
