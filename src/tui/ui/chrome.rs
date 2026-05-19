@@ -58,6 +58,8 @@ fn make_app_title(app: &App) -> (Line<'static>, Line<'static>) {
     let sysinfo_str = format!("cpu {:.1}%  mem {}", si.cpu_pct, mem_str);
     let right = Line::from(vec![
         Span::styled("╌╌ ", Style::default().fg(t::MUTED)),
+        Span::styled(sysinfo_str, Style::default().fg(t::MUTED)),
+        Span::styled("  │  ", Style::default().fg(t::MUTED)),
         Span::styled(
             listen,
             if app.bg_proxy_pid.is_some() {
@@ -75,8 +77,6 @@ fn make_app_title(app: &App) -> (Line<'static>, Line<'static>) {
                 Style::default().fg(t::MUTED)
             },
         ),
-        Span::styled("  │  ", Style::default().fg(t::MUTED)),
-        Span::styled(sysinfo_str, Style::default().fg(t::MUTED)),
         Span::styled(" ╌╌ ", Style::default().fg(t::MUTED)),
     ])
     .right_aligned();
