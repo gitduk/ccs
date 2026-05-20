@@ -33,7 +33,7 @@ pub(super) fn draw(f: &mut Frame, plan: &ScreenPlan, app: &App) {
     f.render_widget(block, plan.left_frame);
 }
 
-const VERSION_STR: &str = concat!("  v", env!("CARGO_PKG_VERSION"), " ");
+const VERSION_STR: &str = concat!(" v", env!("CARGO_PKG_VERSION"), " ");
 
 fn logo_spans() -> Vec<Span<'static>> {
     vec![Span::styled(
@@ -48,7 +48,7 @@ fn version_spans() -> Vec<Span<'static>> {
 
 fn sys_info_spans(cpu_pct: f32, mem_mb: u32) -> Vec<Span<'static>> {
     vec![Span::styled(
-        format!("cpu {cpu_pct:.1}%  mem {}", mem_label(mem_mb)),
+        format!("cpu {cpu_pct:.1}% mem {}", mem_label(mem_mb)),
         Style::default().fg(t::MUTED),
     )]
 }
@@ -76,7 +76,7 @@ fn app_info_spans(listen: &str, has_proxy: bool, fallback: bool) -> Vec<Span<'st
                 Style::default().fg(t::MUTED)
             },
         ),
-        Span::styled("  ", Style::default()),
+        Span::styled(" ", Style::default()),
         Span::styled(
             fallback_label,
             if fallback {
@@ -89,7 +89,7 @@ fn app_info_spans(listen: &str, has_proxy: bool, fallback: bool) -> Vec<Span<'st
 }
 
 fn divider() -> Vec<Span<'static>> {
-    vec![Span::styled("  │  ", Style::default().fg(t::MUTED))]
+    vec![Span::styled(" │ ", Style::default().fg(t::MUTED))]
 }
 
 fn spans_width(spans: &[Span<'static>]) -> usize {
@@ -101,7 +101,7 @@ fn title_spans_fit(left_width: usize, right_spans: &[Span<'static>], width: u16)
 }
 
 fn worst_case_sys_info_width(mem_mb: u32) -> usize {
-    format!("cpu 100.0%  mem {}", mem_label(mem_mb)).width()
+    format!("cpu 100.0% mem {}", mem_label(mem_mb)).width()
 }
 
 fn title_parts_fit(left_width: usize, right_width: usize, width: u16) -> bool {
@@ -182,7 +182,7 @@ mod tests {
                 &[
                     vec![Span::styled("╌╌ ", Style::default())],
                     vec![Span::styled(
-                        format!("cpu 100.0%  mem {}", mem_label(mem_mb)),
+                        format!("cpu 100.0% mem {}", mem_label(mem_mb)),
                         Style::default(),
                     )],
                     divider(),
@@ -204,7 +204,7 @@ mod tests {
 
         assert_eq!(
             text(&right),
-            "╌╌ cpu 6.5%  mem 154MB  │  0.0.0.0:7896  Fallback on ╌╌ "
+            "╌╌ cpu 6.5% mem 154MB │ 0.0.0.0:7896 Fallback on ╌╌ "
         );
     }
 
@@ -237,7 +237,7 @@ mod tests {
 
         let right = topbar_right_spans(&left, width, sys_info, 154, app_info);
 
-        assert_eq!(text(&right), "╌╌ cpu 6.5%  mem 154MB ");
+        assert_eq!(text(&right), "╌╌ cpu 6.5% mem 154MB ");
     }
 
     #[test]
@@ -256,7 +256,7 @@ mod tests {
     fn left_title_keeps_spacing_between_logo_and_version() {
         assert_eq!(
             text(&[logo_spans(), version_spans()].concat()),
-            " Claude Code Switcher  v0.37.15 "
+            " Claude Code Switcher v0.37.16 "
         );
     }
 }
