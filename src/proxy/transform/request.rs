@@ -1084,10 +1084,18 @@ fn message_has_thinking_block(msg: &Value) -> bool {
 /// injects an empty thinking block into those turns so the history is consistent.
 /// Returns `None` if no patching is needed.
 pub fn patch_thinking_history(req: &Value) -> Option<Value> {
+    // Detect both formats:
+    //   Internal (converted from OpenAI reasoning_effort): {"enabled": true, ...}
+    //   Anthropic API native: {"type": "enabled", ...} or {"type": "adaptive"}
     let thinking_enabled = req
         .get("thinking")
-        .and_then(|t| t.get("enabled"))
-        .and_then(|e| e.as_bool())
+        .map(|t| {
+            t.get("enabled").and_then(|e| e.as_bool()).unwrap_or(false)
+                || matches!(
+                    t.get("type").and_then(|v| v.as_str()),
+                    Some("enabled") | Some("adaptive")
+                )
+        })
         .unwrap_or(false);
 
     if !thinking_enabled {
@@ -1963,6 +1971,23 @@ mod tests {
         assert_eq!(content[0]["thinking"], "");
         assert_eq!(content[1]["type"], "text");
         assert_eq!(content[1]["text"], "hi");
+    }
+
+    #[test]
+    fn patch_thinking_history_recognizes_anthropic_native_type_format() {
+        // Anthropic native format uses {"type":"enabled"} or {"type":"adaptive"}, not {"enabled":true}.
+        let req = json!({
+            "model": "m",
+            "thinking": {"type": "adaptive"},
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi"},
+                {"role": "user", "content": "follow up"}
+            ]
+        });
+        let patched = patch_thinking_history(&req).unwrap();
+        let content = patched["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "thinking");
     }
 
     #[test]

@@ -256,7 +256,7 @@ mod tests {
     fn left_title_keeps_spacing_between_logo_and_version() {
         assert_eq!(
             text(&[logo_spans(), version_spans()].concat()),
-            " Claude Code Switcher v0.37.17 "
+            " Claude Code Switcher v0.37.18 "
         );
     }
 }
