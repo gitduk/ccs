@@ -1068,6 +1068,73 @@ fn append_to_assistant_message(messages: &mut Vec<Value>, blocks: Vec<Value>) {
     messages.push(json!({"role": "assistant", "content": blocks}));
 }
 
+fn message_has_thinking_block(msg: &Value) -> bool {
+    msg.get("content")
+        .and_then(|c| c.as_array())
+        .map(|blocks| {
+            blocks
+                .iter()
+                .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("thinking"))
+        })
+        .unwrap_or(false)
+}
+
+/// When `thinking` is enabled and the message history contains assistant turns without
+/// thinking blocks, DeepSeek-compatible providers reject the request. This function
+/// injects an empty thinking block into those turns so the history is consistent.
+/// Returns `None` if no patching is needed.
+pub fn patch_thinking_history(req: &Value) -> Option<Value> {
+    let thinking_enabled = req
+        .get("thinking")
+        .and_then(|t| t.get("enabled"))
+        .and_then(|e| e.as_bool())
+        .unwrap_or(false);
+
+    if !thinking_enabled {
+        return None;
+    }
+
+    let messages = req.get("messages")?.as_array()?;
+
+    // The last message may be an assistant prefill for the current turn — skip it.
+    let last_idx = messages.len().saturating_sub(1);
+    let needs_patch = messages.iter().enumerate().any(|(i, msg)| {
+        i < last_idx
+            && msg.get("role").and_then(|r| r.as_str()) == Some("assistant")
+            && !message_has_thinking_block(msg)
+    });
+
+    if !needs_patch {
+        return None;
+    }
+
+    let mut patched = req.clone();
+    let msgs = patched["messages"].as_array_mut()?;
+    let msgs_len = msgs.len();
+    for (i, msg) in msgs.iter_mut().enumerate() {
+        if i + 1 == msgs_len {
+            continue; // skip trailing turn (may be an assistant prefill)
+        }
+        if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+            continue;
+        }
+        if message_has_thinking_block(msg) {
+            continue;
+        }
+        // Build new content with thinking block first to avoid O(n) shift.
+        let mut new_content = vec![json!({"type": "thinking", "thinking": ""})];
+        match msg["content"].take() {
+            Value::String(s) => new_content.push(json!({"type": "text", "text": s})),
+            Value::Array(arr) => new_content.extend(arr),
+            Value::Null => {}
+            other => new_content.push(other),
+        }
+        msg["content"] = json!(new_content);
+    }
+
+    Some(patched)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -1876,6 +1943,88 @@ mod tests {
         assert_eq!(tool["name"], "search");
         assert_eq!(tool["description"], "web search");
         assert_eq!(tool["input_schema"]["type"], "object");
+    }
+
+    #[test]
+    fn patch_thinking_history_injects_empty_block_for_missing_turns() {
+        let req = json!({
+            "model": "m",
+            "thinking": {"enabled": true, "budget_tokens": 1000},
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi"},
+                {"role": "user", "content": "follow up"}
+            ]
+        });
+        let patched = patch_thinking_history(&req).unwrap();
+        let assistant = &patched["messages"][1];
+        let content = assistant["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "thinking");
+        assert_eq!(content[0]["thinking"], "");
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[1]["text"], "hi");
+    }
+
+    #[test]
+    fn patch_thinking_history_no_op_when_thinking_disabled() {
+        let req = json!({
+            "model": "m",
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi"}
+            ]
+        });
+        assert!(patch_thinking_history(&req).is_none());
+    }
+
+    #[test]
+    fn patch_thinking_history_no_op_for_trailing_assistant_prefill() {
+        // A trailing assistant message with no thinking block is a prefill — must not be patched.
+        let req = json!({
+            "model": "m",
+            "thinking": {"enabled": true, "budget_tokens": 1000},
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "Here is"}
+            ]
+        });
+        assert!(patch_thinking_history(&req).is_none());
+    }
+
+    #[test]
+    fn patch_thinking_history_patches_intermediate_not_trailing() {
+        let req = json!({
+            "model": "m",
+            "thinking": {"enabled": true, "budget_tokens": 1000},
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "first"},
+                {"role": "user", "content": "follow up"},
+                {"role": "assistant", "content": "prefill"}
+            ]
+        });
+        let patched = patch_thinking_history(&req).unwrap();
+        // Intermediate assistant (index 1) gets thinking block.
+        let intermediate = &patched["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(intermediate[0]["type"], "thinking");
+        // Trailing assistant prefill (index 3) is untouched.
+        assert_eq!(patched["messages"][3]["content"], "prefill");
+    }
+
+    #[test]
+    fn patch_thinking_history_no_op_when_blocks_present() {
+        let req = json!({
+            "model": "m",
+            "thinking": {"enabled": true, "budget_tokens": 1000},
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "plan"},
+                    {"type": "text", "text": "hi"}
+                ]}
+            ]
+        });
+        assert!(patch_thinking_history(&req).is_none());
     }
 
     #[test]

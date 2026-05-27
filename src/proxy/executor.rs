@@ -65,10 +65,17 @@ pub(crate) async fn execute_provider_request(
 
     let upstream_body = match initial_api_version.as_ref() {
         Some(api_version) => make_openai_body(api_version.clone())?,
-        None => match req_json.and_then(|req| transform::map_anthropic_model(req, provider)) {
-            Some(mapped) => Bytes::from(serde_json::to_vec(&mapped)?),
-            None => body.clone(),
-        },
+        None => {
+            let patched = req_json.and_then(|req| {
+                let after_model_map = transform::map_anthropic_model(req, provider);
+                let base = after_model_map.as_ref().unwrap_or(req);
+                transform::patch_thinking_history(base).or(after_model_map)
+            });
+            match patched {
+                Some(v) => Bytes::from(serde_json::to_vec(&v)?),
+                None => body.clone(),
+            }
+        }
     };
 
     let mut response = match initial_api_version.as_ref() {
