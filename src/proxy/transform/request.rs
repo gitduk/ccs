@@ -102,7 +102,13 @@ pub fn to_openai(req: &Value, provider: &Provider, api_version: OpenAiApiVersion
     }
 
     if let Some(tool_choice) = req.get("tool_choice") {
-        result["tool_choice"] = convert_tool_choice_to_openai(tool_choice, is_responses);
+        let tc = convert_tool_choice_to_openai(tool_choice, is_responses);
+        // Skip "auto" — it's the default for OpenAI-compatible APIs.
+        // Sending it explicitly triggers a vllm guard that requires
+        // --enable-auto-tool-choice and --tool-call-parser to be set.
+        if tc != json!("auto") {
+            result["tool_choice"] = tc;
+        }
     }
 
     // Thinking → reasoning
@@ -1390,6 +1396,21 @@ mod tests {
         assert_eq!(tool["type"], "function");
         assert_eq!(tool["function"]["name"], "get_weather");
         assert_eq!(tool["function"]["description"], "Get weather");
+    }
+
+    #[test]
+    fn chat_completions_tool_choice_auto_is_omitted() {
+        let req = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 10,
+            "tools": [{"name": "t", "description": "", "input_schema": {"type": "object"}}],
+            "tool_choice": {"type": "auto"}
+        });
+        let out = anthropic_to_openai_request(&req, &provider_chat_completions()).unwrap();
+        // "auto" must be omitted so vllm doesn't reject the request when
+        // --enable-auto-tool-choice / --tool-call-parser are not set.
+        assert!(out.get("tool_choice").is_none());
     }
 
     #[test]
