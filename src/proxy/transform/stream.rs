@@ -237,7 +237,7 @@ impl StreamState {
                             },
                         );
 
-                        events.push(self.format_event(
+                        events.push(sse_event(
                             "content_block_start",
                             &json!({
                                 "type": "content_block_start",
@@ -262,7 +262,7 @@ impl StreamState {
                         } else {
                             self.content_index
                         };
-                        events.push(self.format_event(
+                        events.push(sse_event(
                             "content_block_delta",
                             &json!({
                                 "type": "content_block_delta",
@@ -374,7 +374,7 @@ impl StreamState {
                             content_index,
                         },
                     );
-                    events.push(self.format_event(
+                    events.push(sse_event(
                         "content_block_start",
                         &json!({
                             "type": "content_block_start",
@@ -394,7 +394,7 @@ impl StreamState {
                         if let Some(tc) = self.response_tool_calls.get_mut(&item_id_key) {
                             tc.arguments_buffer.push_str(args);
                         }
-                        events.push(self.format_event(
+                        events.push(sse_event(
                             "content_block_delta",
                             &json!({
                                 "type": "content_block_delta",
@@ -416,7 +416,7 @@ impl StreamState {
                 {
                     let content_index = tc.content_index;
                     tc.arguments_buffer.push_str(delta);
-                    events.push(self.format_event(
+                    events.push(sse_event(
                         "content_block_delta",
                         &json!({
                             "type": "content_block_delta",
@@ -458,7 +458,7 @@ impl StreamState {
             return None;
         }
         self.started = true;
-        Some(self.format_event(
+        Some(sse_event(
             "message_start",
             &json!({
                 "type": "message_start",
@@ -493,7 +493,7 @@ impl StreamState {
         if self.current_block_type.as_ref() != Some(&block_type) {
             events.extend(self.close_current_block());
             self.current_block_type = Some(block_type);
-            events.push(self.format_event(
+            events.push(sse_event(
                 "content_block_start",
                 &json!({
                     "type": "content_block_start",
@@ -505,7 +505,7 @@ impl StreamState {
                 }),
             ));
         }
-        events.push(self.format_event(
+        events.push(sse_event(
             "content_block_delta",
             &json!({
                 "type": "content_block_delta",
@@ -522,7 +522,7 @@ impl StreamState {
     fn close_current_block(&mut self) -> Vec<String> {
         let mut events = Vec::new();
         if self.current_block_type.is_some() {
-            events.push(self.format_event(
+            events.push(sse_event(
                 "content_block_stop",
                 &json!({
                     "type": "content_block_stop",
@@ -551,7 +551,7 @@ impl StreamState {
             .stop_reason
             .clone()
             .unwrap_or_else(|| "end_turn".to_string());
-        events.push(self.format_event(
+        events.push(sse_event(
             "message_delta",
             &json!({
                 "type": "message_delta",
@@ -567,7 +567,7 @@ impl StreamState {
         ));
 
         // message_stop
-        events.push(self.format_event(
+        events.push(sse_event(
             "message_stop",
             &json!({
                 "type": "message_stop",
@@ -575,13 +575,6 @@ impl StreamState {
         ));
 
         events
-    }
-
-    fn format_event(&self, event_type: &str, data: &Value) -> String {
-        format!(
-            "event: {event_type}\ndata: {}\n\n",
-            serde_json::to_string(data).unwrap_or_default()
-        )
     }
 }
 
@@ -987,14 +980,14 @@ impl AnthropicToOpenAiState {
             "output": [],
         });
         vec![
-            format_response_event(
+            sse_event(
                 "response.created",
                 &json!({
                     "type": "response.created",
                     "response": response.clone(),
                 }),
             ),
-            format_response_event(
+            sse_event(
                 "response.in_progress",
                 &json!({
                     "type": "response.in_progress",
@@ -1028,7 +1021,7 @@ impl AnthropicToOpenAiState {
             "role": "assistant",
             "content": [],
         });
-        vec![format_response_event(
+        vec![sse_event(
             "response.output_item.added",
             &json!({
                 "type": "response.output_item.added",
@@ -1042,7 +1035,7 @@ impl AnthropicToOpenAiState {
         let opens = self.emit_response_message_open();
         let index = self.current_message_index.unwrap_or(0);
         let mut out = opens;
-        out.push(format_response_event(
+        out.push(sse_event(
             "response.output_text.delta",
             &json!({
                 "type": "response.output_text.delta",
@@ -1058,7 +1051,7 @@ impl AnthropicToOpenAiState {
         let Some(index) = self.current_message_index.take() else {
             return Vec::new();
         };
-        vec![format_response_event(
+        vec![sse_event(
             "response.output_item.done",
             &json!({
                 "type": "response.output_item.done",
@@ -1079,7 +1072,7 @@ impl AnthropicToOpenAiState {
         let index = self.next_output_index;
         self.next_output_index += 1;
         self.current_message_index = Some(index);
-        out.push(format_response_event(
+        out.push(sse_event(
             "response.output_item.added",
             &json!({
                 "type": "response.output_item.added",
@@ -1095,7 +1088,7 @@ impl AnthropicToOpenAiState {
 
     fn emit_response_reasoning_delta(&mut self, text: &str) -> Vec<String> {
         let index = self.current_message_index.unwrap_or(0);
-        vec![format_response_event(
+        vec![sse_event(
             "response.reasoning_summary_text.delta",
             &json!({
                 "type": "response.reasoning_summary_text.delta",
@@ -1120,7 +1113,7 @@ impl AnthropicToOpenAiState {
         self.current_tool_item_id = Some(item_id.clone());
         self.current_tool_call_id = Some(id.to_string());
         self.current_message_index = Some(index);
-        out.push(format_response_event(
+        out.push(sse_event(
             "response.output_item.added",
             &json!({
                 "type": "response.output_item.added",
@@ -1144,7 +1137,7 @@ impl AnthropicToOpenAiState {
             None => return Vec::new(),
         };
         let output_index = self.current_message_index.unwrap_or(0);
-        vec![format_response_event(
+        vec![sse_event(
             "response.function_call_arguments.delta",
             &json!({
                 "type": "response.function_call_arguments.delta",
@@ -1162,7 +1155,7 @@ impl AnthropicToOpenAiState {
         };
         let item_id = self.current_tool_item_id.take().unwrap_or_default();
         let call_id = self.current_tool_call_id.take().unwrap_or_default();
-        vec![format_response_event(
+        vec![sse_event(
             "response.output_item.done",
             &json!({
                 "type": "response.output_item.done",
@@ -1214,7 +1207,7 @@ impl AnthropicToOpenAiState {
                     "total_tokens": self.input_tokens + self.output_tokens,
                 },
             });
-            out.push(format_response_event(
+            out.push(sse_event(
                 "response.completed",
                 &json!({
                     "type": "response.completed",
@@ -1229,7 +1222,7 @@ impl AnthropicToOpenAiState {
         if self.is_chat() {
             vec!["data: [DONE]\n\n".to_string()]
         } else {
-            vec![format_response_event(
+            vec![sse_event(
                 "response.failed",
                 &json!({
                     "type": "response.failed",
@@ -1240,7 +1233,8 @@ impl AnthropicToOpenAiState {
     }
 }
 
-fn format_response_event(event_type: &str, data: &Value) -> String {
+/// Serialize a single SSE event (`event:` + `data:` lines) for any wire format.
+fn sse_event(event_type: &str, data: &Value) -> String {
     format!(
         "event: {event_type}\ndata: {}\n\n",
         serde_json::to_string(data).unwrap_or_default()
@@ -1283,12 +1277,11 @@ mod tests {
         events.iter().map(|(t, _)| t.as_str()).collect()
     }
 
-    // ─── format_event ────────────────────────────────────────────────────────
+    // ─── sse_event ────────────────────────────────────────────────────────
 
     #[test]
-    fn format_event_produces_sse_format() {
-        let state = StreamState::new();
-        let raw = state.format_event("message_start", &json!({"type": "message_start"}));
+    fn sse_event_produces_sse_format() {
+        let raw = sse_event("message_start", &json!({"type": "message_start"}));
         assert!(raw.starts_with("event: message_start\n"));
         assert!(raw.contains("data: "));
         assert!(raw.ends_with("\n\n"));

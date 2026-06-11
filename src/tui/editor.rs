@@ -14,7 +14,9 @@ use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 use super::App;
 use super::ServerHandle;
 use super::server::sync_proxy_config;
-use super::state::{FormField, MessageKind, Mode, ProviderForm, VimMode, filter_suggestions};
+use super::state::{
+    FormField, MessageKind, Mode, NAME_FIELD_IDX, ProviderForm, VimMode, filter_suggestions,
+};
 use super::theme::{self as t};
 use super::ui::format::mask_api_key_str;
 use super::ui::layout::centered_fixed;
@@ -33,11 +35,9 @@ pub(super) fn handle_paste(app: &mut App, text: &str) -> crate::error::Result<()
         } else {
             &mut form.route_pat_field
         };
-        field.value.insert_str(field.cursor, text);
-        field.cursor += text.len();
+        field.insert_str(text);
     } else if let Some(field) = form.fields.get_mut(form.focused) {
-        field.value.insert_str(field.cursor, text);
-        field.cursor += text.len();
+        field.insert_str(text);
     }
     Ok(())
 }
@@ -100,7 +100,7 @@ pub(super) fn handle_key(
         let prov_name = form
             .original_name
             .as_deref()
-            .unwrap_or_else(|| form.fields[0].value.trim());
+            .unwrap_or_else(|| form.fields[NAME_FIELD_IDX].value.trim());
         let provider_models: Vec<String> = app
             .models
             .provider_models
@@ -117,10 +117,10 @@ pub(super) fn handle_key(
 
     if form.vim_mode == VimMode::Normal {
         match code {
-            KeyCode::Char('i') | KeyCode::Insert if !form.fields[form.focused].is_toggle => {
+            KeyCode::Char('i') | KeyCode::Insert if !form.fields[form.focused].is_toggle() => {
                 form.vim_mode = VimMode::Insert;
             }
-            KeyCode::Char('a' | 'A') if !form.fields[form.focused].is_toggle => {
+            KeyCode::Char('a' | 'A') if !form.fields[form.focused].is_toggle() => {
                 form.vim_mode = VimMode::Insert;
                 form.fields[form.focused].end();
             }
@@ -134,7 +134,7 @@ pub(super) fn handle_key(
             KeyCode::BackTab => form.focus_prev(),
             KeyCode::Char('h') | KeyCode::Left => {
                 let focused = form.focused;
-                if form.fields[focused].is_toggle {
+                if form.fields[focused].is_toggle() {
                     form.fields[focused].move_prev();
                     return Ok(());
                 }
@@ -142,7 +142,7 @@ pub(super) fn handle_key(
             }
             KeyCode::Char('l') | KeyCode::Right | KeyCode::Char(' ') => {
                 let focused = form.focused;
-                if form.fields[focused].is_toggle {
+                if form.fields[focused].is_toggle() {
                     form.fields[focused].move_next();
                     return Ok(());
                 }
@@ -150,7 +150,7 @@ pub(super) fn handle_key(
                     form.fields[focused].move_right();
                 }
             }
-            KeyCode::Enter if !form.fields[form.focused].is_toggle => {
+            KeyCode::Enter if !form.fields[form.focused].is_toggle() => {
                 form.vim_mode = VimMode::Insert;
             }
             KeyCode::Home | KeyCode::Char('0') => form.fields[form.focused].home(),
@@ -207,7 +207,7 @@ pub(super) fn handle_key(
         _ => {}
     }
 
-    if form.fields[form.focused].is_toggle {
+    if form.fields[form.focused].is_toggle() {
         match code {
             KeyCode::Left => {
                 form.fields[form.focused].move_prev();
@@ -297,7 +297,7 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
         let ci = i;
         let is_focused = i == form.focused;
         let show_cursor =
-            is_focused && field.editable && (form.vim_mode == VimMode::Insert || field.is_toggle);
+            is_focused && field.editable && (form.vim_mode == VimMode::Insert || field.is_toggle());
 
         let label_style = if is_focused {
             Style::default().fg(prov_color).add_modifier(Modifier::BOLD)
@@ -307,7 +307,7 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
             Style::default().fg(t::TEXT)
         };
 
-        let value_display = if field.is_toggle {
+        let value_display = if field.is_toggle() {
             let selected = Style::default()
                 .fg(prov_color)
                 .add_modifier(Modifier::REVERSED | Modifier::BOLD);
@@ -451,11 +451,9 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
 
 fn close(app: &mut App, server: &Option<ServerHandle>) {
     // New empty forms with no name entered are just discarded.
-    // fields[0] is the Name field in ProviderForm's fixed field order.
-    let should_save = app
-        .form
-        .as_ref()
-        .is_some_and(|f| f.original_name.is_some() || !f.fields[0].value.trim().is_empty());
+    let should_save = app.form.as_ref().is_some_and(|f| {
+        f.original_name.is_some() || !f.fields[NAME_FIELD_IDX].value.trim().is_empty()
+    });
 
     if should_save {
         if let Err(e) = app.save_form_and_close() {
@@ -731,7 +729,7 @@ fn get_suggestions<'a>(form: &ProviderForm, app: &'a App) -> Vec<&'a str> {
         let prov_key = form
             .original_name
             .as_deref()
-            .unwrap_or_else(|| form.fields[0].value.trim());
+            .unwrap_or_else(|| form.fields[NAME_FIELD_IDX].value.trim());
         let models = app
             .models
             .provider_models

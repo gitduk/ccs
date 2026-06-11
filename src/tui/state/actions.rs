@@ -2,7 +2,8 @@ use crate::config::{self, ApiFormat, OpenAiApiVersion, RouteRule};
 use crate::error::Result;
 
 use super::{
-    App, ConfirmAction, FALLBACK_FIELD_IDX, MessageKind, Mode, PORT_FIELD_IDX, ProviderForm,
+    API_KEY_FIELD_IDX, App, BASE_URL_FIELD_IDX, ConfirmAction, FALLBACK_FIELD_IDX,
+    FORMAT_FIELD_IDX, MessageKind, Mode, NAME_FIELD_IDX, PORT_FIELD_IDX, ProviderForm,
 };
 
 /// Parsed and validated fields extracted from a [`ProviderForm`].
@@ -16,8 +17,13 @@ struct ParsedProviderFields {
     fallback: bool,
     port: Option<u16>,
     routes: Vec<RouteRule>,
-    is_new: bool,
     original_name: Option<String>,
+}
+
+impl ParsedProviderFields {
+    fn is_new(&self) -> bool {
+        self.original_name.is_none()
+    }
 }
 
 /// Extract, parse, and validate the provider form fields that can be checked
@@ -27,17 +33,16 @@ fn parse_provider_form(
     form: &ProviderForm,
     known_models: &[String],
 ) -> std::result::Result<ParsedProviderFields, String> {
-    let name = form.fields[0].value.trim().to_string();
-    let base_url = form.fields[1]
+    let name = form.fields[NAME_FIELD_IDX].value.trim().to_string();
+    let base_url = form.fields[BASE_URL_FIELD_IDX]
         .value
         .trim()
         .trim_end_matches('/')
         .to_string();
-    let api_key = form.fields[2].value.trim().to_string();
-    let format_str = form.fields[3].value.trim().to_string();
+    let api_key = form.fields[API_KEY_FIELD_IDX].value.trim().to_string();
+    let format_str = form.fields[FORMAT_FIELD_IDX].value.trim().to_string();
     let fallback = form.fields[FALLBACK_FIELD_IDX].value.trim() == "yes";
     let port_raw = form.fields[PORT_FIELD_IDX].value.trim().to_string();
-    let is_new = form.original_name.is_none();
     let original_name = form.original_name.clone();
 
     let routes: Vec<RouteRule> = form
@@ -83,7 +88,6 @@ fn parse_provider_form(
         fallback,
         port,
         routes,
-        is_new,
         original_name,
     })
 }
@@ -120,7 +124,7 @@ impl App {
         let models_key = form
             .original_name
             .as_deref()
-            .unwrap_or_else(|| form.fields[0].value.trim());
+            .unwrap_or_else(|| form.fields[NAME_FIELD_IDX].value.trim());
         let known_models: Vec<String> = self
             .models
             .provider_models
@@ -140,9 +144,9 @@ impl App {
         // `form` borrow ends here (NLL).
 
         let is_rename =
-            !fields.is_new && fields.original_name.as_deref() != Some(fields.name.as_str());
+            !fields.is_new() && fields.original_name.as_deref() != Some(fields.name.as_str());
 
-        if (fields.is_new || is_rename) && self.config.providers.contains_key(&fields.name) {
+        if (fields.is_new() || is_rename) && self.config.providers.contains_key(&fields.name) {
             if let Some(f) = self.form.as_mut() {
                 f.error = Some(format!("Provider '{}' already exists", fields.name));
             }
@@ -158,8 +162,9 @@ impl App {
         let model_map = existing.map(|p| p.model_map.clone()).unwrap_or_default();
         let enabled = existing.map(|p| p.enabled).unwrap_or(true);
         // fallback is set via the form field; don't inherit from existing.
-        let quota = existing.and_then(|p| p.quota.clone());
         let quota_command = existing.and_then(|p| p.quota_command.clone());
+        // Not editable in the form; inherit from the existing provider.
+        let inject_thinking_history = existing.map(|p| p.inject_thinking_history).unwrap_or(true);
         let provider = crate::config::Provider {
             id: provider_id.clone(),
             base_url: fields.base_url,
@@ -170,7 +175,7 @@ impl App {
             enabled,
             fallback: fields.fallback,
             api_version: fields.api_version,
-            quota,
+            inject_thinking_history,
             quota_command,
             port: fields.port,
         };
@@ -233,8 +238,7 @@ impl App {
         }
 
         config::save_config(&self.config)?;
-        self.refresh_ids();
-        if let Some(idx) = self.providers.names.iter().position(|s| s == &fields.name) {
+        if let Some(idx) = self.config.providers.get_index_of(&fields.name) {
             self.providers.table_state.select(Some(idx));
         }
 
@@ -337,14 +341,12 @@ impl App {
                 .unwrap_or_default();
         }
         config::save_config(&self.config)?;
-        self.refresh_ids();
         if let Some(selected) = self.providers.table_state.selected() {
-            if selected >= self.providers.names.len() && !self.providers.names.is_empty() {
-                self.providers
-                    .table_state
-                    .select(Some(self.providers.names.len() - 1));
-            } else if self.providers.names.is_empty() {
+            let count = self.provider_count();
+            if count == 0 {
                 self.providers.table_state.select(None);
+            } else if selected >= count {
+                self.providers.table_state.select(Some(count - 1));
             }
         }
         self.set_message(format!("Deleted '{name}'"), MessageKind::Success);

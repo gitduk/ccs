@@ -24,9 +24,9 @@ pub(super) fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
 
     let Ok(m) = app.metrics.lock() else { return };
     let mut provider_rows: Vec<(&str, crate::metrics::ProviderStats)> = app
+        .config
         .providers
-        .names
-        .iter()
+        .keys()
         .map(|name| {
             (
                 name.as_str(),
@@ -56,13 +56,13 @@ pub(super) fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
             .partial_cmp(&rate(b))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    model_entries.sort_by(|a, b| (b.1 + b.2).cmp(&(a.1 + a.2)));
+    model_entries.sort_by_key(|e| std::cmp::Reverse(e.1 + e.2));
 
     let muted = Style::default().fg(t::MUTED);
     let id_col_width = app
+        .config
         .providers
-        .names
-        .iter()
+        .keys()
         .map(|s| s.width())
         .max()
         .unwrap_or(8)
@@ -124,11 +124,11 @@ pub(super) fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
             ),
             Span::styled("  Avg ", muted),
             {
-                let avg = if s.requests > 0 {
-                    fmt_latency(s.latency_total / s.requests)
-                } else {
-                    "—".to_string()
-                };
+                let avg = s
+                    .latency_total
+                    .checked_div(s.requests)
+                    .map(fmt_latency)
+                    .unwrap_or_else(|| "—".to_string());
                 Span::styled(format!("{:>7}", avg), Style::default().fg(t::TEXT))
             },
             Span::styled("  Req ", muted),

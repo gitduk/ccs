@@ -44,10 +44,7 @@ pub(super) fn handle_paste(app: &mut App, text: &str) -> crate::error::Result<()
     if form.vim_mode != VimMode::Insert {
         form.vim_mode = VimMode::Insert;
     }
-    form.curl_field
-        .value
-        .insert_str(form.curl_field.cursor, text);
-    form.curl_field.cursor += text.len();
+    form.curl_field.insert_str(text);
     Ok(())
 }
 

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -14,8 +16,8 @@ use crate::proxy::executor::{
 use crate::proxy::metrics::{RequestLogEntry, SharedRequestLog};
 use crate::proxy::transform;
 
-fn body_to_string(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
+fn body_to_string(bytes: &[u8]) -> Arc<str> {
+    Arc::from(String::from_utf8_lossy(bytes))
 }
 
 /// Wire format expected by the *client* (the caller of this proxy). The proxy
@@ -54,7 +56,7 @@ use crate::repo::{Repository, StatsDelta};
 struct RequestPipeline<'a> {
     state: &'a SharedState,
     req_model_hint: String,
-    request_body_str: String,
+    request_body_str: Arc<str>,
     is_stream: bool,
     request_log_limit: usize,
 }
@@ -87,7 +89,7 @@ impl<'a> RequestPipeline<'a> {
         status: u16,
         latency_ms: u64,
         error: String,
-        resp_body: Option<String>,
+        resp_body: Option<Arc<str>>,
     ) {
         let entry = RequestLogEntry {
             id: 0,
@@ -141,17 +143,11 @@ pub async fn handle_models(
         (p.clone(), key)
     };
 
-    let base = provider.base_url.trim_end_matches('/');
-    let url = format!("{base}/v1/models");
-
-    let (auth_key, auth_val) = provider.auth_header(&api_key);
-
-    let mut req = state.http_client.get(&url).header(auth_key, &auth_val);
-    if provider.api_format == ApiFormat::Anthropic {
-        req = req.header("anthropic-version", "2023-06-01");
-        if let Some(beta) = headers.get("anthropic-beta") {
-            req = req.header("anthropic-beta", beta);
-        }
+    let mut req = crate::proxy::forwarder::models_request(&state.http_client, &provider, &api_key);
+    if provider.api_format == ApiFormat::Anthropic
+        && let Some(beta) = headers.get("anthropic-beta")
+    {
+        req = req.header("anthropic-beta", beta);
     }
     let response = req.send().await?;
 
@@ -257,6 +253,16 @@ struct RequestCtx<'a> {
     client_format: ClientFormat,
 }
 
+/// What to do after a non-success upstream status, decided per status class.
+enum FailureAction {
+    /// 5xx / 429: transient — cycle providers up to `max_failures`.
+    Retry,
+    /// 401 / 403 / 404: auth or model-not-found — cycle up to `max_auth_failures`.
+    RetryAuth,
+    /// Other 4xx: client error — relay upstream's response immediately.
+    ReturnNow,
+}
+
 /// Try each provider in the pool; cycle on retryable errors (5xx, 429, auth).
 /// Returns the first successful response or a final error response.
 async fn try_providers(
@@ -344,90 +350,63 @@ async fn try_providers(
         let status = outcome.status();
         let status_u16 = status.as_u16();
 
-        // 5xx or 429: try next provider
-        if status_u16 >= 500 || status_u16 == 429 {
-            let error_body = match outcome {
-                ProviderRequestOutcome::UpstreamError { body, .. } => body,
-                ProviderRequestOutcome::Success { response, .. } => {
-                    response.bytes().await.unwrap_or_default()
-                }
+        if !status.is_success() {
+            // Retry policy by status class; bookkeeping below is shared.
+            let action = match status_u16 {
+                s if s >= 500 || s == 429 => FailureAction::Retry,
+                // Auth error or model not found — worth trying the next
+                // provider in fallback mode, bounded by max_auth_failures.
+                401 | 403 | 404 => FailureAction::RetryAuth,
+                // Other 4xx: client error (bad request format etc.).
+                _ => FailureAction::ReturnNow,
             };
+            let (error_body, latency_ms) = outcome.into_error_parts().await;
             let preview = extract_error_message(&error_body);
             tracing::warn!(
-                "Provider {} returned {status}, trying next",
+                "Provider {} returned {status}: {preview}",
                 provider.base_url
             );
             pipeline.record_failure(&pkey);
             pipeline.record_error_metric(provider_name, status_u16, &preview, &route_pattern);
-            last_status = Some(status);
-            last_error_body = Some(error_body);
-            consecutive_failures += 1;
-            if !do_cycle || consecutive_failures >= max_failures {
-                break;
-            }
-            continue;
-        }
 
-        // 401/403/404: auth error or model not found — try next provider in fallback mode
-        if status_u16 == 401 || status_u16 == 403 || status_u16 == 404 {
-            let (error_body, latency_ms) = match outcome {
-                ProviderRequestOutcome::UpstreamError {
-                    body, latency_ms, ..
-                } => (body, latency_ms),
-                ProviderRequestOutcome::Success {
-                    response,
-                    latency_ms,
-                } => (response.bytes().await.unwrap_or_default(), latency_ms),
-            };
-            let preview = extract_error_message(&error_body);
-            tracing::warn!(
-                "Provider {} returned {status} ({}), trying next",
-                provider.base_url,
-                preview
-            );
-            pipeline.record_failure(&pkey);
-            pipeline.record_error_metric(provider_name, status_u16, &preview, &route_pattern);
-            last_status = Some(status);
-            last_error_body = Some(error_body.clone());
-            auth_failures += 1;
-            if !do_cycle || auth_failures >= max_auth_failures {
-                pipeline.push_request_log(
-                    provider_name,
-                    status_u16,
-                    latency_ms,
-                    preview,
-                    Some(body_to_string(&error_body)),
-                );
-                return Ok(
-                    (status, [("content-type", "application/json")], error_body).into_response()
-                );
-            }
-            continue;
-        }
+            let keep_cycling = do_cycle
+                && match action {
+                    FailureAction::Retry => {
+                        consecutive_failures += 1;
+                        consecutive_failures < max_failures
+                    }
+                    FailureAction::RetryAuth => {
+                        auth_failures += 1;
+                        auth_failures < max_auth_failures
+                    }
+                    FailureAction::ReturnNow => false,
+                };
 
-        // Other 4xx: client error (bad request format etc.), return immediately
-        if !status.is_success() {
-            let (error_body, latency_ms) = match outcome {
-                ProviderRequestOutcome::UpstreamError {
-                    body, latency_ms, ..
-                } => (body, latency_ms),
-                ProviderRequestOutcome::Success {
-                    response,
-                    latency_ms,
-                } => (response.bytes().await.unwrap_or_default(), latency_ms),
-            };
-            let preview = extract_error_message(&error_body);
-            tracing::warn!("Upstream returned {status}: {preview}");
-            pipeline.record_failure(&pkey);
-            pipeline.record_error_metric(provider_name, status_u16, &preview, &route_pattern);
-            pipeline.push_request_log(
-                provider_name,
-                status_u16,
-                latency_ms,
-                preview,
-                Some(body_to_string(&error_body)),
-            );
-            return Ok((status, [("content-type", "application/json")], error_body).into_response());
+            if keep_cycling {
+                last_status = Some(status);
+                last_error_body = Some(error_body);
+                continue;
+            }
+            match action {
+                // Exhausted retries: fall through to the shared final-error path.
+                FailureAction::Retry => {
+                    last_status = Some(status);
+                    last_error_body = Some(error_body);
+                    break;
+                }
+                // Auth exhausted or plain client error: relay upstream's response.
+                FailureAction::RetryAuth | FailureAction::ReturnNow => {
+                    pipeline.push_request_log(
+                        provider_name,
+                        status_u16,
+                        latency_ms,
+                        preview,
+                        Some(body_to_string(&error_body)),
+                    );
+                    return Ok((status, [("content-type", "application/json")], error_body)
+                        .into_response());
+                }
+            }
         }
 
         let latency_ms = outcome.latency_ms();
@@ -680,7 +659,6 @@ async fn handle_buffered_response(
     }
     // Persist the complete entry in one shot — no two-phase write, no race condition.
     if entry_id != 0 {
-        log_entry.id = entry_id;
         log_entry.input_tokens = input;
         log_entry.output_tokens = output;
         if let Some(ref m) = model {
@@ -854,7 +832,11 @@ fn track_tokens_in_stream(
                 while let Some(rel) = line_buf[start..].find('\n') {
                     let pos = start + rel;
                     let line = line_buf[start..pos].trim_end_matches('\r');
+                    // Only message_start / message_delta carry usage (2 events per
+                    // response); a cheap substring check skips the JSON parse for
+                    // the hundreds of content_block_delta events in between.
                     if let Some(data) = line.strip_prefix("data: ")
+                        && (data.contains("\"message_start\"") || data.contains("\"message_delta\""))
                         && let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
                             match json["type"].as_str() {
                                 Some("message_start") => {
@@ -910,7 +892,7 @@ mod tests {
             enabled,
             fallback,
             api_version: Some(OpenAiApiVersion::Responses),
-            quota: None,
+            inject_thinking_history: true,
             quota_command: None,
             port: None,
         }

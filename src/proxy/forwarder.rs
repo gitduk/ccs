@@ -20,6 +20,27 @@ fn should_forward_header(name: &str) -> bool {
     !FILTERED_HEADERS.contains(&name) && !name.starts_with("anthropic-")
 }
 
+/// Build the GET /v1/models request for a provider. Anthropic-format
+/// providers get both x-api-key and Bearer auth because some proxies require
+/// Bearer on /v1/models even when /v1/messages accepts x-api-key.
+pub fn models_request(
+    client: &Client,
+    provider: &Provider,
+    api_key: &str,
+) -> reqwest::RequestBuilder {
+    let base = provider.base_url.trim_end_matches('/');
+    let (auth_key, auth_val) = provider.auth_header(api_key);
+    let mut req = client
+        .get(format!("{base}/v1/models"))
+        .header(auth_key, auth_val);
+    if provider.api_format == ApiFormat::Anthropic {
+        req = req
+            .header("anthropic-version", "2023-06-01")
+            .header("authorization", format!("Bearer {api_key}"));
+    }
+    req
+}
+
 /// Forward a request to the upstream provider.
 pub async fn forward_request(
     client: &Client,
@@ -29,14 +50,7 @@ pub async fn forward_request(
     incoming_headers: &HeaderMap,
     openai_api_version: OpenAiApiVersion,
 ) -> Result<reqwest::Response> {
-    let base = provider.base_url.trim_end_matches('/');
-    let url = match provider.api_format {
-        ApiFormat::Anthropic => format!("{base}/v1/messages"),
-        ApiFormat::OpenAI => match openai_api_version {
-            OpenAiApiVersion::ChatCompletions => format!("{base}/v1/chat/completions"),
-            OpenAiApiVersion::Responses => format!("{base}/v1/responses"),
-        },
-    };
+    let url = provider.endpoint_url(openai_api_version);
     let (auth_key, auth_val) = provider.auth_header(api_key);
 
     let mut request = client.post(&url);

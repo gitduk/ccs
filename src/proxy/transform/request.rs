@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use crate::config::{OpenAiApiVersion, Provider};
-use crate::error::{AppError, Result};
+use crate::error::Result;
 
 // Default model names
 const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
@@ -111,10 +111,13 @@ pub fn to_openai(req: &Value, provider: &Provider, api_version: OpenAiApiVersion
         }
     }
 
-    // Thinking → reasoning
+    // Thinking → reasoning. The canonical form is Anthropic-native
+    // ({"type": "enabled"|"adaptive"}); ingress normalizes to it.
     if let Some(thinking) = req.get("thinking")
-        && let Some(enabled) = thinking.get("enabled").and_then(|e| e.as_bool())
-        && enabled
+        && matches!(
+            thinking.get("type").and_then(|t| t.as_str()),
+            Some("enabled") | Some("adaptive")
+        )
     {
         // Responses API uses reasoning.effort nested object;
         // Chat Completions uses top-level reasoning_effort.
@@ -130,6 +133,10 @@ pub fn to_openai(req: &Value, provider: &Provider, api_version: OpenAiApiVersion
             }
         } else if is_responses {
             result["reasoning"] = json!({"effort": "high"});
+        } else {
+            // No budget (e.g. {"type": "adaptive"}): still signal reasoning
+            // on the Chat Completions path instead of silently dropping it.
+            result["reasoning_effort"] = json!("high");
         }
     }
 
@@ -394,12 +401,7 @@ fn convert_assistant_blocks_to_openai(blocks: &[Value], is_responses: bool) -> R
                 text_content.push_str(text);
             }
             "tool_use" => {
-                let id = block.get("id").and_then(|i| i.as_str()).unwrap_or("");
-                let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                let input = block.get("input").cloned().unwrap_or(json!({}));
-                let arguments = serde_json::to_string(&input).map_err(|e| {
-                    AppError::Transform(format!("Failed to serialize tool arguments: {}", e))
-                })?;
+                let (id, name, arguments) = super::tool_use_parts(block)?;
                 if is_responses {
                     tool_calls.push(json!({
                         "type": "function_call",
@@ -833,11 +835,18 @@ fn copy_openai_tool_choice(req: &Value, out: &mut Value, is_responses: bool) {
 
 fn copy_openai_reasoning_to_thinking(req: &Value, out: &mut Value) {
     // reasoning_effort (Chat) or reasoning.effort (Responses) — treat any
-    // explicit effort as "thinking enabled".
-    let has_effort = req.get("reasoning_effort").is_some()
-        || req.get("reasoning").and_then(|r| r.get("effort")).is_some();
-    if has_effort {
-        out["thinking"] = json!({"enabled": true});
+    // explicit effort as "thinking enabled". Emit the Anthropic-native
+    // encoding so every downstream consumer sees one canonical format.
+    let effort = req
+        .get("reasoning_effort")
+        .or_else(|| req.get("reasoning").and_then(|r| r.get("effort")));
+    if let Some(effort) = effort {
+        let budget = match effort.as_str() {
+            Some("low") | Some("minimal") => 2048,
+            Some("high") => 16384,
+            _ => 8192, // "medium" and unknown values
+        };
+        out["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
     }
 }
 
@@ -1090,19 +1099,15 @@ fn message_has_thinking_block(msg: &Value) -> bool {
 /// injects an empty thinking block into those turns so the history is consistent.
 /// Returns `None` if no patching is needed.
 pub fn patch_thinking_history(req: &Value) -> Option<Value> {
-    // Detect both formats:
-    //   Internal (converted from OpenAI reasoning_effort): {"enabled": true, ...}
-    //   Anthropic API native: {"type": "enabled", ...} or {"type": "adaptive"}
-    let thinking_enabled = req
-        .get("thinking")
-        .map(|t| {
-            t.get("enabled").and_then(|e| e.as_bool()).unwrap_or(false)
-                || matches!(
-                    t.get("type").and_then(|v| v.as_str()),
-                    Some("enabled") | Some("adaptive")
-                )
-        })
-        .unwrap_or(false);
+    // Anthropic-native encoding only — ingress normalizes the OpenAI
+    // reasoning_effort form to {"type": "enabled", ...} (see
+    // copy_openai_reasoning_to_thinking).
+    let thinking_enabled = matches!(
+        req.get("thinking")
+            .and_then(|t| t.get("type"))
+            .and_then(|v| v.as_str()),
+        Some("enabled") | Some("adaptive")
+    );
 
     if !thinking_enabled {
         return None;
@@ -1171,7 +1176,7 @@ mod tests {
             enabled: true,
             fallback: true,
             api_version,
-            quota: None,
+            inject_thinking_history: true,
             quota_command: None,
             port: None,
         }
@@ -1446,7 +1451,7 @@ mod tests {
             "model": "m",
             "messages": [{"role": "user", "content": "Think hard"}],
             "max_tokens": 10,
-            "thinking": {"enabled": true, "budget_tokens": 2000}
+            "thinking": {"type": "enabled", "budget_tokens": 2000}
         });
         let out = anthropic_to_openai_request(&req, &provider_chat_completions()).unwrap();
         assert_eq!(out["reasoning_effort"], "high");
@@ -1577,11 +1582,24 @@ mod tests {
     }
 
     #[test]
+    fn chat_completions_adaptive_thinking_without_budget_sets_effort() {
+        let req = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "Think"}],
+            "max_tokens": 10,
+            "thinking": {"type": "adaptive"}
+        });
+        let out = anthropic_to_openai_request(&req, &provider_chat_completions()).unwrap();
+        assert_eq!(out["reasoning_effort"], "high");
+        assert!(out.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
     fn responses_api_thinking_budget_prefers_max_output_tokens() {
         let req = json!({
             "model": "m",
             "messages": [{"role": "user", "content": "Think hard"}],
-            "thinking": {"enabled": true, "budget_tokens": 77}
+            "thinking": {"type": "enabled", "budget_tokens": 77}
         });
         let out = anthropic_to_openai_request(&req, &provider_responses()).unwrap();
         assert_eq!(out["reasoning"]["effort"], "high");
@@ -1853,7 +1871,8 @@ mod tests {
             "reasoning_effort": "high"
         });
         let out = openai_to_anthropic_request(&req, OpenAiApiVersion::ChatCompletions).unwrap();
-        assert_eq!(out["thinking"]["enabled"], true);
+        assert_eq!(out["thinking"]["type"], "enabled");
+        assert!(out["thinking"]["budget_tokens"].as_u64().is_some());
     }
 
     #[test]
@@ -1978,7 +1997,7 @@ mod tests {
     fn patch_thinking_history_injects_empty_block_for_missing_turns() {
         let req = json!({
             "model": "m",
-            "thinking": {"enabled": true, "budget_tokens": 1000},
+            "thinking": {"type": "enabled", "budget_tokens": 1000},
             "messages": [
                 {"role": "user", "content": "hello"},
                 {"role": "assistant", "content": "hi"},
@@ -2028,7 +2047,7 @@ mod tests {
         // A trailing assistant message with no thinking block is a prefill — must not be patched.
         let req = json!({
             "model": "m",
-            "thinking": {"enabled": true, "budget_tokens": 1000},
+            "thinking": {"type": "enabled", "budget_tokens": 1000},
             "messages": [
                 {"role": "user", "content": "hello"},
                 {"role": "assistant", "content": "Here is"}
@@ -2041,7 +2060,7 @@ mod tests {
     fn patch_thinking_history_patches_intermediate_not_trailing() {
         let req = json!({
             "model": "m",
-            "thinking": {"enabled": true, "budget_tokens": 1000},
+            "thinking": {"type": "enabled", "budget_tokens": 1000},
             "messages": [
                 {"role": "user", "content": "hello"},
                 {"role": "assistant", "content": "first"},
@@ -2061,7 +2080,7 @@ mod tests {
     fn patch_thinking_history_no_op_when_blocks_present() {
         let req = json!({
             "model": "m",
-            "thinking": {"enabled": true, "budget_tokens": 1000},
+            "thinking": {"type": "enabled", "budget_tokens": 1000},
             "messages": [
                 {"role": "user", "content": "hello"},
                 {"role": "assistant", "content": [

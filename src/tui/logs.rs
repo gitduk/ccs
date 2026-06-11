@@ -15,7 +15,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::state::{App, LogsState, MessageKind, Mode};
 use super::theme::{self as t};
-use super::ui::format::{fmt_latency, format_tokens, shorten_model_name};
+use super::ui::format::{fmt_latency, format_tokens, shorten_model_name, truncate_width};
 use super::ui::layout::{BORDER_INNER_DIVIDER, DASH, TITLE_SIDE, centered_rect};
 use crate::metrics::RequestLogEntry;
 
@@ -181,11 +181,7 @@ fn render_log_list(
         .take(viewport_height)
     {
         let is_selected = i == selected;
-        let base_status = if entry.error.is_some() || entry.status >= 400 {
-            Style::default().fg(t::ERROR)
-        } else {
-            Style::default().fg(t::SUCCESS)
-        };
+        let base_status = entry_status_style(entry);
         let (status_style, row_style) = if is_selected {
             let rev = Modifier::REVERSED;
             (
@@ -195,14 +191,7 @@ fn render_log_list(
         } else {
             (base_status, Style::default())
         };
-        let response = truncate(
-            &format!("{} {}", entry.status, fmt_latency(entry.latency_ms)),
-            10,
-        );
-        let pm = truncate(
-            &format!("{}/{}", entry.provider, shorten_model_name(&entry.model)),
-            21,
-        );
+        let (response, pm) = entry_cells(entry, 10, 21);
         lines.push(Line::from(vec![
             Span::styled(format!("{:<11}", response), status_style),
             Span::styled(format!("{:<22}", pm), row_style.fg(t::TEXT)),
@@ -217,11 +206,7 @@ fn draw_detail(f: &mut Frame, entry: &RequestLogEntry, area: Rect, logs: &mut Lo
 
     let label = Style::default().fg(t::MUTED);
     let value = Style::default().fg(t::TEXT);
-    let status_style = if entry.error.is_some() || entry.status >= 400 {
-        Style::default().fg(t::ERROR)
-    } else {
-        Style::default().fg(t::SUCCESS)
-    };
+    let status_style = entry_status_style(entry);
 
     let mut lines: Vec<Line> = vec![
         Line::from(vec![
@@ -637,19 +622,8 @@ fn draw_requests_content(f: &mut Frame, app: &App, area: Rect) {
     ];
 
     for entry in &entries {
-        let status_style = if entry.error.is_some() || entry.status >= 400 {
-            Style::default().fg(t::ERROR)
-        } else {
-            Style::default().fg(t::SUCCESS)
-        };
-        let response = truncate(
-            &format!("{} {}", entry.status, fmt_latency(entry.latency_ms)),
-            11,
-        );
-        let provider_model = truncate(
-            &format!("{}/{}", entry.provider, shorten_model_name(&entry.model)),
-            16,
-        );
+        let status_style = entry_status_style(entry);
+        let (response, provider_model) = entry_cells(entry, 11, 16);
         lines.push(Line::from(vec![
             Span::styled(format!("{:<11}", response), status_style),
             Span::styled(
@@ -683,27 +657,6 @@ fn draw_footer(f: &mut Frame, area: Rect, text: &str) {
     );
 }
 
-fn display_width(s: &str) -> usize {
-    s.width()
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if display_width(s) <= max {
-        return s.to_string();
-    }
-    let mut w = 0usize;
-    let mut end = 0usize;
-    for (i, ch) in s.char_indices() {
-        let cw = ch.width().unwrap_or(0);
-        if w + cw > max.saturating_sub(1) {
-            break;
-        }
-        w += cw;
-        end = i + ch.len_utf8();
-    }
-    format!("{}…", &s[..end])
-}
-
 fn wrap_text(s: &str, max: usize) -> Vec<String> {
     if max == 0 {
         return vec![s.to_string()];
@@ -711,7 +664,7 @@ fn wrap_text(s: &str, max: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut remaining = s;
     while !remaining.is_empty() {
-        if display_width(remaining) <= max {
+        if remaining.width() <= max {
             chunks.push(remaining.to_string());
             break;
         }
@@ -729,6 +682,30 @@ fn wrap_text(s: &str, max: usize) -> Vec<String> {
         remaining = &remaining[split..];
     }
     chunks
+}
+
+/// Status color for a log entry: red on error or HTTP >= 400, green otherwise.
+fn entry_status_style(entry: &RequestLogEntry) -> Style {
+    if entry.error.is_some() || entry.status >= 400 {
+        Style::default().fg(t::ERROR)
+    } else {
+        Style::default().fg(t::SUCCESS)
+    }
+}
+
+/// Build the "status latency" and "provider/model" cells, truncated to the
+/// given display widths. Shared by the side panel and full-screen log list.
+fn entry_cells(entry: &RequestLogEntry, resp_w: usize, pm_w: usize) -> (String, String) {
+    (
+        truncate_width(
+            &format!("{} {}", entry.status, fmt_latency(entry.latency_ms)),
+            resp_w,
+        ),
+        truncate_width(
+            &format!("{}/{}", entry.provider, shorten_model_name(&entry.model)),
+            pm_w,
+        ),
+    )
 }
 
 fn format_time(ts: std::time::SystemTime) -> String {

@@ -72,7 +72,7 @@ const DETAIL_MIN_HEIGHT: u16 = 2;
 /// the outer chrome owns top/bottom). One row of top padding + one
 /// header row + one row per provider.
 fn providers_spec(app: &App) -> HeightSpec {
-    let ideal = (app.providers.names.len() as u16 + 2).max(3);
+    let ideal = (app.provider_count() as u16 + 2).max(3);
     HeightSpec { min: 3, ideal }
 }
 
@@ -90,7 +90,7 @@ fn detail_spec(app: &App) -> HeightSpec {
 /// the chrome.
 fn stats_spec(app: &App) -> HeightSpec {
     // blank + title + N provider rows
-    let n = app.providers.names.len() as u16;
+    let n = app.provider_count() as u16;
     let min = 2 + n;
     HeightSpec { min, ideal: min }
 }

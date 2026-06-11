@@ -4,6 +4,27 @@ use ratatui::widgets::Cell;
 
 use super::super::theme::{self as t};
 
+/// Truncate a string to `max` display columns (wide chars count as 2),
+/// appending `…` if truncated. Use for table layout; `truncate_chars` for
+/// plain char-count limits.
+pub(crate) fn truncate_width(s: &str, max: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if s.width() <= max {
+        return s.to_string();
+    }
+    let mut w = 0usize;
+    let mut end = 0usize;
+    for (i, ch) in s.char_indices() {
+        let cw = ch.width().unwrap_or(0);
+        if w + cw > max.saturating_sub(1) {
+            break;
+        }
+        w += cw;
+        end = i + ch.len_utf8();
+    }
+    format!("{}…", &s[..end])
+}
+
 /// Truncate a string to `max` characters, appending `…` if truncated.
 pub(crate) fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -69,15 +90,13 @@ pub(crate) fn col_width(header: &str, content_lens: impl Iterator<Item = usize>)
     max_content_width(content_lens, 0, usize::MAX).max(header.len()) as u16
 }
 
+/// Display width of what `masked_api_key` renders for this key.
+/// Derived from the actual masked string so the two can never drift.
 pub(crate) fn api_key_display_len(key: &str) -> usize {
-    if key.is_empty() {
-        "(not set)".len()
-    } else if key.starts_with('$') {
-        key.chars().count()
-    } else if key.chars().count() > 8 {
-        11 // "abcd···wxyz"
-    } else {
-        4 // "····"
+    match mask_api_key_str(key) {
+        Some(masked) => masked.chars().count(),
+        None if key.is_empty() => "(not set)".len(),
+        None => key.chars().count(),
     }
 }
 

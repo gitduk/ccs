@@ -12,14 +12,10 @@ impl App {
         use ratatui::widgets::TableState;
 
         let config = config::load_config()?;
-        let names: Vec<String> = config.providers.keys().cloned().collect();
 
         let mut table_state = TableState::default();
-        if !names.is_empty() {
-            let idx = names
-                .iter()
-                .position(|name| name == &config.current)
-                .unwrap_or(0);
+        if !config.providers.is_empty() {
+            let idx = config.providers.get_index_of(&config.current).unwrap_or(0);
             table_state.select(Some(idx));
         }
 
@@ -44,7 +40,7 @@ impl App {
             config,
             mode: super::Mode::Normal,
             terminal_focused: true,
-            providers: ProviderList { table_state, names },
+            providers: ProviderList { table_state },
             form: None,
             message: None,
             confirm_action: None,
@@ -80,33 +76,40 @@ impl App {
         })
     }
 
-    pub fn refresh_ids(&mut self) {
-        self.providers.names = self.config.providers.keys().cloned().collect();
+    /// Provider name at the given table row (config order).
+    pub fn provider_name_at(&self, idx: usize) -> Option<&str> {
+        self.config
+            .providers
+            .get_index(idx)
+            .map(|(name, _)| name.as_str())
+    }
+
+    pub fn provider_count(&self) -> usize {
+        self.config.providers.len()
     }
 
     pub fn selected_name(&self) -> Option<&str> {
         self.providers
             .table_state
             .selected()
-            .and_then(|i| self.providers.names.get(i))
-            .map(|s| s.as_str())
+            .and_then(|i| self.provider_name_at(i))
     }
 
     pub fn select_next(&mut self) {
-        if self.providers.names.is_empty() {
+        if self.config.providers.is_empty() {
             return;
         }
         let i = self
             .providers
             .table_state
             .selected()
-            .map(|i| (i + 1) % self.providers.names.len())
+            .map(|i| (i + 1) % self.provider_count())
             .unwrap_or(0);
         self.providers.table_state.select(Some(i));
     }
 
     pub fn select_prev(&mut self) {
-        if self.providers.names.is_empty() {
+        if self.config.providers.is_empty() {
             return;
         }
         let i = self
@@ -115,7 +118,7 @@ impl App {
             .selected()
             .map(|i| {
                 if i == 0 {
-                    self.providers.names.len() - 1
+                    self.provider_count() - 1
                 } else {
                     i - 1
                 }
@@ -132,7 +135,6 @@ impl App {
             return Ok(());
         }
         self.config.providers.move_index(idx, idx - 1);
-        self.refresh_ids();
         self.providers.table_state.select(Some(idx - 1));
         config::save_config(&self.config)?;
         Ok(())
@@ -142,11 +144,10 @@ impl App {
         let Some(idx) = self.providers.table_state.selected() else {
             return Ok(());
         };
-        if idx + 1 >= self.providers.names.len() {
+        if idx + 1 >= self.provider_count() {
             return Ok(());
         }
         self.config.providers.move_index(idx, idx + 1);
-        self.refresh_ids();
         self.providers.table_state.select(Some(idx + 1));
         config::save_config(&self.config)?;
         Ok(())
@@ -191,16 +192,10 @@ impl App {
         match config::load_config() {
             Ok(fresh_config) => {
                 self.config = fresh_config;
-                self.refresh_ids();
 
-                if let Some(idx) = self
-                    .providers
-                    .names
-                    .iter()
-                    .position(|name| name == &self.config.current)
-                {
+                if let Some(idx) = self.config.providers.get_index_of(&self.config.current) {
                     self.providers.table_state.select(Some(idx));
-                } else if !self.providers.names.is_empty() {
+                } else if !self.config.providers.is_empty() {
                     self.providers.table_state.select(Some(0));
                 } else {
                     self.providers.table_state.select(None);

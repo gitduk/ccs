@@ -97,31 +97,13 @@ impl RenderScheduler {
     }
 }
 
-#[cfg(test)]
-fn frame_actions(
-    has_event: bool,
-    scheduled_dirty: bool,
-    initially_dirty: bool,
-) -> Vec<&'static str> {
-    let mut actions = Vec::new();
-    let mut dirty = initially_dirty;
-    if has_event {
-        actions.push("input");
-        dirty = true;
-    }
-    if scheduled_dirty {
-        actions.push("scheduled");
-        dirty = true;
-    }
-    if dirty {
-        actions.push("draw");
-    }
-    actions
-}
-
 enum BgDbResult {
     Metrics(MetricsSnapshot),
-    RequestLogs(Vec<crate::metrics::RequestLogEntry>),
+    RequestLogs {
+        data_version: i64,
+        /// `None` when the database was unchanged and the reload was skipped.
+        logs: Option<Vec<crate::metrics::RequestLogEntry>>,
+    },
 }
 
 struct BgDbJobs {
@@ -129,6 +111,9 @@ struct BgDbJobs {
     rx: std::sync::mpsc::Receiver<BgDbResult>,
     metrics_running: bool,
     request_logs_running: bool,
+    /// `PRAGMA data_version` seen by the last request-log sync; the bg proxy
+    /// writes from another connection, which is the only thing that moves it.
+    request_log_data_version: i64,
 }
 
 impl BgDbJobs {
@@ -139,6 +124,7 @@ impl BgDbJobs {
             rx,
             metrics_running: false,
             request_logs_running: false,
+            request_log_data_version: -1,
         }
     }
 
@@ -166,9 +152,13 @@ impl BgDbJobs {
         let tx = self.tx.clone();
         let db = app.db.clone();
         let request_log_limit = app.config.request_log_limit;
+        let last_version = self.request_log_data_version;
         tokio::task::spawn_blocking(move || {
-            let logs = db.load_recent_request_logs(request_log_limit);
-            let _ = tx.send(BgDbResult::RequestLogs(logs));
+            // Skip the full reload (bodies included) while the bg proxy is idle.
+            let data_version = db.data_version();
+            let logs = (data_version != last_version)
+                .then(|| db.load_recent_request_logs(request_log_limit));
+            let _ = tx.send(BgDbResult::RequestLogs { data_version, logs });
         });
     }
 
@@ -180,9 +170,12 @@ impl BgDbJobs {
                     self.metrics_running = false;
                     dirty |= app.apply_metrics_snapshot(snapshot);
                 }
-                BgDbResult::RequestLogs(logs) => {
+                BgDbResult::RequestLogs { data_version, logs } => {
                     self.request_logs_running = false;
-                    dirty |= replace_request_logs_if_changed(app, logs);
+                    self.request_log_data_version = data_version;
+                    if let Some(logs) = logs {
+                        dirty |= replace_request_logs_if_changed(app, logs);
+                    }
                 }
             }
         }
@@ -392,7 +385,7 @@ mod tests {
     use super::{
         ASYNC_DRAIN_INTERVAL, BG_PROXY_CHECK_INTERVAL, DB_WATCHER_POLL_INTERVAL,
         MAX_EVENTS_PER_FRAME, METRICS_RELOAD_INTERVAL, RenderScheduler, SYSINFO_INTERVAL,
-        frame_actions, should_read_next_event,
+        should_read_next_event,
     };
     use std::time::{Duration, Instant};
 
@@ -402,22 +395,6 @@ mod tests {
         assert!(should_read_next_event(MAX_EVENTS_PER_FRAME - 1, true));
         assert!(!should_read_next_event(MAX_EVENTS_PER_FRAME, true));
         assert!(!should_read_next_event(0, false));
-    }
-
-    #[test]
-    fn input_is_processed_before_draw_when_available() {
-        assert_eq!(frame_actions(true, false, false), vec!["input", "draw"]);
-        assert_eq!(frame_actions(false, false, true), vec!["draw"]);
-    }
-
-    #[test]
-    fn idle_without_dirty_state_does_not_draw() {
-        assert!(frame_actions(false, false, false).is_empty());
-    }
-
-    #[test]
-    fn scheduled_change_draws_without_input() {
-        assert_eq!(frame_actions(false, true, false), vec!["scheduled", "draw"]);
     }
 
     #[test]

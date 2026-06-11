@@ -450,6 +450,8 @@ pub fn load_recent_request_logs(
         let error: Option<String> = row.get(9)?;
         let request_body: Option<String> = row.get(10)?;
         let response_body: Option<String> = row.get(11)?;
+        let request_body = request_body.map(std::sync::Arc::from);
+        let response_body = response_body.map(std::sync::Arc::from);
         Ok(crate::metrics::RequestLogEntry {
             id: row.get(0)?,
             timestamp: std::time::SystemTime::UNIX_EPOCH
@@ -494,6 +496,13 @@ pub fn trim_request_log(conn: &Connection, keep: usize) -> Result<()> {
     Ok(())
 }
 
+/// SQLite `PRAGMA data_version`: increments when *another* connection
+/// commits to the database file; unchanged for this connection's own writes.
+pub fn data_version(conn: &Connection) -> i64 {
+    conn.query_row("PRAGMA data_version", [], |row| row.get(0))
+        .unwrap_or(0)
+}
+
 pub fn max_request_log_id(conn: &Connection) -> u64 {
     conn.query_row("SELECT COALESCE(MAX(id), 0) FROM request_log", [], |row| {
         row.get(0)
@@ -504,6 +513,32 @@ pub fn max_request_log_id(conn: &Connection) -> u64 {
 mod tests {
     #[allow(unused_imports)]
     use super::*;
+
+    /// Pins the PRAGMA semantics the TUI's bg-proxy log sync relies on:
+    /// data_version moves only for commits from *other* connections.
+    #[test]
+    fn data_version_tracks_external_writes_only() {
+        let path = format!("/tmp/ccs-dv-test-{}.db", uuid::Uuid::new_v4());
+        let a = Connection::open(&path).unwrap();
+        init_schema(&a).unwrap();
+        let b = Connection::open(&path).unwrap();
+
+        let v0 = data_version(&a);
+
+        // Own write: unchanged for connection A.
+        a.execute_batch("INSERT INTO request_log (timestamp_ms, provider_name, model, status, latency_ms, input_tokens, output_tokens, is_stream) VALUES (1, 'p', 'm', 200, 1, 0, 0, 0)")
+            .unwrap();
+        assert_eq!(data_version(&a), v0);
+
+        // External write (connection B): A sees a new data_version.
+        b.execute_batch("INSERT INTO request_log (timestamp_ms, provider_name, model, status, latency_ms, input_tokens, output_tokens, is_stream) VALUES (2, 'p', 'm', 200, 1, 0, 0, 0)")
+            .unwrap();
+        assert_ne!(data_version(&a), v0);
+
+        drop(a);
+        drop(b);
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn test_upsert_provider_failure_counting() {

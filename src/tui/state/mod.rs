@@ -2,8 +2,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc;
 use std::time::Duration;
 
+// Fixed field order inside `ProviderForm::fields`.
+pub(super) const NAME_FIELD_IDX: usize = 0;
+pub(super) const BASE_URL_FIELD_IDX: usize = 1;
+pub(super) const API_KEY_FIELD_IDX: usize = 2;
+pub(super) const FORMAT_FIELD_IDX: usize = 3;
 pub(super) const FALLBACK_FIELD_IDX: usize = 4;
-/// Index of the Port field inside `ProviderForm::fields`.
 pub(super) const PORT_FIELD_IDX: usize = 5;
 
 use ratatui::widgets::TableState;
@@ -86,7 +90,6 @@ pub enum ConfirmAction {
 /// Provider list navigation state (main table).
 pub struct ProviderList {
     pub table_state: TableState,
-    pub names: Vec<String>,
 }
 
 /// Background test state: channels, results, and the shared HTTP client.
@@ -279,8 +282,7 @@ pub struct FormField {
     pub value: String,
     pub cursor: usize,
     pub editable: bool,
-    pub is_toggle: bool,
-    /// Valid only when `is_toggle = true`. Lists the values the toggle cycles through (first = left, second = right).
+    /// Non-empty for toggle fields. Lists the values the toggle cycles through (first = left, second = right).
     pub toggle_options: &'static [&'static str],
 }
 
@@ -294,7 +296,6 @@ impl FormField {
             value: String::new(),
             cursor: 0,
             editable: true,
-            is_toggle: false,
             toggle_options: &[],
         }
     }
@@ -305,9 +306,12 @@ impl FormField {
             value: value.to_string(),
             cursor: value.len(),
             editable: true,
-            is_toggle: false,
             toggle_options: &[],
         }
+    }
+
+    pub fn is_toggle(&self) -> bool {
+        !self.toggle_options.is_empty()
     }
 
     /// Construct a toggle field that cycles through the given options.
@@ -325,7 +329,6 @@ impl FormField {
             value: value.to_string(),
             cursor: 0,
             editable: true,
-            is_toggle: true,
             toggle_options: options,
         }
     }
@@ -375,15 +378,24 @@ impl FormField {
     }
 
     pub fn insert(&mut self, c: char) {
-        if self.is_toggle {
+        if self.is_toggle() {
             return;
         }
         self.value.insert(self.cursor, c);
         self.cursor += c.len_utf8();
     }
 
+    /// Insert pasted text at the cursor, advancing the cursor past it.
+    pub fn insert_str(&mut self, text: &str) {
+        if self.is_toggle() {
+            return;
+        }
+        self.value.insert_str(self.cursor, text);
+        self.cursor += text.len();
+    }
+
     pub fn backspace(&mut self) {
-        if self.is_toggle || self.cursor == 0 {
+        if self.is_toggle() || self.cursor == 0 {
             return;
         }
         let char_len = self.value[..self.cursor]
@@ -396,7 +408,7 @@ impl FormField {
     }
 
     pub fn delete(&mut self) {
-        if self.is_toggle || self.cursor >= self.value.len() {
+        if self.is_toggle() || self.cursor >= self.value.len() {
             return;
         }
         self.value.remove(self.cursor);
@@ -425,7 +437,7 @@ impl FormField {
     }
 
     pub fn delete_word_back(&mut self) {
-        if self.is_toggle || self.cursor == 0 {
+        if self.is_toggle() || self.cursor == 0 {
             return;
         }
         let mut pos = self.cursor;
@@ -466,7 +478,7 @@ impl FormField {
     }
 
     pub fn move_next(&mut self) {
-        if !self.is_toggle || self.toggle_options.len() < 2 {
+        if self.toggle_options.len() < 2 {
             return;
         }
         let current = self
@@ -479,7 +491,7 @@ impl FormField {
     }
 
     pub fn move_prev(&mut self) {
-        if !self.is_toggle || self.toggle_options.len() < 2 {
+        if self.toggle_options.len() < 2 {
             return;
         }
         let current = self
@@ -602,7 +614,7 @@ impl ProviderForm {
         if next == routes_slot {
             self.reset_route_editing();
             self.vim_mode = VimMode::Normal;
-        } else if self.fields[next].is_toggle {
+        } else if self.fields[next].is_toggle() {
             // Toggle fields have no text cursor; Insert mode makes no sense here.
             self.vim_mode = VimMode::Normal;
         }
@@ -623,7 +635,7 @@ impl ProviderForm {
         if prev == routes_slot {
             self.reset_route_editing();
             self.vim_mode = VimMode::Normal;
-        } else if prev < self.fields.len() && self.fields[prev].is_toggle {
+        } else if prev < self.fields.len() && self.fields[prev].is_toggle() {
             self.vim_mode = VimMode::Normal;
         }
     }
@@ -679,7 +691,7 @@ mod tests {
                 enabled: true,
                 fallback: true,
                 api_version: None,
-                quota: None,
+                inject_thinking_history: true,
                 quota_command: None,
                 port: None,
             },
@@ -703,7 +715,6 @@ mod tests {
                     s.select(Some(0));
                     s
                 },
-                names: vec!["vllm".into()],
             },
             form: None,
             message: None,

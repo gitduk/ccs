@@ -43,7 +43,7 @@ pub(super) fn handle_key(
                 return Ok(());
             }
             ('g', KeyCode::Char('g')) => {
-                if !app.providers.names.is_empty() {
+                if !app.config.providers.is_empty() {
                     app.providers.table_state.select(Some(0));
                 }
                 return Ok(());
@@ -119,8 +119,8 @@ pub(super) fn handle_key(
         KeyCode::Up | KeyCode::Char('k') => app.select_prev(),
         KeyCode::Down | KeyCode::Char('j') => app.select_next(),
         KeyCode::Char('G') => {
-            if !app.providers.names.is_empty() {
-                let last = app.providers.names.len() - 1;
+            if !app.config.providers.is_empty() {
+                let last = app.provider_count() - 1;
                 app.providers.table_state.select(Some(last));
             }
         }
@@ -205,7 +205,7 @@ pub(super) fn handle_key(
 }
 
 pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
-    if app.providers.names.is_empty() {
+    if app.config.providers.is_empty() {
         let empty = Paragraph::new(vec![
             Line::from(""),
             Line::from(Span::styled(
@@ -274,28 +274,13 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
             .values()
             .map(|p| match app.quota_status.get(&p.id) {
                 None => 0,
-                Some(QuotaStatus::Running) => "-".width(),
-                Some(QuotaStatus::Success(result)) => {
-                    let text = super::quota_command::cell_text(result);
-                    if compact_quota {
-                        truncate_chars(&text, 10).width()
-                    } else {
-                        truncate_chars(&text, 18).width()
-                    }
-                }
-                Some(QuotaStatus::Error(msg)) => {
-                    if compact_quota {
-                        truncate_chars(msg, 10).width()
-                    } else {
-                        truncate_chars(msg, 18).width()
-                    }
-                }
+                Some(status) => quota_cell_text(status, compact_quota).width(),
             }),
     );
     let max_name_len = app
+        .config
         .providers
-        .names
-        .iter()
+        .keys()
         .map(|name| name.width())
         .max()
         .unwrap_or(0)
@@ -320,9 +305,9 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
     let quota_status = &app.quota_status;
 
     let rows: Vec<Row> = app
+        .config
         .providers
-        .names
-        .iter()
+        .keys()
         .map(|name| {
             let provider = &app.config.providers[name];
             let is_current = name == &app.config.current;
@@ -417,7 +402,7 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &mut App, area: Rect) {
         .providers
         .table_state
         .selected()
-        .and_then(|i| app.providers.names.get(i))
+        .and_then(|i| app.provider_name_at(i))
     else {
         f.render_widget(
             Paragraph::new(vec![Line::from(""), title_line]).block(block),
@@ -427,8 +412,8 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let mut lines = vec![Line::from(""), title_line];
-    if app.tests.pending.contains(name.as_str()) {
-        let prev = app.tests.results.get(name.as_str());
+    if app.tests.pending.contains(name) {
+        let prev = app.tests.results.get(name);
         let latency_str = prev
             .map(|r| fmt_latency(r.latency_ms))
             .unwrap_or_else(|| "—".to_string());
@@ -439,7 +424,7 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &mut App, area: Rect) {
         let testing_model = app
             .tests
             .testing_model
-            .get(name.as_str())
+            .get(name)
             .map(|m| format!(" ({})", truncate_chars(m, MODEL_NAME_TRUNCATE)))
             .unwrap_or_default();
         let status_text = format!("Testing{testing_model}");
@@ -469,7 +454,7 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &mut App, area: Rect) {
             tools_span,
         ]);
         lines.push(Line::from(pending_metrics));
-    } else if let Some(r) = app.tests.results.get(name.as_str()) {
+    } else if let Some(r) = app.tests.results.get(name) {
         let (status_str, status_style) = match &r.status {
             TestStatus::Ok => (
                 "OK".to_string(),
@@ -564,6 +549,19 @@ fn build_test_curl(provider: &Provider, model: &str) -> Result<String, String> {
     Ok(cmd)
 }
 
+/// Quota cell text, shared by the column-width pass and `render_quota_cell`
+/// so the measured width always matches what is rendered.
+fn quota_cell_text(status: &QuotaStatus, compact: bool) -> String {
+    let max = if compact { 10 } else { 18 };
+    match status {
+        QuotaStatus::Running => "-".to_string(),
+        QuotaStatus::Success(result) => {
+            truncate_chars(&super::quota_command::cell_text(result), max)
+        }
+        QuotaStatus::Error(msg) => truncate_chars(msg, max),
+    }
+}
+
 fn render_quota_cell(
     quota_status: &std::collections::HashMap<String, QuotaStatus>,
     provider_id: &str,
@@ -573,23 +571,13 @@ fn render_quota_cell(
 
     match quota_status.get(provider_id) {
         None => Cell::from(""),
-        Some(QuotaStatus::Running) => Cell::from("-").style(Style::default().fg(t::MUTED)),
-        Some(QuotaStatus::Success(result)) => {
-            let text = super::quota_command::cell_text(result);
-            let text = if compact {
-                truncate_chars(&text, 10)
-            } else {
-                truncate_chars(&text, 18)
+        Some(status) => {
+            let color = match status {
+                QuotaStatus::Running => t::MUTED,
+                QuotaStatus::Success(_) => t::SUCCESS,
+                QuotaStatus::Error(_) => t::ERROR,
             };
-            Cell::from(text).style(Style::default().fg(t::SUCCESS))
-        }
-        Some(QuotaStatus::Error(msg)) => {
-            let text = if compact {
-                truncate_chars(msg, 10)
-            } else {
-                truncate_chars(msg, 18)
-            };
-            Cell::from(text).style(Style::default().fg(t::ERROR))
+            Cell::from(quota_cell_text(status, compact)).style(Style::default().fg(color))
         }
     }
 }
@@ -619,7 +607,7 @@ mod tests {
                 enabled: true,
                 fallback: false,
                 api_version: None,
-                quota: None,
+                inject_thinking_history: true,
                 quota_command: None,
                 port: Some(8003),
             },
@@ -639,10 +627,7 @@ mod tests {
             },
             mode: crate::tui::state::Mode::Normal,
             terminal_focused: true,
-            providers: ProviderList {
-                table_state,
-                names: vec!["ds".into()],
-            },
+            providers: ProviderList { table_state },
             form: None,
             message: None,
             confirm_action: None,

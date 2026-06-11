@@ -81,10 +81,11 @@ pub struct RequestLogEntry {
     pub output_tokens: u64,
     pub is_stream: bool,
     pub error: Option<String>,
-    /// Truncated JSON body sent to the upstream provider.
-    pub request_body: Option<String>,
-    /// Truncated JSON body returned by the upstream provider (error or success).
-    pub response_body: Option<String>,
+    /// JSON body sent to the upstream provider. `Arc<str>` so the in-memory
+    /// log, DB persistence, and per-frame rendering share one allocation.
+    pub request_body: Option<Arc<str>>,
+    /// JSON body returned by the upstream provider (error or success).
+    pub response_body: Option<Arc<str>>,
 }
 
 #[derive(Debug, Default)]

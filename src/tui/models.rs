@@ -127,11 +127,7 @@ pub(super) fn handle_key(
 
 pub(super) fn handle_paste(app: &mut App, text: &str) {
     app.models.search_active = true;
-    app.models
-        .search_field
-        .value
-        .insert_str(app.models.search_field.cursor, text);
-    app.models.search_field.cursor += text.len();
+    app.models.search_field.insert_str(text);
     app.models.selected = 0;
     app.models.scroll = 0;
 }
@@ -250,8 +246,7 @@ fn current_provider(app: &App) -> Option<&str> {
     app.providers
         .table_state
         .selected()
-        .and_then(|i| app.providers.names.get(i))
-        .map(|s| s.as_str())
+        .and_then(|i| app.provider_name_at(i))
 }
 
 fn build_models(app: &App) -> Vec<String> {

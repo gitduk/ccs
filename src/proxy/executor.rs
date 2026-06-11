@@ -1,9 +1,36 @@
+use std::collections::HashSet;
+use std::sync::{LazyLock, RwLock};
+
 use axum::http::{HeaderMap, StatusCode};
 use bytes::Bytes;
 
 use crate::config::{ApiFormat, OpenAiApiVersion, Provider};
 use crate::error::AppError;
 use crate::proxy::{forwarder, transform};
+
+/// Providers discovered at runtime to not support `/v1/responses` (an
+/// endpoint-style 404 followed by a successful `/v1/chat/completions` retry).
+/// Cached so later requests skip the doomed Responses round-trip. Keyed by
+/// id + base_url so editing the provider's URL re-probes.
+static RESPONSES_UNSUPPORTED: LazyLock<RwLock<HashSet<String>>> =
+    LazyLock::new(|| RwLock::new(HashSet::new()));
+
+fn responses_support_key(provider: &Provider) -> String {
+    format!("{}|{}", provider.id, provider.base_url)
+}
+
+fn responses_known_unsupported(provider: &Provider) -> bool {
+    RESPONSES_UNSUPPORTED
+        .read()
+        .map(|set| set.contains(&responses_support_key(provider)))
+        .unwrap_or(false)
+}
+
+fn mark_responses_unsupported(provider: &Provider) {
+    if let Ok(mut set) = RESPONSES_UNSUPPORTED.write() {
+        set.insert(responses_support_key(provider));
+    }
+}
 
 #[derive(Debug)]
 pub(crate) enum ProviderRequestOutcome {
@@ -33,6 +60,20 @@ impl ProviderRequestOutcome {
             }
         }
     }
+
+    /// Consume the outcome, yielding the error body bytes and latency.
+    /// For `Success` the body is read from the response (errors read as empty).
+    pub(crate) async fn into_error_parts(self) -> (Bytes, u64) {
+        match self {
+            Self::UpstreamError {
+                body, latency_ms, ..
+            } => (body, latency_ms),
+            Self::Success {
+                response,
+                latency_ms,
+            } => (response.bytes().await.unwrap_or_default(), latency_ms),
+        }
+    }
 }
 
 pub(crate) async fn execute_provider_request(
@@ -45,7 +86,13 @@ pub(crate) async fn execute_provider_request(
 ) -> Result<ProviderRequestOutcome, AppError> {
     let t0 = std::time::Instant::now();
     let initial_api_version = if provider.api_format == ApiFormat::OpenAI {
-        Some(provider.openai_api_version_enum())
+        match provider.openai_api_version_enum() {
+            // A previous request proved /v1/responses is missing upstream.
+            OpenAiApiVersion::Responses if responses_known_unsupported(provider) => {
+                Some(OpenAiApiVersion::ChatCompletions)
+            }
+            v => Some(v),
+        }
     } else {
         None
     };
@@ -68,8 +115,12 @@ pub(crate) async fn execute_provider_request(
         None => {
             let patched = req_json.and_then(|req| {
                 let after_model_map = transform::map_anthropic_model(req, provider);
-                let base = after_model_map.as_ref().unwrap_or(req);
-                transform::patch_thinking_history(base).or(after_model_map)
+                if provider.inject_thinking_history {
+                    let base = after_model_map.as_ref().unwrap_or(req);
+                    transform::patch_thinking_history(base).or(after_model_map)
+                } else {
+                    after_model_map
+                }
             });
             match patched {
                 Some(v) => Bytes::from(serde_json::to_vec(&v)?),
@@ -121,6 +172,11 @@ pub(crate) async fn execute_provider_request(
                 OpenAiApiVersion::ChatCompletions,
             )
             .await?;
+            // Only cache once the retry proves chat/completions works, so a
+            // transient or misleading 404 can't pin the wrong endpoint.
+            if response.status().is_success() {
+                mark_responses_unsupported(provider);
+            }
         } else {
             return Ok(ProviderRequestOutcome::UpstreamError {
                 status: StatusCode::NOT_FOUND,

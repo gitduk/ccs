@@ -128,60 +128,6 @@ fn default_request_log_limit() -> usize {
     100
 }
 
-/// Quota request method.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub enum QuotaMethod {
-    #[serde(rename = "get")]
-    #[default]
-    Get,
-    #[serde(rename = "post")]
-    Post,
-}
-
-impl QuotaMethod {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Get => "GET",
-            Self::Post => "POST",
-        }
-    }
-
-    pub fn from_form_value(value: &str) -> Self {
-        if value.eq_ignore_ascii_case("post") {
-            Self::Post
-        } else {
-            Self::Get
-        }
-    }
-}
-
-/// Legacy quota configuration for a provider.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QuotaConfig {
-    /// URL to query quota information.
-    pub url: String,
-    /// HTTP method for quota request. Default: GET.
-    #[serde(default)]
-    pub method: QuotaMethod,
-    /// Optional request body for quota query (used by POST APIs).
-    #[serde(default)]
-    pub body: String,
-    /// JSONPath to extract total quota (e.g., "$.results[0].quota.daily_quota").
-    pub total_path: String,
-    /// JSONPath to extract used quota (e.g., "$.results[0].quota.daily_total_spent").
-    pub used_path: String,
-    /// Optional headers (format: "Key: Value", supports {api_key} variable).
-    #[serde(default)]
-    pub headers: Vec<String>,
-    /// Cache TTL in seconds. Default: 300 (5 minutes).
-    #[serde(default = "default_quota_cache_ttl")]
-    pub cache_ttl: u64,
-}
-
-fn default_quota_cache_ttl() -> u64 {
-    300
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provider {
     /// Stable UUID — assigned on first save, never changes even if name is renamed.
@@ -205,9 +151,12 @@ pub struct Provider {
     /// Only effective when api_format = OpenAI. See [`OpenAiApiVersion`] for variants.
     #[serde(default)]
     pub api_version: Option<OpenAiApiVersion>,
-    /// Quota configuration for this provider.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub quota: Option<QuotaConfig>,
+    /// Compat quirk: inject empty thinking blocks into assistant history
+    /// turns when thinking is enabled. DeepSeek-compatible providers reject
+    /// such history without them; real Anthropic should receive it untouched.
+    /// Defaults to true to preserve existing behavior.
+    #[serde(default = "default_true")]
+    pub inject_thinking_history: bool,
     /// Shell command used by the Quota panel and main-table Quota column.
     #[serde(default, alias = "quota_curl", skip_serializing_if = "Option::is_none")]
     pub quota_command: Option<String>,
@@ -302,35 +251,35 @@ impl Provider {
             && !matches!(self.api_version, Some(OpenAiApiVersion::ChatCompletions))
     }
 
+    /// Compute the chat endpoint URL for this provider's API format and the
+    /// given OpenAI API version (ignored for Anthropic format). Single source
+    /// of truth for the format/version -> path mapping.
+    pub fn endpoint_url(&self, version: OpenAiApiVersion) -> String {
+        let base = self.base_url.trim_end_matches('/');
+        match self.api_format {
+            ApiFormat::Anthropic => format!("{base}/v1/messages"),
+            ApiFormat::OpenAI => match version {
+                OpenAiApiVersion::ChatCompletions => format!("{base}/v1/chat/completions"),
+                OpenAiApiVersion::Responses => format!("{base}/v1/responses"),
+            },
+        }
+    }
+
     /// Return the (endpoint URL, JSON body string) for a minimal probe request
     /// using this provider's configured API format and version. Used for curl
     /// preview/debug output; live proxy requests use the transform/forwarder path.
     pub fn chat_url_and_body(&self, model: &str) -> (String, String) {
-        let base = self.base_url.trim_end_matches('/');
-        match self.api_format {
-            ApiFormat::Anthropic => (
-                format!("{base}/v1/messages"),
-                format!(
-                    r#"{{"model":"{model}","max_tokens":1,"messages":[{{"role":"user","content":"ping"}}]}}"#
-                ),
-            ),
-            ApiFormat::OpenAI => match self
-                .api_version
-                .as_ref()
-                .unwrap_or(&OpenAiApiVersion::Responses)
-            {
-                OpenAiApiVersion::ChatCompletions => (
-                    format!("{base}/v1/chat/completions"),
-                    format!(
-                        r#"{{"model":"{model}","max_tokens":1,"messages":[{{"role":"user","content":"ping"}}]}}"#
-                    ),
-                ),
-                OpenAiApiVersion::Responses => (
-                    format!("{base}/v1/responses"),
-                    format!(r#"{{"model":"{model}","max_output_tokens":1,"input":"ping"}}"#),
-                ),
-            },
-        }
+        let version = self.openai_api_version_enum();
+        let url = self.endpoint_url(version.clone());
+        let body = if self.api_format == ApiFormat::OpenAI && version == OpenAiApiVersion::Responses
+        {
+            format!(r#"{{"model":"{model}","max_output_tokens":1,"input":"ping"}}"#)
+        } else {
+            format!(
+                r#"{{"model":"{model}","max_tokens":1,"messages":[{{"role":"user","content":"ping"}}]}}"#
+            )
+        };
+        (url, body)
     }
 }
 
@@ -627,7 +576,7 @@ mod tests {
             enabled: true,
             fallback: true,
             api_version: None,
-            quota: None,
+            inject_thinking_history: true,
             quota_command: None,
             port: None,
         }

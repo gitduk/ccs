@@ -280,7 +280,7 @@ mod tests {
             enabled: true,
             fallback: true,
             api_version: None,
-            quota: None,
+            inject_thinking_history: true,
             quota_command: None,
             port: None,
         }
@@ -307,10 +307,7 @@ mod tests {
             },
             mode: Mode::Normal,
             terminal_focused: true,
-            providers: ProviderList {
-                table_state,
-                names: vec!["first".to_string(), "second".to_string()],
-            },
+            providers: ProviderList { table_state },
             form: None,
             message: None,
             confirm_action: None,

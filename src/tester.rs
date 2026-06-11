@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 
-use crate::config::{ApiFormat, Provider};
+use crate::config::Provider;
 use crate::proxy::executor::{probe_provider_message, probe_provider_message_with_body};
 
 const TEST_TIMEOUT_SECS: u64 = 10;
@@ -91,9 +91,6 @@ pub async fn test_latency(
         TestStatus::Error(format!("HTTP {}", status.as_u16()))
     };
 
-    let base = provider.base_url.trim_end_matches('/');
-    let auth_header = provider.auth_header(&api_key);
-
     // Run models fetch and tool-support probe concurrently.
     // Both are best-effort and don't affect status or latency.
     let (tools_supported, (model_count, model_names)) = tokio::join!(
@@ -108,7 +105,7 @@ pub async fn test_latency(
             if let Some(models) = known_models {
                 (Some(models.len()), Some(models))
             } else {
-                fetch_models(client, base, &auth_header, &provider.api_format).await
+                fetch_models(client, provider, &api_key).await
             }
         }
     );
@@ -130,9 +127,7 @@ pub async fn fetch_provider_models(client: &reqwest::Client, provider: &Provider
         Ok(k) => k,
         Err(_) => return vec![],
     };
-    let base = provider.base_url.trim_end_matches('/');
-    let auth_header = provider.auth_header(&api_key);
-    fetch_models(client, base, &auth_header, &provider.api_format)
+    fetch_models(client, provider, &api_key)
         .await
         .1
         .unwrap_or_default()
@@ -222,20 +217,11 @@ fn response_body_has_tool_call(body: &[u8]) -> bool {
 
 async fn fetch_models(
     client: &reqwest::Client,
-    base: &str,
-    auth_header: &(&str, String),
-    api_format: &ApiFormat,
+    provider: &Provider,
+    api_key: &str,
 ) -> (Option<usize>, Option<Vec<String>>) {
-    let mut req = client
-        .get(format!("{base}/v1/models"))
-        .header(auth_header.0, &auth_header.1)
+    let req = crate::proxy::forwarder::models_request(client, provider, api_key)
         .timeout(Duration::from_secs(TEST_TIMEOUT_SECS));
-    if *api_format == ApiFormat::Anthropic {
-        req = req.header("anthropic-version", "2023-06-01");
-        // Some proxies require Bearer auth for /v1/models even when the messages
-        // endpoint accepts x-api-key. Send both headers to cover both cases.
-        req = req.header("authorization", format!("Bearer {}", auth_header.1));
-    }
     let Ok(r) = req.send().await else {
         return (None, None);
     };
@@ -283,7 +269,7 @@ mod tests {
             enabled: true,
             fallback: true,
             api_version: None,
-            quota: None,
+            inject_thinking_history: true,
             quota_command: None,
             port: None,
         };

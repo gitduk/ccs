@@ -228,6 +228,15 @@ impl Repository {
         });
     }
 
+    /// Cheap external-change probe (`PRAGMA data_version`): the value moves
+    /// only when another process commits to the database file.
+    pub fn data_version(&self) -> i64 {
+        match self.0.lock() {
+            Ok(conn) => db::data_version(&conn),
+            Err(_) => 0,
+        }
+    }
+
     /// Load the most recent `limit` request log entries (oldest-first).
     pub fn load_recent_request_logs(&self, limit: usize) -> Vec<crate::metrics::RequestLogEntry> {
         match self.0.lock() {

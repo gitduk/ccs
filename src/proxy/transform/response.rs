@@ -85,15 +85,8 @@ fn openai_chat_to_anthropic(resp: &Value) -> Result<Value> {
     let stop_reason = super::chat_finish_to_anthropic_stop(finish_reason);
 
     // Usage
-    let usage = resp.get("usage");
-    let input_tokens = usage
-        .and_then(|u| u.get("prompt_tokens"))
-        .and_then(|t| t.as_u64())
-        .unwrap_or(0);
-    let output_tokens = usage
-        .and_then(|u| u.get("completion_tokens"))
-        .and_then(|t| t.as_u64())
-        .unwrap_or(0);
+    let (input_tokens, output_tokens) =
+        super::usage_tokens(resp, "prompt_tokens", "completion_tokens");
 
     let model = resp
         .get("model")
@@ -184,15 +177,7 @@ fn openai_responses_to_anthropic(resp: &Value) -> Result<Value> {
         .unwrap_or("completed");
     let stop_reason = super::response_status_to_anthropic_stop(status);
 
-    let usage = resp.get("usage");
-    let input_tokens = usage
-        .and_then(|u| u.get("input_tokens"))
-        .and_then(|t| t.as_u64())
-        .unwrap_or(0);
-    let output_tokens = usage
-        .and_then(|u| u.get("output_tokens"))
-        .and_then(|t| t.as_u64())
-        .unwrap_or(0);
+    let (input_tokens, output_tokens) = super::usage_tokens(resp, "input_tokens", "output_tokens");
 
     let model = resp
         .get("model")
@@ -252,12 +237,7 @@ fn anthropic_to_openai_chat(resp: &Value) -> Result<Value> {
                 }
             }
             "tool_use" => {
-                let id = block.get("id").and_then(|i| i.as_str()).unwrap_or("");
-                let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                let input = block.get("input").cloned().unwrap_or(json!({}));
-                let arguments = serde_json::to_string(&input).map_err(|e| {
-                    AppError::Transform(format!("Failed to serialize tool input: {e}"))
-                })?;
+                let (id, name, arguments) = super::tool_use_parts(block)?;
                 tool_calls.push(json!({
                     "id": id,
                     "type": "function",
@@ -287,15 +267,7 @@ fn anthropic_to_openai_chat(resp: &Value) -> Result<Value> {
     let stop_reason = resp.get("stop_reason").and_then(|s| s.as_str());
     let finish_reason = super::anthropic_stop_to_chat_finish(stop_reason);
 
-    let usage = resp.get("usage");
-    let input_tokens = usage
-        .and_then(|u| u.get("input_tokens"))
-        .and_then(|t| t.as_u64())
-        .unwrap_or(0);
-    let output_tokens = usage
-        .and_then(|u| u.get("output_tokens"))
-        .and_then(|t| t.as_u64())
-        .unwrap_or(0);
+    let (input_tokens, output_tokens) = super::usage_tokens(resp, "input_tokens", "output_tokens");
 
     let model = resp
         .get("model")
@@ -371,12 +343,7 @@ fn anthropic_to_openai_responses(resp: &Value) -> Result<Value> {
                 // Tool calls are siblings of message items. Emit any pending
                 // message parts first so output order matches input order.
                 flush_message(&mut message_text_parts, &mut output_items);
-                let id = block.get("id").and_then(|i| i.as_str()).unwrap_or("");
-                let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                let input = block.get("input").cloned().unwrap_or(json!({}));
-                let arguments = serde_json::to_string(&input).map_err(|e| {
-                    AppError::Transform(format!("Failed to serialize tool input: {e}"))
-                })?;
+                let (id, name, arguments) = super::tool_use_parts(block)?;
                 output_items.push(json!({
                     "type": "function_call",
                     "call_id": id,
@@ -402,15 +369,7 @@ fn anthropic_to_openai_responses(resp: &Value) -> Result<Value> {
     let stop_reason = resp.get("stop_reason").and_then(|s| s.as_str());
     let status = super::anthropic_stop_to_response_status(stop_reason);
 
-    let usage = resp.get("usage");
-    let input_tokens = usage
-        .and_then(|u| u.get("input_tokens"))
-        .and_then(|t| t.as_u64())
-        .unwrap_or(0);
-    let output_tokens = usage
-        .and_then(|u| u.get("output_tokens"))
-        .and_then(|t| t.as_u64())
-        .unwrap_or(0);
+    let (input_tokens, output_tokens) = super::usage_tokens(resp, "input_tokens", "output_tokens");
 
     let model = resp
         .get("model")
