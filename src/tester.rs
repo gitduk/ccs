@@ -26,6 +26,9 @@ pub struct TestResult {
     /// Whether the provider accepted a request containing a tool definition.
     /// `None` means the check was not run (test failed before reaching this point).
     pub tools_supported: Option<bool>,
+    /// Whether the model accepted a request containing an image block.
+    /// `None` means the check was not run (test failed before reaching this point).
+    pub images_supported: Option<bool>,
 }
 
 /// Run a latency test against the provider using `model`.
@@ -62,6 +65,7 @@ pub async fn test_latency(
                 tested_at,
                 used_model: used_model.clone(),
                 tools_supported: None,
+                images_supported: None,
             };
         }
     };
@@ -79,6 +83,7 @@ pub async fn test_latency(
                     tested_at,
                     used_model: used_model.clone(),
                     tools_supported: None,
+                    images_supported: None,
                 };
             }
         };
@@ -91,12 +96,20 @@ pub async fn test_latency(
         TestStatus::Error(format!("HTTP {}", status.as_u16()))
     };
 
-    // Run models fetch and tool-support probe concurrently.
-    // Both are best-effort and don't affect status or latency.
-    let (tools_supported, (model_count, model_names)) = tokio::join!(
+    // Run models fetch and the capability probes concurrently.
+    // All are best-effort and don't affect status or latency.
+    let test_ok = matches!(msg_status, TestStatus::Ok);
+    let (tools_supported, images_supported, (model_count, model_names)) = tokio::join!(
         async {
-            if matches!(msg_status, TestStatus::Ok) {
+            if test_ok {
                 check_tool_support(client, provider, &api_key, &used_model).await
+            } else {
+                None
+            }
+        },
+        async {
+            if test_ok {
+                check_image_support(client, provider, &api_key, &used_model).await
             } else {
                 None
             }
@@ -118,6 +131,7 @@ pub async fn test_latency(
         tested_at,
         used_model: req_json["model"].as_str().unwrap_or_default().to_string(),
         tools_supported,
+        images_supported,
     }
 }
 
@@ -168,6 +182,44 @@ async fn check_tool_support(
             }
             Some(response_body_has_tool_call(&body))
         }
+        Err(_) => None,
+    }
+}
+
+/// A 67-byte 1x1 grayscale PNG, the smallest payload that exercises image input.
+const PROBE_PNG_BASE64: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==";
+
+/// Probe whether the model accepts image input by sending a minimal image block.
+///
+/// Uses Anthropic-format content blocks: execute_provider_request's to_openai() transform
+/// converts the image block to the upstream format (data URL for Chat Completions,
+/// input_image for Responses), so the probe is meaningful for every provider format.
+///
+/// Acceptance is judged by status alone — non-vision models reject the request with 4xx
+/// (e.g. "Model do not support image input"); the probe only runs after the plain-text
+/// ping succeeded with the same model, so a 4xx here means the image was the problem.
+/// Returns `None` on network error.
+async fn check_image_support(
+    client: &reqwest::Client,
+    provider: &Provider,
+    api_key: &str,
+    model: &str,
+) -> Option<bool> {
+    let req = json!({
+        "model": model,
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": [
+            {"type": "image", "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": PROBE_PNG_BASE64,
+            }},
+            {"type": "text", "text": "ping"}
+        ]}],
+    });
+    match probe_provider_message(client, provider, api_key, &req).await {
+        Ok((status, _)) => Some(status.is_success()),
         Err(_) => None,
     }
 }

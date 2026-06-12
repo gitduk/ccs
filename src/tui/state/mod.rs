@@ -768,6 +768,7 @@ mod tests {
                     tested_at: Instant::now(),
                     used_model: "sonnet-4-6".into(),
                     tools_supported: None,
+                    images_supported: None,
                 },
             })
             .unwrap();

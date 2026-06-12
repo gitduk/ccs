@@ -444,14 +444,12 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &mut App, area: Rect) {
             Span::styled(models_str, Style::default().fg(t::MUTED)),
             Span::raw(" ".repeat(models_pad)),
         ];
-        let tools_span = match prev.and_then(|r| r.tools_supported) {
-            Some(true) => Span::styled("yes", Style::default().fg(t::MUTED)),
-            Some(false) => Span::styled("no", Style::default().fg(t::MUTED)),
-            None => Span::styled("—", Style::default().fg(t::MUTED)),
-        };
+        let muted = Style::default().fg(t::MUTED);
         pending_metrics.extend([
             Span::styled(format!("{INFO_FIELD_SEP}Tools   "), label),
-            tools_span,
+            capability_span(prev.and_then(|r| r.tools_supported), muted, muted),
+            Span::styled(format!("{INFO_FIELD_SEP}Images "), label),
+            capability_span(prev.and_then(|r| r.images_supported), muted, muted),
         ]);
         lines.push(Line::from(pending_metrics));
     } else if let Some(r) = app.tests.results.get(name) {
@@ -498,11 +496,6 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &mut App, area: Rect) {
         lines.push(Line::from(status_spans));
         // Line 2: Models + Tools  (left side padded to match line 1)
         let models_pad = left_w.saturating_sub(MODEL_COUNT_WIDTH);
-        let tools_span = match r.tools_supported {
-            Some(true) => Span::styled("yes", Style::default().fg(t::SUCCESS)),
-            Some(false) => Span::styled("no", Style::default().fg(t::ERROR)),
-            None => Span::styled("—", Style::default().fg(t::MUTED)),
-        };
         let mut metrics_spans = vec![
             Span::styled("Models ", label),
             models_str,
@@ -510,7 +503,17 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &mut App, area: Rect) {
         ];
         metrics_spans.extend([
             Span::styled(format!("{INFO_FIELD_SEP}Tools   "), label),
-            tools_span,
+            capability_span(
+                r.tools_supported,
+                Style::default().fg(t::SUCCESS),
+                Style::default().fg(t::ERROR),
+            ),
+            Span::styled(format!("{INFO_FIELD_SEP}Images "), label),
+            capability_span(
+                r.images_supported,
+                Style::default().fg(t::SUCCESS),
+                Style::default().fg(t::ERROR),
+            ),
         ]);
         lines.push(Line::from(metrics_spans));
     } else {
@@ -526,6 +529,15 @@ pub(super) fn draw_detail_panel(f: &mut Frame, app: &mut App, area: Rect) {
 
     app.detail_line_count = super::ui::format::DETAIL_HEIGHT;
     f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// Render a capability probe result (Tools / Images): yes / no / not probed.
+fn capability_span(v: Option<bool>, yes: Style, no: Style) -> Span<'static> {
+    match v {
+        Some(true) => Span::styled("yes", yes),
+        Some(false) => Span::styled("no", no),
+        None => Span::styled("—", Style::default().fg(t::MUTED)),
+    }
 }
 
 fn build_test_curl(provider: &Provider, model: &str) -> Result<String, String> {
