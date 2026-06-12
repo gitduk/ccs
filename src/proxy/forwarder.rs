@@ -6,6 +6,10 @@ use crate::config::{ApiFormat, OpenAiApiVersion, Provider};
 use crate::error::Result;
 
 /// Headers that should NOT be forwarded to upstream.
+/// `accept-encoding` is filtered because reqwest is built without compression
+/// features: a forwarded `accept-encoding: gzip` makes the upstream compress
+/// bodies that ccs can neither decompress (for transforms/logging) nor relay
+/// correctly (the response is rebuilt without `content-encoding`).
 const FILTERED_HEADERS: &[&str] = &[
     "host",
     "authorization",
@@ -14,6 +18,7 @@ const FILTERED_HEADERS: &[&str] = &[
     "content-length",
     "transfer-encoding",
     "connection",
+    "accept-encoding",
 ];
 
 fn should_forward_header(name: &str) -> bool {
@@ -95,6 +100,7 @@ mod tests {
             "content-length",
             "transfer-encoding",
             "connection",
+            "accept-encoding",
             "anthropic-version",
             "anthropic-beta",
         ] {

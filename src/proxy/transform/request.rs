@@ -1094,10 +1094,50 @@ fn message_has_thinking_block(msg: &Value) -> bool {
         .unwrap_or(false)
 }
 
-/// When `thinking` is enabled and the message history contains assistant turns without
-/// thinking blocks, DeepSeek-compatible providers reject the request. This function
-/// injects an empty thinking block into those turns so the history is consistent.
-/// Returns `None` if no patching is needed.
+fn is_signed_thinking_block(block: &Value) -> bool {
+    block.get("type").and_then(|t| t.as_str()) == Some("thinking")
+        && block.get("signature").is_some()
+}
+
+fn message_signed_thinking_count(msg: &Value) -> usize {
+    msg.get("content")
+        .and_then(|c| c.as_array())
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|b| is_signed_thinking_block(b))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// Drop `signature` from all but the first signed thinking block of an
+/// assistant message. DeepSeek-compatible providers reject messages with
+/// "multiple signatures detected in assistant message content".
+fn strip_duplicate_signatures(msg: &mut Value) {
+    let Some(blocks) = msg.get_mut("content").and_then(|c| c.as_array_mut()) else {
+        return;
+    };
+    let mut seen_signed = false;
+    for block in blocks.iter_mut() {
+        if !is_signed_thinking_block(block) {
+            continue;
+        }
+        if seen_signed && let Some(obj) = block.as_object_mut() {
+            obj.remove("signature");
+        }
+        seen_signed = true;
+    }
+}
+
+/// When `thinking` is enabled, DeepSeek-compatible providers impose two
+/// constraints on assistant history that the genuine Anthropic API does not:
+/// every assistant turn must carry a thinking block, and at most one thinking
+/// block per turn may carry a `signature` ("multiple signatures detected in
+/// assistant message content"). Interleaved thinking from a genuine Claude
+/// session violates the latter. This function injects an empty thinking block
+/// into turns missing one and drops `signature` from all but the first signed
+/// block of each turn. Returns `None` if no patching is needed.
 pub fn patch_thinking_history(req: &Value) -> Option<Value> {
     // Anthropic-native encoding only — ingress normalizes the OpenAI
     // reasoning_effort form to {"type": "enabled", ...} (see
@@ -1115,12 +1155,14 @@ pub fn patch_thinking_history(req: &Value) -> Option<Value> {
 
     let messages = req.get("messages")?.as_array()?;
 
-    // The last message may be an assistant prefill for the current turn — skip it.
+    // The last message may be an assistant prefill for the current turn — the
+    // prefill exemption only covers injecting missing thinking blocks;
+    // signature dedup applies to every assistant turn.
     let last_idx = messages.len().saturating_sub(1);
     let needs_patch = messages.iter().enumerate().any(|(i, msg)| {
-        i < last_idx
-            && msg.get("role").and_then(|r| r.as_str()) == Some("assistant")
-            && !message_has_thinking_block(msg)
+        msg.get("role").and_then(|r| r.as_str()) == Some("assistant")
+            && ((i < last_idx && !message_has_thinking_block(msg))
+                || message_signed_thinking_count(msg) > 1)
     });
 
     if !needs_patch {
@@ -1131,11 +1173,14 @@ pub fn patch_thinking_history(req: &Value) -> Option<Value> {
     let msgs = patched["messages"].as_array_mut()?;
     let msgs_len = msgs.len();
     for (i, msg) in msgs.iter_mut().enumerate() {
-        if i + 1 == msgs_len {
-            continue; // skip trailing turn (may be an assistant prefill)
-        }
         if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
             continue;
+        }
+
+        strip_duplicate_signatures(msg);
+
+        if i + 1 == msgs_len {
+            continue; // skip trailing turn (may be an assistant prefill)
         }
         if message_has_thinking_block(msg) {
             continue;
@@ -2090,6 +2135,75 @@ mod tests {
             ]
         });
         assert!(patch_thinking_history(&req).is_none());
+    }
+
+    #[test]
+    fn patch_thinking_history_no_op_for_single_signed_block() {
+        // One signed thinking block per assistant message is accepted upstream.
+        let req = json!({
+            "model": "m",
+            "thinking": {"type": "adaptive"},
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "plan", "signature": "sig-a"},
+                    {"type": "text", "text": "hi"}
+                ]},
+                {"role": "user", "content": "follow up"}
+            ]
+        });
+        assert!(patch_thinking_history(&req).is_none());
+    }
+
+    #[test]
+    fn patch_thinking_history_strips_duplicate_signatures() {
+        // Interleaved thinking from the genuine Anthropic API produces multiple
+        // signed thinking blocks per assistant message; DeepSeek-compatible
+        // providers reject "multiple signatures detected in assistant message
+        // content". Only the first signature may survive.
+        let req = json!({
+            "model": "m",
+            "thinking": {"type": "adaptive"},
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "", "signature": "sig-a"},
+                    {"type": "tool_use", "id": "t1", "name": "f", "input": {}},
+                    {"type": "thinking", "thinking": "", "signature": "sig-b"},
+                    {"type": "text", "text": "done"}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}
+                ]}
+            ]
+        });
+        let patched = patch_thinking_history(&req).unwrap();
+        let content = patched["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(content[0]["signature"], "sig-a");
+        assert!(content[2].get("signature").is_none());
+        assert_eq!(content[2]["type"], "thinking");
+        assert_eq!(content[3]["text"], "done");
+    }
+
+    #[test]
+    fn patch_thinking_history_strips_duplicate_signatures_in_trailing_message() {
+        // Signature dedup applies to the trailing assistant message too — the
+        // prefill exemption only covers injecting missing thinking blocks.
+        let req = json!({
+            "model": "m",
+            "thinking": {"type": "adaptive"},
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "a", "signature": "sig-a"},
+                    {"type": "thinking", "thinking": "b", "signature": "sig-b"}
+                ]}
+            ]
+        });
+        let patched = patch_thinking_history(&req).unwrap();
+        let content = patched["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(content[0]["signature"], "sig-a");
+        assert!(content[1].get("signature").is_none());
     }
 
     #[test]
