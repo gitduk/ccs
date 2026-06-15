@@ -1,0 +1,35 @@
+name: Tag on version bump
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - Cargo.toml
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: ver
+        run: |
+          version="v$(grep '^version' Cargo.toml | awk -F'"' '{print $2}')"
+          echo "version=$version" >> $GITHUB_OUTPUT
+
+      - name: Create tag if not exists
+        run: |
+          VERSION=${{ steps.ver.outputs.version }}
+          if git ls-remote --tags origin "$VERSION" | grep -q .; then
+            echo "Tag $VERSION already exists, skipping."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -a "$VERSION" -m "Release $VERSION"
+            git push origin "$VERSION"
+            echo "Tagged and pushed $VERSION"
+          fi
