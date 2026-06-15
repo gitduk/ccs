@@ -235,6 +235,24 @@ impl App {
             if is_first {
                 self.config.current = fields.name.clone();
             }
+            // Fetch model list in background so routes can be configured immediately.
+            if let Some(p) = self.config.providers.get(&fields.name).cloned()
+                && !p.base_url.is_empty()
+                && !p.api_key.is_empty()
+            {
+                let tx = self.tests.tx.clone();
+                let client = self.tests.client.clone();
+                let name_owned = fields.name.clone();
+                tokio::spawn(async move {
+                    let models = crate::tester::fetch_provider_models(&client, &p).await;
+                    if !models.is_empty() {
+                        let _ = tx.send(super::TestEvent::ModelsOnly {
+                            provider: name_owned,
+                            models,
+                        });
+                    }
+                });
+            }
         }
 
         config::save_config(&self.config)?;
@@ -490,6 +508,19 @@ impl App {
                         m.clear_error(&name);
                     }
                     self.tests.results.insert(name, result);
+                }
+                TestEvent::ModelsOnly {
+                    provider: name,
+                    models,
+                } => {
+                    let provider_id = self
+                        .config
+                        .providers
+                        .get(&name)
+                        .map(|p| p.id.clone())
+                        .unwrap_or_else(|| name.clone());
+                    self.db.upsert_provider_models(&provider_id, &name, &models);
+                    self.models.provider_models.insert(name, models);
                 }
                 TestEvent::QuotaCompleted {
                     provider_id,

@@ -107,6 +107,11 @@ pub(super) enum TestEvent {
         provider_id: String,
         result: Result<QuotaResult, String>,
     },
+    /// Model list fetched silently (no test run, no stats recorded).
+    ModelsOnly {
+        provider: String,
+        models: Vec<String>,
+    },
 }
 
 pub struct TestState {
