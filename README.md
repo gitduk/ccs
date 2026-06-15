@@ -16,6 +16,22 @@ A lightweight API proxy for routing Claude Code traffic between multiple provide
 - **Tool Calling**: Full support for function/tool calling in both formats
 - **Extended Thinking**: Support for Claude's thinking/reasoning blocks
 - **Per-Provider Fallback**: Each provider independently opts in/out of the fallback rotation
+- **Auto Model Fetch**: Automatically fetches the available model list when adding a new provider
+- **Connectivity Tester**: Tests a provider and shows Status, Latency, Model count, Tool calling support, and Image input support in the Info panel
+
+## Screenshots
+
+Main TUI
+![Main TUI](assets/screenshot-main.png)
+
+Edit Provider
+![Edit Provider](assets/screenshot-edit.png)
+
+Request Logs
+![Request Logs](assets/screenshot-logs.png)
+
+Models Panel
+![Models Panel](assets/screenshot-models.png)
 
 ## Installation
 

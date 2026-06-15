@@ -16,6 +16,22 @@
 - **工具调用**：两种格式均完整支持 function/tool calling
 - **扩展思考**：支持 Claude 的 thinking/reasoning 块
 - **按提供商控制 Fallback**：每个提供商独立控制是否参与 fallback 轮询
+- **自动拉取模型列表**：添加新提供商时自动获取可用模型列表
+- **连通性测试**：测试提供商后，Info 面板展示状态、延迟、模型数量、工具调用支持、图片输入支持
+
+## 截图
+
+主界面
+![Main TUI](assets/screenshot-main.png)
+
+提供商编辑
+![Edit Provider](assets/screenshot-edit.png)
+
+请求日志界面
+![Request Logs](assets/screenshot-logs.png)
+
+模型列表界面
+![Models Panel](assets/screenshot-models.png)
 
 ## 安装
 
