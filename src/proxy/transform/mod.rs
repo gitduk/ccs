@@ -9,7 +9,7 @@ pub use request::{
     patch_thinking_history, to_openai,
 };
 pub use response::{anthropic_to_openai_response, openai_to_anthropic_response};
-pub use stream::{anthropic_stream_to_openai, openai_stream_to_anthropic};
+pub use stream::{anthropic_stream_to_openai, openai_stream_to_anthropic, rewrite_model_in_stream};
 
 use crate::error::{AppError, Result};
 use serde_json::Value;

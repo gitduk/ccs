@@ -461,6 +461,7 @@ async fn try_providers(
                 return Ok((status, [("content-type", "application/json")], body).into_response());
             }
         };
+        let model_override = Some(pipeline.req_model_hint.clone()).filter(|m| !m.is_empty());
         return if ctx.is_stream {
             handle_streaming_response(
                 response,
@@ -474,6 +475,7 @@ async fn try_providers(
                     entry_id,
                     latency: latency_ms,
                     request_log_limit: pipeline.request_log_limit,
+                    model_override,
                 },
             )
             .await
@@ -491,6 +493,7 @@ async fn try_providers(
                         ..initial_entry
                     },
                     request_log_limit: pipeline.request_log_limit,
+                    model_override,
                 },
             )
             .await
@@ -589,6 +592,7 @@ async fn handle_buffered_response(
         request_log,
         mut log_entry,
         request_log_limit,
+        model_override,
     } = bctx;
     let entry_id = log_entry.id;
     let ProviderKey {
@@ -613,12 +617,17 @@ async fn handle_buffered_response(
     // Normalise provider response to the Anthropic canonical form for token
     // extraction. Keep the raw bytes around so the Anthropic→Anthropic
     // pass-through path can return them untouched (no reserialize).
-    let usage_json: Option<serde_json::Value> = if is_openai {
+    let mut usage_json: Option<serde_json::Value> = if is_openai {
         let openai_json: serde_json::Value = serde_json::from_slice(&body)?;
         Some(transform::openai_to_anthropic_response(&openai_json)?)
     } else {
         serde_json::from_slice::<serde_json::Value>(&body).ok()
     };
+
+    // Rewrite model in canonical form so the client sees what it requested.
+    if let (Some(m), Some(json)) = (&model_override, &mut usage_json) {
+        json["model"] = serde_json::Value::String(m.clone());
+    }
 
     // Serialize once, directly to the client's expected wire format.
     let response_body = match (client_format.openai_variant(), &usage_json) {
@@ -682,16 +691,25 @@ async fn handle_streaming_response(
     client_format: ClientFormat,
     ctx: StreamTrackingCtx,
 ) -> Result<Response, AppError> {
+    let model_override = ctx.model_override.clone();
     let raw_stream: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>> =
         if !is_openai {
-            Box::pin(response.bytes_stream().map(|r| {
+            let base = Box::pin(response.bytes_stream().map(|r| {
                 r.map_err(|e| {
                     tracing::error!("Stream error: {e}");
                     std::io::Error::other(e)
                 })
-            }))
+            }));
+            if let Some(m) = model_override {
+                Box::pin(transform::rewrite_model_in_stream(base, m))
+            } else {
+                base
+            }
         } else {
-            Box::pin(transform::openai_stream_to_anthropic(response))
+            Box::pin(transform::openai_stream_to_anthropic(
+                response,
+                ctx.model_override.clone(),
+            ))
         };
 
     let tracked = track_tokens_in_stream(raw_stream, ctx);
@@ -721,6 +739,7 @@ struct BufferedTrackingCtx {
     request_log: crate::proxy::metrics::SharedRequestLog,
     log_entry: RequestLogEntry,
     request_log_limit: usize,
+    model_override: Option<String>,
 }
 
 /// Context for tracking tokens in a streaming response.
@@ -732,6 +751,7 @@ struct StreamTrackingCtx {
     entry_id: u64,
     latency: u64,
     request_log_limit: usize,
+    model_override: Option<String>,
 }
 
 struct StreamFinalizer {

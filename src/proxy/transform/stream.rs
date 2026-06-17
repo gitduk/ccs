@@ -6,11 +6,16 @@ use uuid::Uuid;
 use crate::config::OpenAiApiVersion;
 
 /// Convert an OpenAI SSE stream to Anthropic SSE stream.
+///
+/// `model_override` — when `Some`, replaces the upstream `model` field in the
+/// emitted `message_start` event so the client sees the model it requested
+/// rather than the model the upstream provider actually used.
 pub fn openai_stream_to_anthropic(
     response: reqwest::Response,
+    model_override: Option<String>,
 ) -> impl Stream<Item = std::result::Result<Bytes, std::io::Error>> {
     let stream = async_stream::stream! {
-        let mut state = StreamState::new();
+        let mut state = StreamState::new(model_override);
         let mut buffer = String::new();
 
         let mut byte_stream = response.bytes_stream();
@@ -88,6 +93,7 @@ pub fn openai_stream_to_anthropic(
 struct StreamState {
     message_id: String,
     model: String,
+    model_override: Option<String>,
     input_tokens: u64,
     output_tokens: u64,
     content_index: usize,
@@ -116,10 +122,11 @@ struct ToolCallState {
 }
 
 impl StreamState {
-    fn new() -> Self {
+    fn new(model_override: Option<String>) -> Self {
         Self {
             message_id: format!("msg_{}", Uuid::new_v4()),
             model: String::new(),
+            model_override,
             input_tokens: 0,
             output_tokens: 0,
             content_index: 0,
@@ -458,6 +465,11 @@ impl StreamState {
             return None;
         }
         self.started = true;
+        let model = self
+            .model_override
+            .as_deref()
+            .filter(|m| !m.is_empty())
+            .unwrap_or(&self.model);
         Some(sse_event(
             "message_start",
             &json!({
@@ -466,7 +478,7 @@ impl StreamState {
                     "id": self.message_id,
                     "type": "message",
                     "role": "assistant",
-                    "model": self.model,
+                    "model": model,
                     "content": [],
                     "stop_reason": null,
                     "stop_sequence": null,
@@ -1233,6 +1245,88 @@ impl AnthropicToOpenAiState {
     }
 }
 
+/// Rewrite the `model` field inside `message_start` SSE events emitted by an
+/// Anthropic-format upstream, replacing it with `model`. All other events pass
+/// through as raw bytes. Used when the provider speaks Anthropic natively but
+/// routes an incoming model name to a different upstream model.
+pub fn rewrite_model_in_stream<S>(
+    byte_stream: S,
+    model: String,
+) -> impl Stream<Item = std::result::Result<Bytes, std::io::Error>> + Send
+where
+    S: Stream<Item = std::result::Result<Bytes, std::io::Error>> + Send + 'static,
+{
+    async_stream::stream! {
+        use futures::StreamExt;
+        let mut byte_stream = Box::pin(byte_stream);
+        let mut buffer = String::new();
+        let mut patched = false;
+
+        while let Some(chunk) = byte_stream.next().await {
+            match chunk {
+                Err(e) => { yield Err(e); break; }
+                Ok(bytes) => {
+                    if patched {
+                        yield Ok(bytes);
+                        continue;
+                    }
+
+                    buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+                    // Collect the first complete SSE event (terminated by \n\n).
+                    if let Some(pos) = buffer.find("\n\n") {
+                        let event = buffer[..pos + 2].to_string();
+                        let rest = buffer[pos + 2..].to_string();
+
+                        yield Ok(Bytes::from(patch_message_start_model(&event, &model)));
+
+                        if !rest.is_empty() {
+                            yield Ok(Bytes::from(rest));
+                        }
+
+                        patched = true;
+                    }
+                    // else: keep buffering until we have a complete event
+                }
+            }
+        }
+
+        if !buffer.is_empty() {
+            yield Ok(Bytes::from(buffer));
+        }
+    }
+}
+
+/// Replace `message.model` in a `message_start` SSE event string. Returns the
+/// original event unchanged if it is not `message_start` or cannot be parsed.
+fn patch_message_start_model(event: &str, model: &str) -> String {
+    let mut event_type = None;
+    let mut data_str = None;
+    for line in event.lines() {
+        if let Some(t) = line.strip_prefix("event: ") {
+            event_type = Some(t);
+        } else if let Some(d) = line.strip_prefix("data: ") {
+            data_str = Some(d);
+        }
+    }
+    if event_type != Some("message_start") {
+        return event.to_string();
+    }
+    let Some(data) = data_str else {
+        return event.to_string();
+    };
+    let Ok(mut json) = serde_json::from_str::<Value>(data) else {
+        return event.to_string();
+    };
+    if let Some(msg) = json.get_mut("message") {
+        msg["model"] = Value::String(model.to_string());
+    }
+    format!(
+        "event: message_start\ndata: {}\n\n",
+        serde_json::to_string(&json).unwrap_or_else(|_| data.to_string())
+    )
+}
+
 /// Serialize a single SSE event (`event:` + `data:` lines) for any wire format.
 fn sse_event(event_type: &str, data: &Value) -> String {
     format!(
@@ -1291,7 +1385,7 @@ mod tests {
 
     #[test]
     fn first_chunk_emits_message_start() {
-        let mut state = StreamState::new();
+        let mut state = StreamState::new(None);
         let chunk = json!({
             "model": "gpt-4o",
             "choices": [{"delta": {"content": "Hi"}, "finish_reason": null}]
@@ -1305,7 +1399,7 @@ mod tests {
 
     #[test]
     fn message_start_contains_model_name() {
-        let mut state = StreamState::new();
+        let mut state = StreamState::new(None);
         let chunk = json!({
             "model": "gpt-4o-mini",
             "choices": [{"delta": {"content": "Hi"}, "finish_reason": null}]
@@ -1315,11 +1409,23 @@ mod tests {
         assert_eq!(start_data["message"]["model"], "gpt-4o-mini");
     }
 
+    #[test]
+    fn model_override_replaces_upstream_model_in_message_start() {
+        let mut state = StreamState::new(Some("claude-sonnet-4-6".to_string()));
+        let chunk = json!({
+            "model": "deepseek-v4-pro",
+            "choices": [{"delta": {"content": "Hi"}, "finish_reason": null}]
+        });
+        let events = parse_events(&state.process_chunk(&chunk));
+        let (_, start_data) = events.iter().find(|(t, _)| t == "message_start").unwrap();
+        assert_eq!(start_data["message"]["model"], "claude-sonnet-4-6");
+    }
+
     // ─── text delta ──────────────────────────────────────────────────────────
 
     #[test]
     fn text_delta_opens_text_block_then_emits_delta() {
-        let mut state = StreamState::new();
+        let mut state = StreamState::new(None);
         let chunk = json!({
             "model": "m",
             "choices": [{"delta": {"content": "Hello"}, "finish_reason": null}]
@@ -1339,7 +1445,7 @@ mod tests {
 
     #[test]
     fn text_block_not_reopened_for_consecutive_deltas() {
-        let mut state = StreamState::new();
+        let mut state = StreamState::new(None);
         let chunk = json!({
             "model": "m",
             "choices": [{"delta": {"content": "Hello"}, "finish_reason": null}]
@@ -1359,7 +1465,7 @@ mod tests {
 
     #[test]
     fn reasoning_content_opens_thinking_block() {
-        let mut state = StreamState::new();
+        let mut state = StreamState::new(None);
         let chunk = json!({
             "model": "m",
             "choices": [{"delta": {"reasoning_content": "Let me think"}, "finish_reason": null}]
@@ -1381,7 +1487,7 @@ mod tests {
 
     #[test]
     fn thinking_block_closes_when_text_starts() {
-        let mut state = StreamState::new();
+        let mut state = StreamState::new(None);
 
         // First: thinking chunk
         let c1 = json!({
@@ -1411,7 +1517,7 @@ mod tests {
 
     #[test]
     fn tool_call_opens_tool_use_block() {
-        let mut state = StreamState::new();
+        let mut state = StreamState::new(None);
         let chunk = json!({
             "model": "m",
             "choices": [{
@@ -1438,7 +1544,7 @@ mod tests {
 
     #[test]
     fn tool_call_arguments_emit_input_json_delta() {
-        let mut state = StreamState::new();
+        let mut state = StreamState::new(None);
         // Open the tool call
         let open = json!({
             "model": "m",
@@ -1480,7 +1586,7 @@ mod tests {
 
     #[test]
     fn responses_output_text_delta_emits_text_block() {
-        let mut state = StreamState::new();
+        let mut state = StreamState::new(None);
         let created = json!({
             "type": "response.created",
             "response": {"id": "resp_1", "model": "gpt-4.1"}
@@ -1501,7 +1607,7 @@ mod tests {
 
     #[test]
     fn responses_completed_updates_usage_and_stop_reason() {
-        let mut state = StreamState::new();
+        let mut state = StreamState::new(None);
         let completed = json!({
             "type": "response.completed",
             "response": {
@@ -1519,7 +1625,7 @@ mod tests {
 
     #[test]
     fn responses_multiple_tool_calls_get_distinct_indices() {
-        let mut state = StreamState::new();
+        let mut state = StreamState::new(None);
         state.process_chunk(&json!({
             "type": "response.created",
             "response": {"id": "resp_tc", "model": "gpt-5.1-codex"}
@@ -1570,7 +1676,7 @@ mod tests {
 
     #[test]
     fn finish_reason_stop_maps_to_end_turn_in_finalize() {
-        let mut state = StreamState::new();
+        let mut state = StreamState::new(None);
         let chunk = json!({
             "model": "m",
             "choices": [{"delta": {"content": "Hi"}, "finish_reason": "stop"}]
@@ -1583,7 +1689,7 @@ mod tests {
 
     #[test]
     fn finish_reason_length_maps_to_max_tokens_in_finalize() {
-        let mut state = StreamState::new();
+        let mut state = StreamState::new(None);
         let chunk = json!({
             "model": "m",
             "choices": [{"delta": {"content": "Hi"}, "finish_reason": "length"}]
@@ -1596,7 +1702,7 @@ mod tests {
 
     #[test]
     fn finish_reason_tool_calls_maps_to_tool_use_in_finalize() {
-        let mut state = StreamState::new();
+        let mut state = StreamState::new(None);
         let chunk = json!({
             "model": "m",
             "choices": [{"delta": {}, "finish_reason": "tool_calls"}]
@@ -1611,7 +1717,7 @@ mod tests {
 
     #[test]
     fn finalize_emits_message_delta_and_message_stop() {
-        let mut state = StreamState::new();
+        let mut state = StreamState::new(None);
         state.started = true; // skip message_start for simplicity
         let events = parse_events(&state.finalize());
         let types = event_types(&events);
@@ -1621,7 +1727,7 @@ mod tests {
 
     #[test]
     fn finalize_idempotent() {
-        let mut state = StreamState::new();
+        let mut state = StreamState::new(None);
         state.started = true;
         let first = state.finalize();
         let second = state.finalize();
@@ -1631,7 +1737,7 @@ mod tests {
 
     #[test]
     fn finalize_closes_open_text_block() {
-        let mut state = StreamState::new();
+        let mut state = StreamState::new(None);
         let chunk = json!({
             "model": "m",
             "choices": [{"delta": {"content": "Hi"}, "finish_reason": null}]
@@ -1647,7 +1753,7 @@ mod tests {
 
     #[test]
     fn finalize_default_stop_reason_is_end_turn() {
-        let mut state = StreamState::new();
+        let mut state = StreamState::new(None);
         state.started = true;
         // No finish_reason chunk sent — should default to end_turn
         let events = parse_events(&state.finalize());
@@ -1657,7 +1763,7 @@ mod tests {
 
     #[test]
     fn finalize_carries_usage_tokens() {
-        let mut state = StreamState::new();
+        let mut state = StreamState::new(None);
         let chunk = json!({
             "model": "m",
             "usage": {"prompt_tokens": 42, "completion_tokens": 17},
