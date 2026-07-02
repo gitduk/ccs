@@ -60,11 +60,16 @@ impl RouteRule {
     }
 
     /// Returns true when this rule has a valid pattern and target.
-    /// When `known_models` is non-empty, the target must also be in the list.
+    /// When `known_models` is non-empty, the target must contain at least one
+    /// model from the list (e.g. target `opencode-go/kimi-k2.7-code` passes
+    /// when `kimi-k2.7-code` is in the known model list).
     pub fn is_valid(&self, known_models: &[String]) -> bool {
         !self.pattern.trim().is_empty()
             && !self.target.is_empty()
-            && (known_models.is_empty() || known_models.contains(&self.target))
+            && (known_models.is_empty()
+                || known_models
+                    .iter()
+                    .any(|m| self.target.contains(m.as_str())))
     }
 }
 
@@ -560,6 +565,18 @@ mod tests {
             enabled: true,
         };
         let known = vec!["gpt-4o".to_string()];
+        assert!(rule.is_valid(&known));
+    }
+
+    #[test]
+    fn route_rule_is_valid_when_target_contains_known_model() {
+        let rule = RouteRule {
+            id: "id".into(),
+            pattern: "*".into(),
+            target: "opencode-go/kimi-k2.7-code".into(),
+            enabled: true,
+        };
+        let known = vec!["kimi-k2.7-code".to_string()];
         assert!(rule.is_valid(&known));
     }
 
