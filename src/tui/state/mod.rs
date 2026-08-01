@@ -6,7 +6,9 @@ use std::time::Duration;
 pub(super) const NAME_FIELD_IDX: usize = 0;
 pub(super) const BASE_URL_FIELD_IDX: usize = 1;
 pub(super) const API_KEY_FIELD_IDX: usize = 2;
-pub(super) const FORMAT_FIELD_IDX: usize = 3;
+/// Pinned model for the Test/Retest action and (on add) format
+/// auto-detection, persisted as `Provider::test_model`.
+pub(super) const TEST_MODEL_FIELD_IDX: usize = 3;
 pub(super) const FALLBACK_FIELD_IDX: usize = 4;
 pub(super) const PORT_FIELD_IDX: usize = 5;
 
@@ -111,6 +113,25 @@ pub(super) enum TestEvent {
     ModelsOnly {
         provider: String,
         models: Vec<String>,
+    },
+    /// API format auto-detection finished for a new provider being added.
+    /// Carries every already-validated field needed to finish constructing
+    /// and inserting the `Provider`, since it doesn't exist in config yet.
+    FormatDetected {
+        /// Matched against `ProviderForm::detect_token` to discard stale results.
+        token: String,
+        name: String,
+        base_url: String,
+        api_key: String,
+        fallback: bool,
+        port: Option<u16>,
+        routes: Vec<RouteRule>,
+        detected: Result<crate::tester::DetectedFormat, String>,
+        /// Pinned Test/Retest model, persisted onto the new `Provider`. When
+        /// `Some`, detection used it instead of a full `/v1/models` fetch, so
+        /// `detected`'s model list is just that one entry and the full
+        /// catalog still needs fetching.
+        test_model: Option<String>,
     },
 }
 
@@ -222,6 +243,11 @@ pub struct App {
     /// Line count from the last rendered detail panel, used to size the panel next frame.
     pub detail_line_count: u16,
     pub(super) sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler,
+    /// Set when a background task (currently: format auto-detection landing
+    /// a new provider) mutated `config` outside the normal input-handling
+    /// path, where callers already call `sync_proxy_config` themselves.
+    /// Consumed (and cleared) by the main loop after draining test results.
+    pub(super) config_needs_sync: bool,
 }
 
 // ─── Provider editor form ─────────────────────────────────────────────────────
@@ -259,6 +285,10 @@ pub struct ProviderForm {
     /// Pending first key of a two-key sequence (`dd`, `gg`, `yy`) inside the form.
     pub pending_key: Option<(char, std::time::Instant)>,
     pub error: Option<String>,
+    /// Set while API format auto-detection runs in the background for a new
+    /// provider; matched against `TestEvent::FormatDetected`'s own token so a
+    /// stale result from a cancelled add can't land on a later one.
+    pub detect_token: Option<String>,
 }
 
 // ─── Quota configuration form ─────────────────────────────────────────────────
@@ -517,35 +547,25 @@ impl FormField {
 
 impl ProviderForm {
     /// Create a new form for adding or editing a provider.
+    ///
+    /// API format is not user-editable here: for a new provider it's
+    /// resolved by auto-detection on save (see `TestEvent::FormatDetected`);
+    /// for an existing one it's fixed and simply carried over unchanged.
     pub(super) fn new(name: &str, provider: Option<&Provider>) -> Self {
-        use crate::config::{ApiFormat, OpenAiApiVersion};
-        let (base_url, api_key, format, fallback, port_str, routes) = match provider {
+        let (base_url, api_key, test_model, fallback, port_str, routes) = match provider {
             Some(p) => {
-                let fmt = match p.api_format {
-                    ApiFormat::Anthropic => "anthropic",
-                    ApiFormat::OpenAI => {
-                        match p
-                            .api_version
-                            .as_ref()
-                            .unwrap_or(&OpenAiApiVersion::Responses)
-                        {
-                            OpenAiApiVersion::ChatCompletions => "openai-chat",
-                            OpenAiApiVersion::Responses => "openai-responses",
-                        }
-                    }
-                };
                 let fb = if p.fallback { "yes" } else { "no" };
                 let port = p.port.map(|p| p.to_string()).unwrap_or_default();
                 (
                     p.base_url.as_str(),
                     p.api_key.as_str(),
-                    fmt,
+                    p.test_model.as_deref().unwrap_or(""),
                     fb,
                     port,
                     p.routes.clone(),
                 )
             }
-            None => ("", "", "anthropic", "no", String::new(), vec![]),
+            None => ("", "", "", "no", String::new(), vec![]),
         };
         Self {
             original_name: if name.is_empty() {
@@ -557,11 +577,7 @@ impl ProviderForm {
                 FormField::text("Name", name),
                 FormField::text("Base URL", base_url),
                 FormField::text("API Key", api_key),
-                FormField::toggle(
-                    "Format",
-                    format,
-                    &["anthropic", "openai-chat", "openai-responses"],
-                ),
+                FormField::text("Test Model", test_model),
                 FormField::toggle("Fallback", fallback, &["yes", "no"]),
                 FormField::text("Port", &port_str),
             ],
@@ -578,6 +594,7 @@ impl ProviderForm {
             route_suggest_scroll: 0,
             pending_key: None,
             error: None,
+            detect_token: None,
         }
     }
 
@@ -671,6 +688,7 @@ mod tests {
     use indexmap::IndexMap;
 
     use super::{App, ProviderForm, TestEvent};
+    use crate::config::test_support::ConfigDirGuard;
     use crate::config::{ApiFormat, AppConfig, Provider};
     use crate::tester::{TestResult, TestStatus};
 
@@ -699,6 +717,7 @@ mod tests {
                 inject_thinking_history: true,
                 quota_command: None,
                 port: None,
+                test_model: None,
             },
         );
 
@@ -755,6 +774,7 @@ mod tests {
             quota_form: None,
             detail_line_count: 6,
             sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler::new(),
+            config_needs_sync: false,
         };
 
         app.tests.pending.insert("vllm".into());
@@ -793,6 +813,7 @@ mod tests {
 
     #[tokio::test]
     async fn drain_test_results_returns_false_when_empty() {
+        let _guard = ConfigDirGuard::new();
         let path = format!("/tmp/ccs-state-empty-drain-{}.db", uuid::Uuid::new_v4());
         let mut app = App::new().unwrap();
         app.config.db_path = Some(path);
@@ -801,6 +822,7 @@ mod tests {
 
     #[tokio::test]
     async fn tick_message_reports_when_message_expires() {
+        let _guard = ConfigDirGuard::new();
         let mut app = App::new().unwrap();
         app.message = Some((
             "old".into(),
@@ -813,6 +835,7 @@ mod tests {
 
     #[tokio::test]
     async fn tick_message_reports_false_for_fresh_message() {
+        let _guard = ConfigDirGuard::new();
         let mut app = App::new().unwrap();
         app.set_message("fresh", super::MessageKind::Info);
         assert!(!app.tick_message());

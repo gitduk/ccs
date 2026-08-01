@@ -15,60 +15,67 @@ pub(super) fn test_selected(app: &mut App) {
 }
 
 pub(super) fn test_provider_by_name(app: &mut App, name: &str) {
-    if !app.config.providers.contains_key(name) {
-        return;
-    }
-
-    // If no model list is known yet, fall back to the fetch-then-test flow.
-    let supported = app.models.provider_models.get(name);
-    let Some(supported) = supported.filter(|s| !s.is_empty()) else {
-        test_provider_after_add(app, name);
+    let Some(provider) = app.config.providers.get(name).cloned() else {
         return;
     };
 
-    let provider = app.config.providers[name].clone();
+    let cached = app
+        .models
+        .provider_models
+        .get(name)
+        .cloned()
+        .filter(|s| !s.is_empty());
+
+    // A pinned Test Model always wins over auto-picking one; otherwise fall
+    // back to the fetch-then-test flow if no model list is known yet.
+    let (candidates, known_models): (Vec<String>, Option<Vec<String>>) =
+        match (provider.test_model.clone(), cached) {
+            (Some(model), cached) => (vec![model], cached),
+            (None, Some(supported)) => {
+                // Pick the best test model:
+                // 1. Most-used model from the provider list (by input + output tokens).
+                // 2. Random model from the provider list (no usage data yet).
+                let best_model: String = app
+                    .metrics
+                    .lock()
+                    .ok()
+                    .and_then(|m| {
+                        supported
+                            .iter()
+                            .max_by_key(|model| {
+                                m.by_model.get(*model).map_or(0, |s| s.input + s.output)
+                            })
+                            .filter(|model| m.by_model.contains_key(*model))
+                            .map(|s| s.to_string())
+                    })
+                    .unwrap_or_else(|| pick_next(&supported));
+
+                // Build a fallback candidate list: best_model first, then remaining
+                // models (up to MAX_TEST_ATTEMPTS total). Used when best_model
+                // errors so a broken model doesn't permanently block health-checking.
+                const MAX_TEST_ATTEMPTS: usize = 3;
+                let candidates: Vec<String> = std::iter::once(best_model.clone())
+                    .chain(supported.iter().filter(|m| **m != best_model).cloned())
+                    .take(MAX_TEST_ATTEMPTS)
+                    .collect();
+
+                (candidates, Some(supported))
+            }
+            (None, None) => {
+                test_provider_after_add(app, name);
+                return;
+            }
+        };
+
     let tx = app.tests.tx.clone();
     let name_owned = name.to_string();
-
-    // Pick the best test model:
-    // 1. Most-used model from the provider list (by input + output tokens).
-    // 2. Random model from the provider list (no usage data yet).
-    let best_model: String = app
-        .metrics
-        .lock()
-        .ok()
-        .and_then(|m| {
-            supported
-                .iter()
-                .max_by_key(|model| m.by_model.get(*model).map_or(0, |s| s.input + s.output))
-                .filter(|model| m.by_model.contains_key(*model))
-                .map(|s| s.to_string())
-        })
-        .unwrap_or_else(|| pick_next(supported));
-
-    // Build a fallback candidate list: best_model first, then remaining models
-    // (up to MAX_TEST_ATTEMPTS total). Used when best_model returns an Error so
-    // a broken model doesn't permanently block health-checking the provider.
-    const MAX_TEST_ATTEMPTS: usize = 3;
-    let candidates: Vec<String> = std::iter::once(best_model.clone())
-        .chain(
-            supported
-                .iter()
-                .filter(|m| m.as_str() != best_model)
-                .cloned(),
-        )
-        .take(MAX_TEST_ATTEMPTS)
-        .collect();
-
-    // Clone the known list so test_latency can skip the redundant /v1/models fetch.
-    let known_models = supported.clone();
 
     app.tests.pending.insert(name_owned.clone());
     app.set_message(format!("Testing {name}…"), MessageKind::Info);
 
     let client = app.tests.client.clone();
     tokio::spawn(async move {
-        // candidates always contains best_model, so the loop runs at least once.
+        // candidates is always non-empty (a pinned model, or best_model at minimum).
         let mut result = None;
         for model in candidates {
             // Notify TUI which model we're about to test so the display updates
@@ -83,7 +90,7 @@ pub(super) fn test_provider_by_name(app: &mut App, name: &str) {
                     &client,
                     &provider,
                     model.clone(),
-                    Some(known_models.clone()),
+                    known_models.clone(),
                 ),
             )
             .await
@@ -92,8 +99,8 @@ pub(super) fn test_provider_by_name(app: &mut App, name: &str) {
                 Err(_) => crate::tester::TestResult {
                     status: crate::tester::TestStatus::Error("Connection error".to_string()),
                     latency_ms: 0,
-                    model_count: Some(known_models.len()),
-                    model_names: Some(known_models.clone()),
+                    model_count: known_models.as_ref().map(|v| v.len()),
+                    model_names: known_models.clone(),
                     tested_at: std::time::Instant::now(),
                     used_model: model.clone(),
                     tools_supported: None,
@@ -110,7 +117,7 @@ pub(super) fn test_provider_by_name(app: &mut App, name: &str) {
                 break;
             }
         }
-        // result is guaranteed to be Some because candidates is non-empty (always contains best_model).
+        // result is guaranteed to be Some because candidates is non-empty.
         if let Some(r) = result {
             let _ = tx.send(TestEvent::Completed {
                 provider: name_owned,
@@ -272,6 +279,8 @@ mod tests {
     use indexmap::IndexMap;
     use ratatui::widgets::TableState;
 
+    use crate::config::test_support::ConfigDirGuard;
+
     fn provider(id: &str) -> Provider {
         Provider {
             id: id.to_string(),
@@ -286,6 +295,7 @@ mod tests {
             inject_thinking_history: true,
             quota_command: None,
             port: None,
+            test_model: None,
         }
     }
 
@@ -348,6 +358,7 @@ mod tests {
             quota_form: None,
             detail_line_count: 0,
             sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler::new(),
+            config_needs_sync: false,
         };
         app.tests.client = reqwest::Client::builder()
             .timeout(Duration::from_millis(10))
@@ -359,11 +370,152 @@ mod tests {
 
     #[tokio::test]
     async fn startup_tests_only_current_provider() {
+        let _guard = ConfigDirGuard::new();
         let mut app = app_with_current("second");
 
         start_background_tests(&mut app);
 
         assert!(app.tests.pending.contains("second"));
         assert!(!app.tests.pending.contains("first"));
+    }
+
+    /// A pinned Test Model must win over the normal best-model auto-pick,
+    /// even when a cached model list (with other candidates) already exists.
+    #[tokio::test]
+    async fn pinned_test_model_overrides_auto_selection() {
+        let _guard = ConfigDirGuard::new();
+        let mut app = app_with_current("first");
+        app.config.providers.get_mut("first").unwrap().test_model =
+            Some("pinned-model".to_string());
+        app.models.provider_models.insert(
+            "first".to_string(),
+            vec!["other-a".to_string(), "other-b".to_string()],
+        );
+
+        test_provider_by_name(&mut app, "first");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while app.tests.pending.contains("first") {
+            if tokio::time::Instant::now() > deadline {
+                panic!("pinned-model test never completed");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            app.drain_test_results();
+        }
+
+        assert_eq!(
+            app.tests.testing_model.get("first"),
+            Some(&"pinned-model".to_string())
+        );
+    }
+
+    /// Server that answers only `/v1/messages` (Anthropic format) — reuses
+    /// tester.rs's scenario server instead of a second axum test harness.
+    async fn spawn_anthropic_only_server() -> String {
+        use crate::tester::tests::{Scenario, spawn_scenario_server};
+        spawn_scenario_server(Scenario {
+            messages_ok: true,
+            ..Default::default()
+        })
+        .await
+    }
+
+    /// End-to-end: saving a brand-new provider through `App` spawns format
+    /// detection in the background (form stays open, `detect_token` set),
+    /// and once the result lands it finishes the insert and closes the form —
+    /// exercising the full `save_form_and_close` -> `drain_test_results`
+    /// hand-off, not just `detect_api_format` in isolation.
+    #[tokio::test]
+    async fn add_provider_detects_format_and_completes_save() {
+        use crate::tui::state::{
+            API_KEY_FIELD_IDX, BASE_URL_FIELD_IDX, NAME_FIELD_IDX, TEST_MODEL_FIELD_IDX,
+        };
+
+        let _guard = ConfigDirGuard::new();
+        let mut app = app_with_current("first");
+        app.tests.client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .connect_timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+
+        let base_url = spawn_anthropic_only_server().await;
+
+        app.add();
+        {
+            let form = app.form.as_mut().unwrap();
+            form.fields[NAME_FIELD_IDX].value = "brand-new".to_string();
+            form.fields[BASE_URL_FIELD_IDX].value = base_url;
+            form.fields[API_KEY_FIELD_IDX].value = "sk-test".to_string();
+            form.fields[TEST_MODEL_FIELD_IDX].value = "probe-model".to_string();
+        }
+
+        app.save_form_and_close().unwrap();
+        assert!(
+            app.form.as_ref().is_some_and(|f| f.detect_token.is_some()),
+            "form should stay open while detection runs"
+        );
+        assert!(!app.config.providers.contains_key("brand-new"));
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !app.config.providers.contains_key("brand-new") {
+            if tokio::time::Instant::now() > deadline {
+                panic!("format detection never completed");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            app.drain_test_results();
+        }
+
+        assert!(
+            app.form.is_none(),
+            "form should close once detection succeeds"
+        );
+        let saved = &app.config.providers["brand-new"];
+        assert_eq!(saved.api_format, ApiFormat::Anthropic);
+        assert_eq!(saved.api_version, None);
+    }
+
+    /// If the user cancels the add (form closed) before detection resolves,
+    /// the async result must be discarded instead of resurrecting the form
+    /// or inserting a provider nobody asked for anymore.
+    #[tokio::test]
+    async fn cancelling_add_discards_late_format_detection_result() {
+        use crate::tui::state::{
+            API_KEY_FIELD_IDX, BASE_URL_FIELD_IDX, NAME_FIELD_IDX, TEST_MODEL_FIELD_IDX,
+        };
+
+        let _guard = ConfigDirGuard::new();
+        let mut app = app_with_current("first");
+        app.tests.client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .connect_timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+
+        let base_url = spawn_anthropic_only_server().await;
+
+        app.add();
+        {
+            let form = app.form.as_mut().unwrap();
+            form.fields[NAME_FIELD_IDX].value = "abandoned".to_string();
+            form.fields[BASE_URL_FIELD_IDX].value = base_url;
+            form.fields[API_KEY_FIELD_IDX].value = "sk-test".to_string();
+            form.fields[TEST_MODEL_FIELD_IDX].value = "probe-model".to_string();
+        }
+        app.save_form_and_close().unwrap();
+        assert!(app.form.as_ref().is_some_and(|f| f.detect_token.is_some()));
+
+        // User bails out of the add entirely before detection reports back.
+        app.form = None;
+
+        // Give the background task time to finish and send its result, then
+        // drain repeatedly — it must be discarded, not resurrect the form.
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            app.drain_test_results();
+        }
+
+        assert!(app.form.is_none());
+        assert!(!app.config.providers.contains_key("abandoned"));
     }
 }

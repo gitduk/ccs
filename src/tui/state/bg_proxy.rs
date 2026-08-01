@@ -50,6 +50,9 @@ impl App {
 // ── Background proxy helpers ──────────────────────────────────────────────────
 
 pub fn pid_file_path() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("CCS_CONFIG_DIR") {
+        return Some(PathBuf::from(dir).join("proxy.pid"));
+    }
     dirs::home_dir().map(|h| h.join(".ccs").join("proxy.pid"))
 }
 

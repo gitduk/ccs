@@ -25,6 +25,9 @@ pub(super) fn handle_paste(app: &mut App, text: &str) -> crate::error::Result<()
     let Some(form) = app.form.as_mut() else {
         return Ok(());
     };
+    if form.detect_token.is_some() {
+        return Ok(());
+    }
 
     if form.vim_mode != VimMode::Insert {
         form.vim_mode = VimMode::Insert;
@@ -52,6 +55,15 @@ pub(super) fn handle_key(
         app.mode = Mode::Normal;
         return Ok(());
     };
+
+    if form.detect_token.is_some() {
+        // Freeze the form during detection; Esc cancels directly (close() would re-block).
+        if matches!(code, KeyCode::Esc) {
+            app.form = None;
+            app.mode = Mode::Normal;
+        }
+        return Ok(());
+    }
 
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     let in_routes = form.in_routes();
@@ -312,7 +324,7 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
                 .fg(prov_color)
                 .add_modifier(Modifier::REVERSED | Modifier::BOLD);
             let unselected = Style::default().fg(t::MUTED);
-            let mut spans = vec![Span::styled(format!("{:<10}", field.label), label_style)];
+            let mut spans = vec![Span::styled(format!("{:<11}", field.label), label_style)];
             for (i, &opt) in field.toggle_options.iter().enumerate() {
                 if i > 0 {
                     spans.push(Span::raw(" "));
@@ -341,7 +353,7 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
                 let after = display_val[after_start..].to_string();
                 let (before_span, after_span) = (Span::raw(before), Span::raw(after));
                 Line::from(vec![
-                    Span::styled(format!("{:<10}", field.label), label_style),
+                    Span::styled(format!("{:<11}", field.label), label_style),
                     before_span,
                     Span::styled(
                         cursor_char.to_string(),
@@ -358,7 +370,7 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
                     Style::default()
                 };
                 Line::from(vec![
-                    Span::styled(format!("{:<10}", field.label), label_style),
+                    Span::styled(format!("{:<11}", field.label), label_style),
                     Span::styled(display_val, val_style),
                 ])
             }
@@ -372,7 +384,17 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
 
     let hint_idx = form.fields.len() + 1;
     if hint_idx < chunks.len() {
-        let hint_line = if in_routes {
+        let hint_line = if form.detect_token.is_some() {
+            Line::from(vec![
+                Span::raw("   "),
+                Span::styled(
+                    "Detecting API format… ",
+                    Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Esc", Style::default().fg(t::WARNING)),
+                Span::styled(" Cancel", Style::default().fg(t::MUTED)),
+            ])
+        } else if in_routes {
             if form.route_editing {
                 if form.route_edit_target {
                     Line::from(vec![
@@ -465,8 +487,13 @@ fn close(app: &mut App, server: &Option<ServerHandle>) {
             app.form = None;
             app.mode = Mode::Normal;
         }
-        // Validation error: do_save_form keeps the form open and sets form.error.
-        if app.form.as_ref().is_some_and(|f| f.error.is_some()) {
+        // Validation error, or format detection now running in the
+        // background: do_save_form keeps the form open in both cases.
+        if app
+            .form
+            .as_ref()
+            .is_some_and(|f| f.error.is_some() || f.detect_token.is_some())
+        {
             return;
         }
     } else {

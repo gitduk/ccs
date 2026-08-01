@@ -2,10 +2,120 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 
-use crate::config::Provider;
+use crate::config::{ApiFormat, OpenAiApiVersion, Provider};
 use crate::proxy::executor::{probe_provider_message, probe_provider_message_with_body};
 
 const TEST_TIMEOUT_SECS: u64 = 10;
+
+/// Result of successful API format auto-detection.
+#[derive(Debug, Clone)]
+pub struct DetectedFormat {
+    pub api_format: ApiFormat,
+    pub api_version: Option<OpenAiApiVersion>,
+    /// Model list discovered while detecting, if any — reused by the caller
+    /// so it doesn't need a redundant `/v1/models` round trip after saving.
+    pub models: Vec<String>,
+}
+
+/// Build a throwaway probe `Provider` sharing only the fields format
+/// detection needs. Never persisted — just a vehicle for the existing
+/// request-building/forwarding code (which all takes a `&Provider`).
+fn probe_provider(base_url: &str, api_key: &str, api_format: ApiFormat) -> Provider {
+    Provider {
+        id: String::new(),
+        base_url: base_url.to_string(),
+        api_key: api_key.to_string(),
+        api_format,
+        model_map: Default::default(),
+        routes: vec![],
+        enabled: true,
+        fallback: true,
+        api_version: None,
+        inject_thinking_history: true,
+        quota_command: None,
+        port: None,
+        test_model: None,
+    }
+}
+
+/// Auto-detect which API format a provider's `base_url` speaks, by probing
+/// candidates in priority order: Anthropic, OpenAI Chat Completions, OpenAI
+/// Responses. Returns the first candidate that completes a real request
+/// successfully, or `None` if none of them do.
+///
+/// A real model name is required to tell "wrong format" apart from "right
+/// format, unknown model" — a bogus model name gets rejected by every
+/// format alike, so it can't discriminate anything. `test_model`, if given,
+/// is used directly. Otherwise this fetches a model list first (trying
+/// OpenAI's `/v1/models` before Anthropic's, since many Anthropic-compatible
+/// relays don't expose a model-list endpoint at all — an already-known real
+/// case is DeepSeek's Anthropic-compatible endpoint).
+pub async fn detect_api_format(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+    test_model: Option<&str>,
+) -> Option<DetectedFormat> {
+    let (model, models) = match test_model {
+        Some(m) => (m.to_string(), vec![m.to_string()]),
+        None => {
+            // Side-effect-free GETs, unlike the completion probes below — run
+            // both candidates concurrently instead of paying full latency twice.
+            let openai_probe = probe_provider(base_url, api_key, ApiFormat::OpenAI);
+            let anthropic_probe = probe_provider(base_url, api_key, ApiFormat::Anthropic);
+            let (openai_models, anthropic_models) = tokio::join!(
+                fetch_provider_models(client, &openai_probe),
+                fetch_provider_models(client, &anthropic_probe),
+            );
+            if !openai_models.is_empty() {
+                (openai_models[0].clone(), openai_models)
+            } else if !anthropic_models.is_empty() {
+                (anthropic_models[0].clone(), anthropic_models)
+            } else {
+                return None;
+            }
+        }
+    };
+
+    let req_json = json!({
+        "model": model,
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "ping"}],
+    });
+
+    let candidates = [
+        (ApiFormat::Anthropic, None),
+        (ApiFormat::OpenAI, Some(OpenAiApiVersion::ChatCompletions)),
+        (ApiFormat::OpenAI, Some(OpenAiApiVersion::Responses)),
+    ];
+
+    for (api_format, api_version) in candidates {
+        let mut candidate = probe_provider(base_url, api_key, api_format.clone());
+        candidate.api_version = api_version.clone();
+        match probe_provider_message(client, &candidate, api_key, &req_json).await {
+            Ok((status, _)) if status.is_success() => {
+                // A Responses probe that 404s internally falls back to Chat
+                // Completions and still reports success — reflect what
+                // actually worked, not the candidate we started with.
+                let api_version = if matches!(api_version, Some(OpenAiApiVersion::Responses))
+                    && crate::proxy::executor::responses_known_unsupported(&candidate)
+                {
+                    Some(OpenAiApiVersion::ChatCompletions)
+                } else {
+                    api_version
+                };
+                return Some(DetectedFormat {
+                    api_format,
+                    api_version,
+                    models,
+                });
+            }
+            _ => continue,
+        }
+    }
+
+    None
+}
 
 #[derive(Debug, Clone)]
 pub enum TestStatus {
@@ -294,7 +404,7 @@ async fn fetch_models(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::time::Duration;
 
     use tokio::net::TcpListener;
@@ -324,6 +434,7 @@ mod tests {
             inject_thinking_history: true,
             quota_command: None,
             port: None,
+            test_model: None,
         };
 
         let started = tokio::time::Instant::now();
@@ -331,5 +442,189 @@ mod tests {
 
         assert!(started.elapsed() < Duration::from_secs(12));
         assert!(matches!(result.status, TestStatus::Error(ref e) if e == "Connection error"));
+    }
+
+    /// Which of the four endpoints a scenario server accepts (200) vs
+    /// rejects (400) — `detect_api_format` only looks at status codes
+    /// (see `execute_provider_request`), so bodies don't need real shapes.
+    /// `pub(crate)`: reused by `tui::testing`'s tests, not just this module's.
+    #[derive(Clone, Copy, Default)]
+    pub(crate) struct Scenario {
+        pub(crate) messages_ok: bool,
+        pub(crate) chat_ok: bool,
+        pub(crate) responses_ok: bool,
+        pub(crate) models_ok: bool,
+    }
+
+    pub(crate) async fn spawn_scenario_server(scenario: Scenario) -> String {
+        use axum::extract::State;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use axum::routing::{get, post};
+        use axum::{Json, Router};
+        use std::sync::Arc;
+
+        fn resp(ok: bool) -> impl IntoResponse {
+            if ok {
+                (StatusCode::OK, Json(serde_json::json!({"ok": true})))
+            } else {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": {"message": "nope"}})),
+                )
+            }
+        }
+
+        async fn messages(State(s): State<Arc<Scenario>>) -> impl IntoResponse {
+            resp(s.messages_ok)
+        }
+        async fn chat(State(s): State<Arc<Scenario>>) -> impl IntoResponse {
+            resp(s.chat_ok)
+        }
+        async fn responses(State(s): State<Arc<Scenario>>) -> impl IntoResponse {
+            resp(s.responses_ok)
+        }
+        async fn models(State(s): State<Arc<Scenario>>) -> impl IntoResponse {
+            if s.models_ok {
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({"object": "list", "data": [{"id": "probe-model"}]})),
+                )
+            } else {
+                (StatusCode::NOT_FOUND, Json(serde_json::json!({})))
+            }
+        }
+
+        let app = Router::new()
+            .route("/v1/messages", post(messages))
+            .route("/v1/chat/completions", post(chat))
+            .route("/v1/responses", post(responses))
+            .route("/v1/models", get(models))
+            .with_state(Arc::new(scenario));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn detect_api_format_prefers_anthropic_when_all_succeed() {
+        let base = spawn_scenario_server(Scenario {
+            messages_ok: true,
+            chat_ok: true,
+            responses_ok: true,
+            models_ok: true,
+        })
+        .await;
+
+        let detected = super::detect_api_format(&reqwest::Client::new(), &base, "key", None).await;
+
+        assert!(matches!(
+            detected,
+            Some(super::DetectedFormat {
+                api_format: ApiFormat::Anthropic,
+                api_version: None,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn detect_api_format_falls_back_to_chat_completions() {
+        let base = spawn_scenario_server(Scenario {
+            messages_ok: false,
+            chat_ok: true,
+            responses_ok: true,
+            models_ok: true,
+        })
+        .await;
+
+        let detected = super::detect_api_format(&reqwest::Client::new(), &base, "key", None).await;
+
+        assert!(matches!(
+            detected,
+            Some(super::DetectedFormat {
+                api_format: ApiFormat::OpenAI,
+                api_version: Some(crate::config::OpenAiApiVersion::ChatCompletions),
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn detect_api_format_falls_back_to_responses() {
+        let base = spawn_scenario_server(Scenario {
+            messages_ok: false,
+            chat_ok: false,
+            responses_ok: true,
+            models_ok: true,
+        })
+        .await;
+
+        let detected = super::detect_api_format(&reqwest::Client::new(), &base, "key", None).await;
+
+        assert!(matches!(
+            detected,
+            Some(super::DetectedFormat {
+                api_format: ApiFormat::OpenAI,
+                api_version: Some(crate::config::OpenAiApiVersion::Responses),
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn detect_api_format_none_when_nothing_works() {
+        let base = spawn_scenario_server(Scenario {
+            messages_ok: false,
+            chat_ok: false,
+            responses_ok: false,
+            models_ok: true,
+        })
+        .await;
+
+        let detected = super::detect_api_format(&reqwest::Client::new(), &base, "key", None).await;
+        assert!(detected.is_none());
+    }
+
+    #[tokio::test]
+    async fn detect_api_format_none_without_models_list_or_test_model() {
+        // No /v1/models on either format and no test_model given: there's no
+        // real model name to probe with, so detection can't proceed at all.
+        let base = spawn_scenario_server(Scenario {
+            messages_ok: true,
+            chat_ok: true,
+            responses_ok: true,
+            models_ok: false,
+        })
+        .await;
+
+        let detected = super::detect_api_format(&reqwest::Client::new(), &base, "key", None).await;
+        assert!(detected.is_none());
+    }
+
+    #[tokio::test]
+    async fn detect_api_format_uses_explicit_test_model_without_models_list() {
+        let base = spawn_scenario_server(Scenario {
+            messages_ok: true,
+            chat_ok: true,
+            responses_ok: true,
+            models_ok: false,
+        })
+        .await;
+
+        let detected =
+            super::detect_api_format(&reqwest::Client::new(), &base, "key", Some("my-model")).await;
+
+        assert!(matches!(
+            detected,
+            Some(super::DetectedFormat {
+                api_format: ApiFormat::Anthropic,
+                ..
+            })
+        ));
     }
 }

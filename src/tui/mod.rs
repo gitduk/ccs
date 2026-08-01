@@ -352,6 +352,9 @@ fn run_due_scheduled_tasks(
 
     if now >= scheduler.next_async_drain {
         dirty |= app.drain_test_results();
+        if std::mem::take(&mut app.config_needs_sync) {
+            server::sync_proxy_config(app, server);
+        }
         scheduler.next_async_drain = now + ASYNC_DRAIN_INTERVAL;
     }
 

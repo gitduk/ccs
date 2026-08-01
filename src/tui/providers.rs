@@ -622,6 +622,7 @@ mod tests {
                 inject_thinking_history: true,
                 quota_command: None,
                 port: Some(8003),
+                test_model: None,
             },
         );
 
@@ -674,6 +675,7 @@ mod tests {
             quota_form: None,
             detail_line_count: 0,
             sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler::new(),
+            config_needs_sync: false,
         };
 
         let backend = TestBackend::new(100, 6);

@@ -170,6 +170,11 @@ pub struct Provider {
     /// requests are routed exclusively to this provider (no fallback).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// Pinned model for the Test/Retest action (`t` in the TUI) and format
+    /// auto-detection on add. When set, testing always uses this exact model
+    /// instead of auto-picking one from the fetched model list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -189,17 +194,25 @@ impl std::fmt::Display for ApiFormat {
     }
 }
 
+/// Resolve a configured API key: if it starts with '$', read from the
+/// environment variable it names. Free function (not just `Provider::
+/// resolve_api_key`) so callers that only have a raw key string — not a
+/// full `Provider` — don't need to hand-roll the same `$`-prefix parsing.
+pub fn resolve_api_key_str(raw: &str) -> Result<String> {
+    if let Some(env_var) = raw.strip_prefix('$') {
+        std::env::var(env_var).map_err(|e| {
+            tracing::warn!("Failed to resolve API key from env var: {e}");
+            AppError::Config("API key environment variable not found or invalid".to_string())
+        })
+    } else {
+        Ok(raw.to_string())
+    }
+}
+
 impl Provider {
     /// Resolve api_key: if it starts with '$', read from environment variable.
     pub fn resolve_api_key(&self) -> Result<String> {
-        if let Some(env_var) = self.api_key.strip_prefix('$') {
-            std::env::var(env_var).map_err(|e| {
-                tracing::warn!("Failed to resolve API key from env var: {e}");
-                AppError::Config("API key environment variable not found or invalid".to_string())
-            })
-        } else {
-            Ok(self.api_key.clone())
-        }
+        resolve_api_key_str(&self.api_key)
     }
 
     /// Build the auth header (name, value) for this provider's API format.
@@ -350,6 +363,9 @@ impl AppConfig {
 
     pub fn resolve_db_path(&self) -> String {
         self.db_path.clone().unwrap_or_else(|| {
+            if let Ok(dir) = std::env::var("CCS_CONFIG_DIR") {
+                return PathBuf::from(dir).join("ccs.db").display().to_string();
+            }
             dirs::home_dir()
                 .map(|h| h.join(".ccs").join("ccs.db").display().to_string())
                 .unwrap_or_else(|| {
@@ -362,8 +378,13 @@ impl AppConfig {
     }
 }
 
-/// Get the config file path: ~/.ccs/config.json
+/// Get the config file path: ~/.ccs/config.json, or `$CCS_CONFIG_DIR/config.json`
+/// when set — lets tests (and anyone running multiple isolated instances)
+/// redirect config/pid-file I/O without ever touching the real one.
 pub fn config_path() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var("CCS_CONFIG_DIR") {
+        return Ok(PathBuf::from(dir).join("config.json"));
+    }
     let home =
         dirs::home_dir().ok_or_else(|| AppError::Config("Cannot find home directory".into()))?;
     Ok(home.join(".ccs").join("config.json"))
@@ -428,6 +449,47 @@ fn default_config() -> AppConfig {
         fallback: false,
         db_path: None,
         request_log_limit: default_request_log_limit(),
+    }
+}
+
+/// Shared across every test module in the crate (not just this file's own
+/// `tests` below) — `CCS_CONFIG_DIR` is process-global, so any test reading
+/// or writing config through `App`/`config::save_config` must go through
+/// this guard, on the same lock, or risk racing another test's override
+/// under `cargo test`'s default parallelism. One such gap already caused a
+/// test to silently overwrite a real `~/.ccs/config.json`.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::Mutex;
+
+    pub struct ConfigDirGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl ConfigDirGuard {
+        pub fn new() -> Self {
+            static LOCK: Mutex<()> = Mutex::new(());
+            let _lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let dir = format!("/tmp/ccs-test-confdir-{}", uuid::Uuid::new_v4());
+            std::fs::create_dir_all(&dir).unwrap();
+            // SAFETY: serialized by `_lock` — no other test can be
+            // reading/writing CCS_CONFIG_DIR while this guard is alive.
+            unsafe { std::env::set_var("CCS_CONFIG_DIR", &dir) };
+            Self { _lock }
+        }
+    }
+
+    impl Default for ConfigDirGuard {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl Drop for ConfigDirGuard {
+        fn drop(&mut self) {
+            // SAFETY: see ConfigDirGuard::new.
+            unsafe { std::env::remove_var("CCS_CONFIG_DIR") };
+        }
     }
 }
 
@@ -596,6 +658,7 @@ mod tests {
             inject_thinking_history: true,
             quota_command: None,
             port: None,
+            test_model: None,
         }
     }
 

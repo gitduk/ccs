@@ -1224,6 +1224,7 @@ mod tests {
             inject_thinking_history: true,
             quota_command: None,
             port: None,
+            test_model: None,
         }
     }
 

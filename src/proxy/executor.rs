@@ -19,7 +19,9 @@ fn responses_support_key(provider: &Provider) -> String {
     format!("{}|{}", provider.id, provider.base_url)
 }
 
-fn responses_known_unsupported(provider: &Provider) -> bool {
+/// `pub(crate)`: also consulted by `tester::detect_api_format` to notice when
+/// a Responses-candidate probe silently fell back to Chat Completions.
+pub(crate) fn responses_known_unsupported(provider: &Provider) -> bool {
     RESPONSES_UNSUPPORTED
         .read()
         .map(|set| set.contains(&responses_support_key(provider)))

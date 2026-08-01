@@ -1,19 +1,23 @@
-use crate::config::{self, ApiFormat, OpenAiApiVersion, RouteRule};
+use crate::config::{self, RouteRule};
 use crate::error::Result;
 
 use super::{
-    API_KEY_FIELD_IDX, App, BASE_URL_FIELD_IDX, ConfirmAction, FALLBACK_FIELD_IDX,
-    FORMAT_FIELD_IDX, MessageKind, Mode, NAME_FIELD_IDX, PORT_FIELD_IDX, ProviderForm,
+    API_KEY_FIELD_IDX, App, BASE_URL_FIELD_IDX, ConfirmAction, FALLBACK_FIELD_IDX, MessageKind,
+    Mode, NAME_FIELD_IDX, PORT_FIELD_IDX, ProviderForm, TEST_MODEL_FIELD_IDX,
 };
 
 /// Parsed and validated fields extracted from a [`ProviderForm`].
 /// Produced by [`parse_provider_form`]; consumed by [`App::do_save_form`].
+///
+/// Notably absent: `api_format`/`api_version`. For an existing provider
+/// they're carried over unchanged (see `do_save_form`); for a new one
+/// they're resolved asynchronously by format auto-detection on save,
+/// seeded by `test_model` when given.
 struct ParsedProviderFields {
     name: String,
     base_url: String,
     api_key: String,
-    api_format: ApiFormat,
-    api_version: Option<OpenAiApiVersion>,
+    test_model: Option<String>,
     fallback: bool,
     port: Option<u16>,
     routes: Vec<RouteRule>,
@@ -40,7 +44,10 @@ fn parse_provider_form(
         .trim_end_matches('/')
         .to_string();
     let api_key = form.fields[API_KEY_FIELD_IDX].value.trim().to_string();
-    let format_str = form.fields[FORMAT_FIELD_IDX].value.trim().to_string();
+    let test_model = {
+        let v = form.fields[TEST_MODEL_FIELD_IDX].value.trim().to_string();
+        (!v.is_empty()).then_some(v)
+    };
     let fallback = form.fields[FALLBACK_FIELD_IDX].value.trim() == "yes";
     let port_raw = form.fields[PORT_FIELD_IDX].value.trim().to_string();
     let original_name = form.original_name.clone();
@@ -73,18 +80,11 @@ fn parse_provider_form(
         return Err("Base URL must start with http:// or https://".to_string());
     }
 
-    let (api_format, api_version) = match format_str.as_str() {
-        "openai-chat" => (ApiFormat::OpenAI, Some(OpenAiApiVersion::ChatCompletions)),
-        "openai-responses" => (ApiFormat::OpenAI, Some(OpenAiApiVersion::Responses)),
-        _ => (ApiFormat::Anthropic, None),
-    };
-
     Ok(ParsedProviderFields {
         name,
         base_url,
         api_key,
-        api_format,
-        api_version,
+        test_model,
         fallback,
         port,
         routes,
@@ -118,6 +118,11 @@ impl App {
         let Some(form) = &self.form else {
             return Ok(());
         };
+
+        if form.detect_token.is_some() {
+            // Detection already in flight for this add; ignore repeat save attempts.
+            return Ok(());
+        }
 
         // Look up the known model list for route validation.
         // If not yet loaded we skip the target check (conservative).
@@ -165,19 +170,25 @@ impl App {
         let quota_command = existing.and_then(|p| p.quota_command.clone());
         // Not editable in the form; inherit from the existing provider.
         let inject_thinking_history = existing.map(|p| p.inject_thinking_history).unwrap_or(true);
+        // A new provider has no format yet (resolved below by auto-detection),
+        // so this placeholder is only ever seen if fields.is_new() — editing
+        // an existing provider always carries its real, already-known format.
+        let existing_format = existing.map(|p| p.api_format.clone());
+        let existing_version = existing.and_then(|p| p.api_version.clone());
         let provider = crate::config::Provider {
             id: provider_id.clone(),
-            base_url: fields.base_url,
-            api_key: fields.api_key,
-            api_format: fields.api_format,
+            base_url: fields.base_url.clone(),
+            api_key: fields.api_key.clone(),
+            api_format: existing_format.unwrap_or(crate::config::ApiFormat::Anthropic),
             model_map,
             routes: fields.routes.clone(),
             enabled,
             fallback: fields.fallback,
-            api_version: fields.api_version,
+            api_version: existing_version,
             inject_thinking_history,
             quota_command,
             port: fields.port,
+            test_model: fields.test_model.clone(),
         };
 
         // Port collision check — apply the proposed change to a temp config and let
@@ -194,6 +205,58 @@ impl App {
                 }
                 return Ok(());
             }
+        }
+
+        if fields.is_new() {
+            // Format unknown yet — detect async, finish the insert in drain_test_results.
+            let token = uuid::Uuid::new_v4().to_string();
+            if let Some(f) = self.form.as_mut() {
+                f.detect_token = Some(token.clone());
+                f.error = None;
+            }
+            self.set_message(
+                format!("Detecting API format for '{}'…", fields.name),
+                MessageKind::Info,
+            );
+
+            let tx = self.tests.tx.clone();
+            let client = self.tests.client.clone();
+            let name = fields.name.clone();
+            let base_url = fields.base_url.clone();
+            let api_key = fields.api_key.clone();
+            let test_model = fields.test_model.clone();
+            let fallback = fields.fallback;
+            let port = fields.port;
+            let routes = fields.routes.clone();
+            tokio::spawn(async move {
+                let detected = match config::resolve_api_key_str(&api_key) {
+                    Ok(key) => crate::tester::detect_api_format(
+                        &client,
+                        &base_url,
+                        &key,
+                        test_model.as_deref(),
+                    )
+                    .await
+                    .ok_or_else(|| {
+                        "Could not detect API format — check Base URL / API Key, or fill in Test Model"
+                            .to_string()
+                    }),
+                    Err(e) => Err(format!("API key resolution failed: {e}")),
+                };
+                let _ = tx.send(super::TestEvent::FormatDetected {
+                    token,
+                    name,
+                    base_url,
+                    api_key,
+                    fallback,
+                    port,
+                    routes,
+                    detected,
+                    test_model,
+                });
+            });
+
+            return Ok(());
         }
 
         if is_rename {
@@ -551,6 +614,109 @@ impl App {
                             Err(e) => {
                                 form.preview = None;
                                 form.error = Some(e);
+                            }
+                        }
+                    }
+                }
+                TestEvent::FormatDetected {
+                    token,
+                    name,
+                    base_url,
+                    api_key,
+                    fallback,
+                    port,
+                    routes,
+                    detected,
+                    test_model,
+                } => {
+                    let still_pending = self
+                        .form
+                        .as_ref()
+                        .is_some_and(|f| f.detect_token.as_deref() == Some(token.as_str()));
+                    if !still_pending {
+                        // Add was cancelled or the form moved on; drop the result.
+                        continue;
+                    }
+                    let used_test_model = test_model.is_some();
+                    match detected {
+                        Ok(d) => {
+                            let provider_id = uuid::Uuid::new_v4().to_string();
+                            let provider = crate::config::Provider {
+                                id: provider_id.clone(),
+                                base_url,
+                                api_key,
+                                api_format: d.api_format,
+                                model_map: Default::default(),
+                                routes,
+                                enabled: true,
+                                fallback,
+                                api_version: d.api_version,
+                                inject_thinking_history: true,
+                                quota_command: None,
+                                port,
+                                test_model,
+                            };
+                            let is_first = self.config.providers.is_empty();
+                            self.config.providers.insert(name.clone(), provider);
+                            if is_first {
+                                self.config.current = name.clone();
+                            }
+                            let wrote_models = !d.models.is_empty();
+                            if wrote_models {
+                                self.db
+                                    .upsert_provider_models(&provider_id, &name, &d.models);
+                                self.models.provider_models.insert(name.clone(), d.models);
+                            }
+                            match config::save_config(&self.config) {
+                                Ok(()) => {
+                                    if let Some(idx) = self.config.providers.get_index_of(&name) {
+                                        self.providers.table_state.select(Some(idx));
+                                    }
+                                    self.set_message(
+                                        format!("Added '{name}'"),
+                                        MessageKind::Success,
+                                    );
+                                    self.form = None;
+                                    self.mode = Mode::Normal;
+                                    self.config_needs_sync = true;
+                                    // Test Model seeded detection with a single model — fetch the
+                                    // full catalog now, same as every other new-provider add does.
+                                    if used_test_model
+                                        && let Some(p) = self.config.providers.get(&name).cloned()
+                                    {
+                                        let tx = self.tests.tx.clone();
+                                        let client = self.tests.client.clone();
+                                        let name_owned = name.clone();
+                                        tokio::spawn(async move {
+                                            let models =
+                                                crate::tester::fetch_provider_models(&client, &p)
+                                                    .await;
+                                            if !models.is_empty() {
+                                                let _ = tx.send(super::TestEvent::ModelsOnly {
+                                                    provider: name_owned,
+                                                    models,
+                                                });
+                                            }
+                                        });
+                                    }
+                                }
+                                Err(e) => {
+                                    self.config.providers.shift_remove(&name);
+                                    // DB row orphaned (harmless); drop the in-memory copy validation reads.
+                                    if wrote_models {
+                                        self.models.provider_models.remove(&name);
+                                    }
+                                    if let Some(f) = self.form.as_mut() {
+                                        f.detect_token = None;
+                                        f.error = Some(format!("Save failed: {e}"));
+                                    }
+                                }
+                            }
+                        }
+                        Err(msg) => {
+                            if let Some(f) = self.form.as_mut() {
+                                f.detect_token = None;
+                                f.error = Some(msg);
                             }
                         }
                     }
