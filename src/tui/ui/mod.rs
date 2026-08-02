@@ -27,6 +27,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Mode::Models => super::models::draw_popup(f, app),
         Mode::Logs => super::logs::draw_popup(f, app),
         Mode::QuotaConfig => super::quota_panel::draw_popup(f, app),
+        Mode::PortInput => super::port_panel::draw_popup(f, app),
         Mode::Normal => {}
     }
 }

@@ -270,7 +270,7 @@ fn pick_next(items: &[String]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::config::{ApiFormat, AppConfig, Provider};
     use crate::tui::state::{
@@ -281,7 +281,8 @@ mod tests {
 
     use crate::config::test_support::ConfigDirGuard;
 
-    fn provider(id: &str) -> Provider {
+    /// `pub(crate)`: reused by `port_panel`'s tests, not just this module's.
+    pub(crate) fn provider(id: &str) -> Provider {
         Provider {
             id: id.to_string(),
             base_url: "http://127.0.0.1:9".to_string(),
@@ -299,7 +300,8 @@ mod tests {
         }
     }
 
-    fn app_with_current(current: &str) -> App {
+    /// `pub(crate)`: reused by `port_panel`'s tests, not just this module's.
+    pub(crate) fn app_with_current(current: &str) -> App {
         let path = format!("/tmp/ccs-startup-test-{}.db", uuid::Uuid::new_v4());
         let mut providers = IndexMap::new();
         providers.insert("first".to_string(), provider("first-id"));
@@ -356,6 +358,7 @@ mod tests {
             pending_key: None,
             quota_status: std::collections::HashMap::new(),
             quota_form: None,
+            port_form: None,
             detail_line_count: 0,
             sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler::new(),
             config_needs_sync: false,
@@ -473,6 +476,8 @@ mod tests {
         let saved = &app.config.providers["brand-new"];
         assert_eq!(saved.api_format, ApiFormat::Anthropic);
         assert_eq!(saved.api_version, None);
+        // Fallback isn't in the form (toggled via f/F on the main table instead).
+        assert!(!saved.fallback);
     }
 
     /// If the user cancels the add (form closed) before detection resolves,

@@ -2,24 +2,19 @@ use crate::config::{self, RouteRule};
 use crate::error::Result;
 
 use super::{
-    API_KEY_FIELD_IDX, App, BASE_URL_FIELD_IDX, ConfirmAction, FALLBACK_FIELD_IDX, MessageKind,
-    Mode, NAME_FIELD_IDX, PORT_FIELD_IDX, ProviderForm, TEST_MODEL_FIELD_IDX,
+    API_KEY_FIELD_IDX, App, BASE_URL_FIELD_IDX, ConfirmAction, MessageKind, Mode, NAME_FIELD_IDX,
+    ProviderForm, TEST_MODEL_FIELD_IDX,
 };
 
 /// Parsed and validated fields extracted from a [`ProviderForm`].
 /// Produced by [`parse_provider_form`]; consumed by [`App::do_save_form`].
 ///
-/// Notably absent: `api_format`/`api_version`. For an existing provider
-/// they're carried over unchanged (see `do_save_form`); for a new one
-/// they're resolved asynchronously by format auto-detection on save,
-/// seeded by `test_model` when given.
+/// Omits `api_format`/`api_version`/`fallback`/`port` — those live outside this form.
 struct ParsedProviderFields {
     name: String,
     base_url: String,
     api_key: String,
     test_model: Option<String>,
-    fallback: bool,
-    port: Option<u16>,
     routes: Vec<RouteRule>,
     original_name: Option<String>,
 }
@@ -31,7 +26,7 @@ impl ParsedProviderFields {
 }
 
 /// Extract, parse, and validate the provider form fields that can be checked
-/// without App state (name uniqueness and port collisions are checked by the caller).
+/// without App state (name uniqueness is checked by the caller).
 /// Returns `Err(message)` with a user-facing error string on the first failure.
 fn parse_provider_form(
     form: &ProviderForm,
@@ -48,8 +43,6 @@ fn parse_provider_form(
         let v = form.fields[TEST_MODEL_FIELD_IDX].value.trim().to_string();
         (!v.is_empty()).then_some(v)
     };
-    let fallback = form.fields[FALLBACK_FIELD_IDX].value.trim() == "yes";
-    let port_raw = form.fields[PORT_FIELD_IDX].value.trim().to_string();
     let original_name = form.original_name.clone();
 
     let routes: Vec<RouteRule> = form
@@ -58,17 +51,6 @@ fn parse_provider_form(
         .filter(|r| r.is_valid(known_models))
         .cloned()
         .collect();
-
-    let port: Option<u16> = if port_raw.is_empty() {
-        None
-    } else {
-        match port_raw.parse::<u16>() {
-            Ok(p) => Some(p),
-            Err(_) => {
-                return Err(format!("Port must be a number (1–65535), got '{port_raw}'"));
-            }
-        }
-    };
 
     if name.is_empty() {
         return Err("Name cannot be empty".to_string());
@@ -85,8 +67,6 @@ fn parse_provider_form(
         base_url,
         api_key,
         test_model,
-        fallback,
-        port,
         routes,
         original_name,
     })
@@ -166,7 +146,9 @@ impl App {
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let model_map = existing.map(|p| p.model_map.clone()).unwrap_or_default();
         let enabled = existing.map(|p| p.enabled).unwrap_or(true);
-        // fallback is set via the form field; don't inherit from existing.
+        // Not editable in the form (see `f`/`F`/`o` shortcuts); inherit unchanged.
+        let fallback = existing.map(|p| p.fallback).unwrap_or(false);
+        let port = existing.and_then(|p| p.port);
         let quota_command = existing.and_then(|p| p.quota_command.clone());
         // Not editable in the form; inherit from the existing provider.
         let inject_thinking_history = existing.map(|p| p.inject_thinking_history).unwrap_or(true);
@@ -183,29 +165,13 @@ impl App {
             model_map,
             routes: fields.routes.clone(),
             enabled,
-            fallback: fields.fallback,
+            fallback,
             api_version: existing_version,
             inject_thinking_history,
             quota_command,
-            port: fields.port,
+            port,
             test_model: fields.test_model.clone(),
         };
-
-        // Port collision check — apply the proposed change to a temp config and let
-        // validate_ports() enforce all rules centrally, so this path stays in sync.
-        if fields.port.is_some() {
-            let mut temp = self.config.clone();
-            if let Some(old_name) = fields.original_name.as_deref() {
-                temp.providers.shift_remove(old_name);
-            }
-            temp.providers.insert(fields.name.clone(), provider.clone());
-            if let Err(e) = temp.validate_ports() {
-                if let Some(f) = self.form.as_mut() {
-                    f.error = Some(e.to_string());
-                }
-                return Ok(());
-            }
-        }
 
         if fields.is_new() {
             // Format unknown yet — detect async, finish the insert in drain_test_results.
@@ -225,8 +191,6 @@ impl App {
             let base_url = fields.base_url.clone();
             let api_key = fields.api_key.clone();
             let test_model = fields.test_model.clone();
-            let fallback = fields.fallback;
-            let port = fields.port;
             let routes = fields.routes.clone();
             tokio::spawn(async move {
                 let detected = match config::resolve_api_key_str(&api_key) {

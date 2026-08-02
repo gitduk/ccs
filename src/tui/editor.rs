@@ -15,7 +15,8 @@ use super::App;
 use super::ServerHandle;
 use super::server::sync_proxy_config;
 use super::state::{
-    FormField, MessageKind, Mode, NAME_FIELD_IDX, ProviderForm, VimMode, filter_suggestions,
+    FormField, MessageKind, Mode, NAME_FIELD_IDX, ProviderForm, TEST_MODEL_FIELD_IDX, VimMode,
+    filter_suggestions,
 };
 use super::theme::{self as t};
 use super::ui::format::mask_api_key_str;
@@ -39,8 +40,14 @@ pub(super) fn handle_paste(app: &mut App, text: &str) -> crate::error::Result<()
             &mut form.route_pat_field
         };
         field.insert_str(text);
+        if form.route_edit_target {
+            form.route_suggest.reset();
+        }
     } else if let Some(field) = form.fields.get_mut(form.focused) {
         field.insert_str(text);
+        if form.focused == TEST_MODEL_FIELD_IDX {
+            form.test_model_suggest.reset();
+        }
     }
     Ok(())
 }
@@ -89,13 +96,17 @@ pub(super) fn handle_key(
 
     if matches!(code, KeyCode::Esc) {
         if in_routes && form.route_editing {
-            if form.route_suggest_active {
-                form.route_suggest_active = false;
+            if form.route_suggest.active {
+                form.route_suggest.active = false;
             } else {
                 form.reset_route_editing();
             }
         } else if form.vim_mode == VimMode::Insert {
-            form.vim_mode = VimMode::Normal;
+            if form.focused == TEST_MODEL_FIELD_IDX && form.test_model_suggest.active {
+                form.test_model_suggest.active = false;
+            } else {
+                form.vim_mode = VimMode::Normal;
+            }
         } else {
             close(app, server);
         }
@@ -109,14 +120,10 @@ pub(super) fn handle_key(
     }
 
     if in_routes {
-        let prov_name = form
-            .original_name
-            .as_deref()
-            .unwrap_or_else(|| form.fields[NAME_FIELD_IDX].value.trim());
         let provider_models: Vec<String> = app
             .models
             .provider_models
-            .get(prov_name)
+            .get(form.prov_key())
             .cloned()
             .unwrap_or_default();
         handle_routes_key(form, code, ctrl, &provider_models);
@@ -129,10 +136,10 @@ pub(super) fn handle_key(
 
     if form.vim_mode == VimMode::Normal {
         match code {
-            KeyCode::Char('i') | KeyCode::Insert if !form.fields[form.focused].is_toggle() => {
+            KeyCode::Char('i') | KeyCode::Insert => {
                 form.vim_mode = VimMode::Insert;
             }
-            KeyCode::Char('a' | 'A') if !form.fields[form.focused].is_toggle() => {
+            KeyCode::Char('a' | 'A') => {
                 form.vim_mode = VimMode::Insert;
                 form.fields[form.focused].end();
             }
@@ -145,24 +152,12 @@ pub(super) fn handle_key(
             KeyCode::Tab => form.focus_next(),
             KeyCode::BackTab => form.focus_prev(),
             KeyCode::Char('h') | KeyCode::Left => {
-                let focused = form.focused;
-                if form.fields[focused].is_toggle() {
-                    form.fields[focused].move_prev();
-                    return Ok(());
-                }
-                form.fields[focused].move_left();
+                form.fields[form.focused].move_left();
             }
-            KeyCode::Char('l') | KeyCode::Right | KeyCode::Char(' ') => {
-                let focused = form.focused;
-                if form.fields[focused].is_toggle() {
-                    form.fields[focused].move_next();
-                    return Ok(());
-                }
-                if matches!(code, KeyCode::Char('l') | KeyCode::Right) {
-                    form.fields[focused].move_right();
-                }
+            KeyCode::Char('l') | KeyCode::Right => {
+                form.fields[form.focused].move_right();
             }
-            KeyCode::Enter if !form.fields[form.focused].is_toggle() => {
+            KeyCode::Enter => {
                 form.vim_mode = VimMode::Insert;
             }
             KeyCode::Home | KeyCode::Char('0') => form.fields[form.focused].home(),
@@ -185,6 +180,52 @@ pub(super) fn handle_key(
             form.pending_key = None;
         }
         return Ok(());
+    }
+
+    if form.focused == TEST_MODEL_FIELD_IDX {
+        let provider_models: Vec<String> = app
+            .models
+            .provider_models
+            .get(form.prov_key())
+            .cloned()
+            .unwrap_or_default();
+
+        let suggest_len =
+            filter_suggestions(&provider_models, &form.fields[TEST_MODEL_FIELD_IDX].value).len();
+
+        match code {
+            KeyCode::Down => {
+                if nav_suggest_down(&mut form.test_model_suggest, suggest_len) {
+                    return Ok(());
+                }
+            }
+            KeyCode::Char('j') if ctrl => {
+                if nav_suggest_down(&mut form.test_model_suggest, suggest_len) {
+                    return Ok(());
+                }
+            }
+            KeyCode::Up => {
+                if nav_suggest_up(&mut form.test_model_suggest) {
+                    return Ok(());
+                }
+            }
+            KeyCode::Char('k') if ctrl => {
+                if nav_suggest_up(&mut form.test_model_suggest) {
+                    return Ok(());
+                }
+            }
+            KeyCode::Enter if form.test_model_suggest.active => {
+                let filter = form.fields[TEST_MODEL_FIELD_IDX].value.clone();
+                let suggestions = filter_suggestions(&provider_models, &filter);
+                if let Some(&model) = suggestions.get(form.test_model_suggest.idx) {
+                    form.fields[TEST_MODEL_FIELD_IDX] = FormField::text("Test Model", model);
+                }
+                form.test_model_suggest.reset();
+                form.vim_mode = VimMode::Normal;
+                return Ok(());
+            }
+            _ => {}
+        }
     }
 
     match code {
@@ -219,19 +260,6 @@ pub(super) fn handle_key(
         _ => {}
     }
 
-    if form.fields[form.focused].is_toggle() {
-        match code {
-            KeyCode::Left => {
-                form.fields[form.focused].move_prev();
-            }
-            KeyCode::Right | KeyCode::Char(' ') => {
-                form.fields[form.focused].move_next();
-            }
-            _ => {}
-        }
-        return Ok(());
-    }
-
     match super::input::insert::handle_field_insert_key(
         &mut form.fields[form.focused],
         code,
@@ -241,8 +269,12 @@ pub(super) fn handle_key(
         super::input::insert::InsertKeyResult::ExitInsert => {
             form.vim_mode = VimMode::Normal;
         }
-        super::input::insert::InsertKeyResult::TextChanged
-        | super::input::insert::InsertKeyResult::Consumed
+        super::input::insert::InsertKeyResult::TextChanged => {
+            if form.focused == TEST_MODEL_FIELD_IDX {
+                form.test_model_suggest.reset();
+            }
+        }
+        super::input::insert::InsertKeyResult::Consumed
         | super::input::insert::InsertKeyResult::NotHandled => {}
     }
     Ok(())
@@ -253,7 +285,7 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
 
     let in_routes = form.in_routes();
     let prov_color = t::PRIMARY;
-    let suggest_items = suggest_panel_height(form, app);
+    let suggest_items = route_suggest_panel_height(form, app);
     let vim_tag = if form.route_editing || form.vim_mode == VimMode::Insert {
         "[I]"
     } else {
@@ -269,7 +301,11 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
         vim_tag
     );
 
-    let field_heights: Vec<u16> = vec![2; form.fields.len()];
+    let test_model_suggest_items = test_model_suggest_panel_height(form, app);
+    let mut field_heights: Vec<u16> = vec![2; form.fields.len()];
+    if test_model_suggest_items > 0 {
+        field_heights[TEST_MODEL_FIELD_IDX] = 2 + 1 + test_model_suggest_items;
+    }
     let fields_total: u16 = field_heights.iter().sum();
     let routes_items = form.routes.len().max(1) as u16;
     let suggest_section = if suggest_items > 0 {
@@ -308,8 +344,7 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
     for (i, field) in form.fields.iter().enumerate() {
         let ci = i;
         let is_focused = i == form.focused;
-        let show_cursor =
-            is_focused && field.editable && (form.vim_mode == VimMode::Insert || field.is_toggle());
+        let show_cursor = is_focused && field.editable && form.vim_mode == VimMode::Insert;
 
         let label_style = if is_focused {
             Style::default().fg(prov_color).add_modifier(Modifier::BOLD)
@@ -319,64 +354,42 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
             Style::default().fg(t::TEXT)
         };
 
-        let value_display = if field.is_toggle() {
-            let selected = Style::default()
-                .fg(prov_color)
-                .add_modifier(Modifier::REVERSED | Modifier::BOLD);
-            let unselected = Style::default().fg(t::MUTED);
-            let mut spans = vec![Span::styled(format!("{:<11}", field.label), label_style)];
-            for (i, &opt) in field.toggle_options.iter().enumerate() {
-                if i > 0 {
-                    spans.push(Span::raw(" "));
-                }
-                let style = if field.value == opt {
-                    selected
-                } else {
-                    unselected
-                };
-                spans.push(Span::styled(format!(" {opt} "), style));
-            }
-            Line::from(spans)
+        let display_val = if field.label == "API Key" && !is_focused {
+            mask_api_key_str(&field.value).unwrap_or_else(|| field.value.clone())
         } else {
-            let display_val = if field.label == "API Key" && !is_focused {
-                mask_api_key_str(&field.value).unwrap_or_else(|| field.value.clone())
-            } else {
-                field.value.clone()
-            };
-
-            if show_cursor {
-                let cursor_pos = field.cursor.min(display_val.len());
-                let before = display_val[..cursor_pos].to_string();
-                let cursor_char = display_val[cursor_pos..].chars().next().unwrap_or(' ');
-                let after_start =
-                    cursor_pos + cursor_char.len_utf8().min(display_val.len() - cursor_pos);
-                let after = display_val[after_start..].to_string();
-                let (before_span, after_span) = (Span::raw(before), Span::raw(after));
-                Line::from(vec![
-                    Span::styled(format!("{:<11}", field.label), label_style),
-                    before_span,
-                    Span::styled(
-                        cursor_char.to_string(),
-                        Style::default()
-                            .fg(prov_color)
-                            .add_modifier(Modifier::REVERSED),
-                    ),
-                    after_span,
-                ])
-            } else {
-                let val_style = if !field.editable {
-                    Style::default().fg(t::MUTED)
-                } else {
-                    Style::default()
-                };
-                Line::from(vec![
-                    Span::styled(format!("{:<11}", field.label), label_style),
-                    Span::styled(display_val, val_style),
-                ])
-            }
+            field.value.clone()
         };
 
-        f.render_widget(Paragraph::new(value_display), chunks[ci]);
+        let value_display = if show_cursor {
+            let mut spans = vec![Span::styled(format!("{:<11}", field.label), label_style)];
+            spans.extend(super::ui::format::cursor_split_spans(
+                &display_val,
+                field.cursor,
+                prov_color,
+            ));
+            Line::from(spans)
+        } else {
+            let val_style = if !field.editable {
+                Style::default().fg(t::MUTED)
+            } else {
+                Style::default()
+            };
+            Line::from(vec![
+                Span::styled(format!("{:<11}", field.label), label_style),
+                Span::styled(display_val, val_style),
+            ])
+        };
+
+        let mut field_lines = vec![value_display];
+        if ci == TEST_MODEL_FIELD_IDX {
+            let suggestions = get_test_model_suggestions(form, app);
+            field_lines.extend(render_suggestion_lines(
+                &suggestions,
+                &form.test_model_suggest,
+                prov_color,
+            ));
+        }
+        f.render_widget(Paragraph::new(field_lines), chunks[ci]);
     }
 
     let routes_chunk = chunks[form.fields.len()];
@@ -516,40 +529,33 @@ fn prune_current_rule(form: &mut ProviderForm, provider_models: &[String]) {
     }
 }
 
-fn suggest_nav_down(form: &mut ProviderForm, provider_models: &[String]) {
+/// False (nothing to suggest) lets callers fall back to plain field nav.
+fn nav_suggest_down(suggest: &mut super::state::SuggestState, len: usize) -> bool {
+    if len > 0 {
+        suggest.advance(len);
+        true
+    } else {
+        false
+    }
+}
+
+fn nav_suggest_up(suggest: &mut super::state::SuggestState) -> bool {
+    if suggest.active {
+        suggest.retreat();
+        true
+    } else {
+        false
+    }
+}
+
+/// Number of models currently matching the route Target field's filter.
+fn route_target_suggest_len(form: &ProviderForm, provider_models: &[String]) -> usize {
     let filter = form
         .routes
         .get(form.route_cursor)
         .map(|r| r.target.as_str())
         .unwrap_or("");
-    let suggestions = filter_suggestions(provider_models, filter);
-    if !suggestions.is_empty() {
-        if !form.route_suggest_active {
-            form.route_suggest_active = true;
-            form.route_suggest_idx = 0;
-            form.route_suggest_scroll = 0;
-        } else {
-            form.route_suggest_idx =
-                (form.route_suggest_idx + 1).min(suggestions.len().saturating_sub(1));
-            if form.route_suggest_idx >= form.route_suggest_scroll + 8 {
-                form.route_suggest_scroll = form.route_suggest_idx + 1 - 8;
-            }
-        }
-    }
-}
-
-fn suggest_nav_up(form: &mut ProviderForm) {
-    if form.route_suggest_active {
-        if form.route_suggest_idx == 0 {
-            form.route_suggest_active = false;
-            form.route_suggest_scroll = 0;
-        } else {
-            form.route_suggest_idx -= 1;
-            if form.route_suggest_idx < form.route_suggest_scroll {
-                form.route_suggest_scroll = form.route_suggest_idx;
-            }
-        }
-    }
+    filter_suggestions(provider_models, filter).len()
 }
 
 fn exit_route_insert(form: &mut ProviderForm, provider_models: &[String]) {
@@ -558,9 +564,7 @@ fn exit_route_insert(form: &mut ProviderForm, provider_models: &[String]) {
 }
 
 fn reset_suggest(form: &mut ProviderForm) {
-    form.route_suggest_active = false;
-    form.route_suggest_idx = 0;
-    form.route_suggest_scroll = 0;
+    form.route_suggest.reset();
 }
 
 fn enter_route_insert_mode(form: &mut ProviderForm, edit_target: bool) {
@@ -601,7 +605,7 @@ fn handle_routes_key(
 ) {
     if form.route_editing {
         if code == KeyCode::Esc {
-            if form.route_suggest_active {
+            if form.route_suggest.active {
                 reset_suggest(form);
             } else {
                 exit_route_insert(form, provider_models);
@@ -611,14 +615,14 @@ fn handle_routes_key(
 
         match code {
             KeyCode::Enter => {
-                if form.route_suggest_active {
+                if form.route_suggest.active {
                     let filter = form
                         .routes
                         .get(form.route_cursor)
                         .map(|r| r.target.as_str())
                         .unwrap_or("");
                     let suggestions = filter_suggestions(provider_models, filter);
-                    if let Some(&model) = suggestions.get(form.route_suggest_idx) {
+                    if let Some(&model) = suggestions.get(form.route_suggest.idx) {
                         form.route_tgt_field = FormField::text("", model);
                         sync_route_fields(form);
                     }
@@ -647,19 +651,21 @@ fn handle_routes_key(
                 return;
             }
             KeyCode::Down if form.route_edit_target => {
-                suggest_nav_down(form, provider_models);
+                let len = route_target_suggest_len(form, provider_models);
+                nav_suggest_down(&mut form.route_suggest, len);
                 return;
             }
             KeyCode::Char('j') if ctrl && form.route_edit_target => {
-                suggest_nav_down(form, provider_models);
+                let len = route_target_suggest_len(form, provider_models);
+                nav_suggest_down(&mut form.route_suggest, len);
                 return;
             }
             KeyCode::Up if form.route_edit_target => {
-                suggest_nav_up(form);
+                nav_suggest_up(&mut form.route_suggest);
                 return;
             }
             KeyCode::Char('k') if ctrl && form.route_edit_target => {
-                suggest_nav_up(form);
+                nav_suggest_up(&mut form.route_suggest);
                 return;
             }
             KeyCode::Char(' ') if !ctrl => return,
@@ -751,16 +757,12 @@ fn handle_routes_key(
     }
 }
 
-fn get_suggestions<'a>(form: &ProviderForm, app: &'a App) -> Vec<&'a str> {
+fn get_route_suggestions<'a>(form: &ProviderForm, app: &'a App) -> Vec<&'a str> {
     if form.route_editing && form.route_edit_target && form.in_routes() {
-        let prov_key = form
-            .original_name
-            .as_deref()
-            .unwrap_or_else(|| form.fields[NAME_FIELD_IDX].value.trim());
         let models = app
             .models
             .provider_models
-            .get(prov_key)
+            .get(form.prov_key())
             .map(|v| v.as_slice())
             .unwrap_or(&[]);
         let tgt_filter = form
@@ -774,8 +776,27 @@ fn get_suggestions<'a>(form: &ProviderForm, app: &'a App) -> Vec<&'a str> {
     }
 }
 
-fn suggest_panel_height(form: &ProviderForm, app: &App) -> u16 {
-    get_suggestions(form, app).len().min(8) as u16
+fn route_suggest_panel_height(form: &ProviderForm, app: &App) -> u16 {
+    get_route_suggestions(form, app).len().min(8) as u16
+}
+
+/// Mirrors the route Target field's autocomplete, but for Test Model.
+fn get_test_model_suggestions<'a>(form: &ProviderForm, app: &'a App) -> Vec<&'a str> {
+    if form.focused == TEST_MODEL_FIELD_IDX && form.vim_mode == VimMode::Insert {
+        let models = app
+            .models
+            .provider_models
+            .get(form.prov_key())
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        filter_suggestions(models, &form.fields[TEST_MODEL_FIELD_IDX].value)
+    } else {
+        vec![]
+    }
+}
+
+fn test_model_suggest_panel_height(form: &ProviderForm, app: &App) -> u16 {
+    get_test_model_suggestions(form, app).len().min(8) as u16
 }
 
 fn draw_routes_section(
@@ -811,28 +832,7 @@ fn draw_routes_section(
 
             let render_field = |text: &str, cursor_pos: usize, active: bool, color: Color| {
                 if active {
-                    let cursor_pos = cursor_pos.min(text.len());
-                    let before = &text[..cursor_pos];
-                    let cursor_char = text[cursor_pos..].chars().next().unwrap_or(' ');
-                    let after_start = cursor_pos
-                        + if cursor_pos < text.len() {
-                            cursor_char.len_utf8()
-                        } else {
-                            0
-                        };
-                    let after = if after_start <= text.len() {
-                        &text[after_start..]
-                    } else {
-                        ""
-                    };
-                    vec![
-                        Span::raw(before.to_string()),
-                        Span::styled(
-                            cursor_char.to_string(),
-                            Style::default().fg(color).add_modifier(Modifier::REVERSED),
-                        ),
-                        Span::raw(after.to_string()),
-                    ]
+                    super::ui::format::cursor_split_spans(text, cursor_pos, color)
                 } else {
                     vec![Span::raw(text.to_string())]
                 }
@@ -908,45 +908,62 @@ fn draw_routes_section(
         }
     }
 
-    let suggestions = get_suggestions(form, app);
-    if !suggestions.is_empty() {
-        let scroll = form.route_suggest_scroll;
-        let total = suggestions.len();
-        let window = &suggestions[scroll..total.min(scroll + 8)];
-
-        let scroll_hint = if total > 8 {
-            format!(
-                "  ── Suggestions ({}/{}) ─────────────────",
-                scroll + window.len(),
-                total
-            )
-        } else {
-            "  ── Suggestions ────────────────────────".to_string()
-        };
-        lines.push(Line::from(Span::styled(
-            scroll_hint,
-            Style::default().fg(t::MUTED),
-        )));
-        for (wi, model) in window.iter().enumerate() {
-            let global_idx = scroll + wi;
-            let is_hi = form.route_suggest_active && global_idx == form.route_suggest_idx;
-            if is_hi {
-                lines.push(Line::from(vec![
-                    Span::styled("  ▶ ", Style::default().fg(prov_color)),
-                    Span::styled(
-                        model.to_string(),
-                        Style::default().fg(prov_color).add_modifier(Modifier::BOLD),
-                    ),
-                ]));
-            } else {
-                lines.push(Line::from(vec![
-                    Span::styled("    ", Style::default()),
-                    Span::styled(model.to_string(), Style::default().fg(t::MUTED)),
-                ]));
-            }
-        }
-    }
+    let suggestions = get_route_suggestions(form, app);
+    lines.extend(render_suggestion_lines(
+        &suggestions,
+        &form.route_suggest,
+        prov_color,
+    ));
 
     lines.push(Line::from(""));
     f.render_widget(Paragraph::new(lines), area);
+}
+
+/// Empty list → empty Vec, so callers can unconditionally `extend`.
+fn render_suggestion_lines(
+    suggestions: &[&str],
+    suggest: &super::state::SuggestState,
+    prov_color: Color,
+) -> Vec<Line<'static>> {
+    if suggestions.is_empty() {
+        return vec![];
+    }
+
+    let mut lines = Vec::new();
+    let scroll = suggest.scroll;
+    let total = suggestions.len();
+    let window = &suggestions[scroll..total.min(scroll + 8)];
+
+    let scroll_hint = if total > 8 {
+        format!(
+            "  ── Suggestions ({}/{}) ─────────────────",
+            scroll + window.len(),
+            total
+        )
+    } else {
+        "  ── Suggestions ────────────────────────".to_string()
+    };
+    lines.push(Line::from(Span::styled(
+        scroll_hint,
+        Style::default().fg(t::MUTED),
+    )));
+    for (wi, model) in window.iter().enumerate() {
+        let global_idx = scroll + wi;
+        let is_hi = suggest.active && global_idx == suggest.idx;
+        if is_hi {
+            lines.push(Line::from(vec![
+                Span::styled("  ▶ ", Style::default().fg(prov_color)),
+                Span::styled(
+                    model.to_string(),
+                    Style::default().fg(prov_color).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled("    ", Style::default()),
+                Span::styled(model.to_string(), Style::default().fg(t::MUTED)),
+            ]));
+        }
+    }
+    lines
 }

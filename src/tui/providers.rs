@@ -137,7 +137,8 @@ pub(super) fn handle_key(
             app.switch_to_selected()?;
             server::sync_proxy_config(app, server_handle);
         }
-        KeyCode::Char('a' | 'o') => app.add(),
+        KeyCode::Char('a') => app.add(),
+        KeyCode::Char('o') => super::port_panel::open(app),
         KeyCode::Enter | KeyCode::Char('e') => {
             if app.selected_name().is_some() {
                 app.start_edit();
@@ -673,6 +674,7 @@ mod tests {
             pending_key: None,
             quota_status: std::collections::HashMap::new(),
             quota_form: None,
+            port_form: None,
             detail_line_count: 0,
             sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler::new(),
             config_needs_sync: false,

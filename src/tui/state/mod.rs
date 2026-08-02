@@ -9,8 +9,9 @@ pub(super) const API_KEY_FIELD_IDX: usize = 2;
 /// Pinned model for the Test/Retest action and (on add) format
 /// auto-detection, persisted as `Provider::test_model`.
 pub(super) const TEST_MODEL_FIELD_IDX: usize = 3;
-pub(super) const FALLBACK_FIELD_IDX: usize = 4;
-pub(super) const PORT_FIELD_IDX: usize = 5;
+// Fallback (`f`/`F`) and port (`o`) are edited via main-table shortcuts, not
+// this form — `do_save_form` inherits both unchanged from `existing` (or
+// `false`/`None` for a new provider).
 
 use ratatui::widgets::TableState;
 
@@ -49,6 +50,8 @@ pub enum Mode {
     Logs,
     /// Quota configuration editor for the selected provider.
     QuotaConfig,
+    /// Quick port-editing popup for the selected provider, opened with `o`.
+    PortInput,
 }
 
 /// Vim-style sub-mode used inside the provider editor form.
@@ -240,6 +243,8 @@ pub struct App {
     pub quota_status: HashMap<String, QuotaStatus>,
     /// Quota configuration form for the selected provider.
     pub quota_form: Option<QuotaForm>,
+    /// Quick port-editing popup for the selected provider.
+    pub port_form: Option<PortForm>,
     /// Line count from the last rendered detail panel, used to size the panel next frame.
     pub detail_line_count: u16,
     pub(super) sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler,
@@ -248,6 +253,52 @@ pub struct App {
     /// path, where callers already call `sync_proxy_config` themselves.
     /// Consumed (and cleared) by the main loop after draining test results.
     pub(super) config_needs_sync: bool,
+}
+
+/// Keyboard-navigable suggestion dropdown state shared by any text field
+/// offering model-name autocomplete (route Target, provider Test Model).
+#[derive(Default)]
+pub struct SuggestState {
+    /// True when keyboard navigation focus is inside the suggestion list.
+    pub active: bool,
+    /// Currently highlighted index inside the filtered list (global, not viewport-relative).
+    pub idx: usize,
+    /// First visible index; keeps the highlighted item within the 8-row viewport.
+    pub scroll: usize,
+}
+
+impl SuggestState {
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Down: activate on first press, otherwise advance and keep the
+    /// highlighted item within an 8-row scroll window.
+    pub fn advance(&mut self, len: usize) {
+        if !self.active {
+            self.active = true;
+            self.idx = 0;
+            self.scroll = 0;
+        } else {
+            self.idx = (self.idx + 1).min(len.saturating_sub(1));
+            if self.idx >= self.scroll + 8 {
+                self.scroll = self.idx + 1 - 8;
+            }
+        }
+    }
+
+    /// Up: retreat, deactivating once back at the top.
+    pub fn retreat(&mut self) {
+        if self.idx == 0 {
+            self.active = false;
+            self.scroll = 0;
+        } else {
+            self.idx -= 1;
+            if self.idx < self.scroll {
+                self.scroll = self.idx;
+            }
+        }
+    }
 }
 
 // ─── Provider editor form ─────────────────────────────────────────────────────
@@ -275,12 +326,10 @@ pub struct ProviderForm {
     pub route_edit_target: bool,
     /// FormField tracking the currently edited route target.
     pub route_tgt_field: FormField,
-    /// True when keyboard navigation focus is inside the suggestion list.
-    pub route_suggest_active: bool,
-    /// Currently highlighted index inside the filtered suggestion list (global, not viewport-relative).
-    pub route_suggest_idx: usize,
-    /// First visible suggestion index; keeps the highlighted item within the 8-row viewport.
-    pub route_suggest_scroll: usize,
+    /// Suggestion dropdown for the route target field.
+    pub route_suggest: SuggestState,
+    /// Suggestion dropdown for the Test Model field.
+    pub test_model_suggest: SuggestState,
 
     /// Pending first key of a two-key sequence (`dd`, `gg`, `yy`) inside the form.
     pub pending_key: Option<(char, std::time::Instant)>,
@@ -312,13 +361,33 @@ pub struct QuotaForm {
     pub preview_scroll: u16,
 }
 
+/// Quick port-editing popup, opened with `o` on the main provider table.
+pub struct PortForm {
+    /// Provider name being configured.
+    pub provider_name: String,
+    pub field: FormField,
+    /// Pending first key of a two-key sequence (`jk` escape).
+    pub pending_key: Option<(char, std::time::Instant)>,
+    pub error: Option<String>,
+}
+
+impl PortForm {
+    pub(super) fn new(provider_name: &str, current_port: Option<u16>) -> Self {
+        let value = current_port.map(|p| p.to_string()).unwrap_or_default();
+        Self {
+            provider_name: provider_name.to_string(),
+            field: FormField::text("Port", &value),
+            pending_key: None,
+            error: None,
+        }
+    }
+}
+
 pub struct FormField {
     pub label: &'static str,
     pub value: String,
     pub cursor: usize,
     pub editable: bool,
-    /// Non-empty for toggle fields. Lists the values the toggle cycles through (first = left, second = right).
-    pub toggle_options: &'static [&'static str],
 }
 
 // ─── FormField helpers ────────────────────────────────────────────────────────
@@ -331,7 +400,6 @@ impl FormField {
             value: String::new(),
             cursor: 0,
             editable: true,
-            toggle_options: &[],
         }
     }
 
@@ -341,30 +409,6 @@ impl FormField {
             value: value.to_string(),
             cursor: value.len(),
             editable: true,
-            toggle_options: &[],
-        }
-    }
-
-    pub fn is_toggle(&self) -> bool {
-        !self.toggle_options.is_empty()
-    }
-
-    /// Construct a toggle field that cycles through the given options.
-    pub(super) fn toggle(
-        label: &'static str,
-        value: &str,
-        options: &'static [&'static str],
-    ) -> Self {
-        debug_assert!(
-            options.len() >= 2,
-            "toggle fields require at least two options"
-        );
-        Self {
-            label,
-            value: value.to_string(),
-            cursor: 0,
-            editable: true,
-            toggle_options: options,
         }
     }
 
@@ -413,24 +457,18 @@ impl FormField {
     }
 
     pub fn insert(&mut self, c: char) {
-        if self.is_toggle() {
-            return;
-        }
         self.value.insert(self.cursor, c);
         self.cursor += c.len_utf8();
     }
 
     /// Insert pasted text at the cursor, advancing the cursor past it.
     pub fn insert_str(&mut self, text: &str) {
-        if self.is_toggle() {
-            return;
-        }
         self.value.insert_str(self.cursor, text);
         self.cursor += text.len();
     }
 
     pub fn backspace(&mut self) {
-        if self.is_toggle() || self.cursor == 0 {
+        if self.cursor == 0 {
             return;
         }
         let char_len = self.value[..self.cursor]
@@ -443,7 +481,7 @@ impl FormField {
     }
 
     pub fn delete(&mut self) {
-        if self.is_toggle() || self.cursor >= self.value.len() {
+        if self.cursor >= self.value.len() {
             return;
         }
         self.value.remove(self.cursor);
@@ -472,7 +510,7 @@ impl FormField {
     }
 
     pub fn delete_word_back(&mut self) {
-        if self.is_toggle() || self.cursor == 0 {
+        if self.cursor == 0 {
             return;
         }
         let mut pos = self.cursor;
@@ -511,36 +549,6 @@ impl FormField {
     pub fn end(&mut self) {
         self.cursor = self.value.len();
     }
-
-    pub fn move_next(&mut self) {
-        if self.toggle_options.len() < 2 {
-            return;
-        }
-        let current = self
-            .toggle_options
-            .iter()
-            .position(|&o| o == self.value)
-            .unwrap_or(0);
-        let next = (current + 1) % self.toggle_options.len();
-        self.value = self.toggle_options[next].to_string();
-    }
-
-    pub fn move_prev(&mut self) {
-        if self.toggle_options.len() < 2 {
-            return;
-        }
-        let current = self
-            .toggle_options
-            .iter()
-            .position(|&o| o == self.value)
-            .unwrap_or(0);
-        let prev = if current == 0 {
-            self.toggle_options.len() - 1
-        } else {
-            current - 1
-        };
-        self.value = self.toggle_options[prev].to_string();
-    }
 }
 
 // ─── ProviderForm helpers ─────────────────────────────────────────────────────
@@ -552,20 +560,14 @@ impl ProviderForm {
     /// resolved by auto-detection on save (see `TestEvent::FormatDetected`);
     /// for an existing one it's fixed and simply carried over unchanged.
     pub(super) fn new(name: &str, provider: Option<&Provider>) -> Self {
-        let (base_url, api_key, test_model, fallback, port_str, routes) = match provider {
-            Some(p) => {
-                let fb = if p.fallback { "yes" } else { "no" };
-                let port = p.port.map(|p| p.to_string()).unwrap_or_default();
-                (
-                    p.base_url.as_str(),
-                    p.api_key.as_str(),
-                    p.test_model.as_deref().unwrap_or(""),
-                    fb,
-                    port,
-                    p.routes.clone(),
-                )
-            }
-            None => ("", "", "", "no", String::new(), vec![]),
+        let (base_url, api_key, test_model, routes) = match provider {
+            Some(p) => (
+                p.base_url.as_str(),
+                p.api_key.as_str(),
+                p.test_model.as_deref().unwrap_or(""),
+                p.routes.clone(),
+            ),
+            None => ("", "", "", vec![]),
         };
         Self {
             original_name: if name.is_empty() {
@@ -578,8 +580,6 @@ impl ProviderForm {
                 FormField::text("Base URL", base_url),
                 FormField::text("API Key", api_key),
                 FormField::text("Test Model", test_model),
-                FormField::toggle("Fallback", fallback, &["yes", "no"]),
-                FormField::text("Port", &port_str),
             ],
             focused: 0,
             vim_mode: VimMode::Normal,
@@ -589,9 +589,8 @@ impl ProviderForm {
             route_pat_field: FormField::text("", ""),
             route_edit_target: false,
             route_tgt_field: FormField::text("", ""),
-            route_suggest_active: false,
-            route_suggest_idx: 0,
-            route_suggest_scroll: 0,
+            route_suggest: SuggestState::default(),
+            test_model_suggest: SuggestState::default(),
             pending_key: None,
             error: None,
             detect_token: None,
@@ -603,13 +602,19 @@ impl ProviderForm {
         self.focused == self.fields.len()
     }
 
+    /// The provider name to key `app.models.provider_models` lookups on: the
+    /// original name being edited, or the in-progress Name field for a new provider.
+    pub fn prov_key(&self) -> &str {
+        self.original_name
+            .as_deref()
+            .unwrap_or_else(|| self.fields[NAME_FIELD_IDX].value.trim())
+    }
+
     /// Reset route editing state (exit Insert mode in routes section).
     pub fn reset_route_editing(&mut self) {
         self.route_editing = false;
         self.route_edit_target = false;
-        self.route_suggest_active = false;
-        self.route_suggest_idx = 0;
-        self.route_suggest_scroll = 0;
+        self.route_suggest.reset();
     }
 
     /// Clamp route_cursor to valid range after routes have been modified.
@@ -622,42 +627,37 @@ impl ProviderForm {
     }
 
     /// Move focus to the next editable slot.
-    /// Visual order: Name → Base URL → API Key → Format → Fallback → Port → Routes → (wrap)
+    /// Visual order: Name → Base URL → API Key → Test Model → Routes → (wrap)
     pub fn focus_next(&mut self) {
         let routes_slot = self.fields.len(); // virtual index for Routes (past last regular field)
 
         let next = if self.focused == routes_slot {
             0 // Routes → Name (wrap)
         } else {
-            self.focused + 1 // sequential: Port(5) → Routes(6) naturally
+            self.focused + 1 // sequential: Test Model → Routes naturally
         };
 
         self.focused = next;
         if next == routes_slot {
             self.reset_route_editing();
             self.vim_mode = VimMode::Normal;
-        } else if self.fields[next].is_toggle() {
-            // Toggle fields have no text cursor; Insert mode makes no sense here.
-            self.vim_mode = VimMode::Normal;
         }
     }
 
     /// Move focus to the previous editable slot.
-    /// Visual order (reverse): Routes → Port → Fallback → Format → API Key → Base URL → Name → (wrap)
+    /// Visual order (reverse): Routes → Test Model → API Key → Base URL → Name → (wrap)
     pub fn focus_prev(&mut self) {
         let routes_slot = self.fields.len();
 
         let prev = if self.focused == 0 {
             routes_slot // Name → Routes (wrap)
         } else {
-            self.focused - 1 // sequential: Routes(6) → Port(5) → ...
+            self.focused - 1 // sequential: Routes → Test Model → ...
         };
 
         self.focused = prev;
         if prev == routes_slot {
             self.reset_route_editing();
-            self.vim_mode = VimMode::Normal;
-        } else if prev < self.fields.len() && self.fields[prev].is_toggle() {
             self.vim_mode = VimMode::Normal;
         }
     }
@@ -687,16 +687,10 @@ mod tests {
 
     use indexmap::IndexMap;
 
-    use super::{App, ProviderForm, TestEvent};
+    use super::{App, TestEvent};
     use crate::config::test_support::ConfigDirGuard;
     use crate::config::{ApiFormat, AppConfig, Provider};
     use crate::tester::{TestResult, TestStatus};
-
-    #[test]
-    fn new_provider_form_defaults_fallback_to_no() {
-        let form = ProviderForm::new("", None);
-        assert_eq!(form.fields[super::FALLBACK_FIELD_IDX].value, "no");
-    }
 
     #[tokio::test]
     async fn completed_test_event_updates_displayed_model_to_used_model() {
@@ -772,6 +766,7 @@ mod tests {
             pending_key: None,
             quota_status: std::collections::HashMap::new(),
             quota_form: None,
+            port_form: None,
             detail_line_count: 6,
             sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler::new(),
             config_needs_sync: false,

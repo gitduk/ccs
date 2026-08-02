@@ -1,8 +1,27 @@
-use ratatui::style::Style;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use ratatui::widgets::Cell;
 
 use super::super::theme::{self as t};
+
+/// Split `text` at `cursor` into three spans — text before, the
+/// highlighted character under the cursor (reversed, in `color`), and text
+/// after — for rendering an editable field's caret in an Insert-mode popup.
+pub(crate) fn cursor_split_spans(text: &str, cursor: usize, color: Color) -> Vec<Span<'static>> {
+    let cursor_pos = cursor.min(text.len());
+    let before = text[..cursor_pos].to_string();
+    let cursor_char = text[cursor_pos..].chars().next().unwrap_or(' ');
+    let after_start = cursor_pos + cursor_char.len_utf8().min(text.len() - cursor_pos);
+    let after = text[after_start..].to_string();
+    vec![
+        Span::raw(before),
+        Span::styled(
+            cursor_char.to_string(),
+            Style::default().fg(color).add_modifier(Modifier::REVERSED),
+        ),
+        Span::raw(after),
+    ]
+}
 
 /// Truncate a string to `max` display columns (wide chars count as 2),
 /// appending `…` if truncated. Use for table layout; `truncate_chars` for

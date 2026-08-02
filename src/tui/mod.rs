@@ -15,6 +15,7 @@ mod ui;
 
 mod event_loop;
 mod input;
+mod port_panel;
 mod quota_panel;
 mod server;
 mod sysinfo;
