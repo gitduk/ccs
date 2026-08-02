@@ -33,7 +33,18 @@ pub fn models_request(
     provider: &Provider,
     api_key: &str,
 ) -> reqwest::RequestBuilder {
-    let base = provider.base_url.trim_end_matches('/');
+    models_request_at(client, provider, api_key, &provider.base_url)
+}
+
+/// Like `models_request`, but probes `base_url` directly instead of the
+/// provider's configured base — used by the `/v1/models` root-domain retry.
+pub fn models_request_at(
+    client: &Client,
+    provider: &Provider,
+    api_key: &str,
+    base_url: &str,
+) -> reqwest::RequestBuilder {
+    let base = base_url.trim_end_matches('/');
     let (auth_key, auth_val) = provider.auth_header(api_key);
     let mut req = client
         .get(format!("{base}/v1/models"))
@@ -44,6 +55,16 @@ pub fn models_request(
             .header("authorization", format!("Bearer {api_key}"));
     }
     req
+}
+
+/// The scheme+host(+port) root of `base_url`; `None` if `base_url` is
+/// already bare (nothing to strip) or fails to parse.
+pub fn root_base_url(base_url: &str) -> Option<String> {
+    let root = reqwest::Url::parse(base_url)
+        .ok()?
+        .origin()
+        .ascii_serialization();
+    (root != base_url.trim_end_matches('/')).then_some(root)
 }
 
 /// Forward a request to the upstream provider.

@@ -265,15 +265,19 @@ pub async fn fetch_provider_models(client: &reqwest::Client, provider: &Provider
 /// function wrapper). Sending native OpenAI format would cause to_openai() to silently drop
 /// all tools, defeating the probe.
 ///
-/// Returns `Some(true)` if the response contains a structured tool call, `Some(false)` if the
-/// provider rejected the request (4xx) or responded with text only, `None` on network error.
+/// A 4xx on the forced attempt retries once with `tool_choice` omitted (auto) —
+/// some upstreams reject any forced value even though auto tool calls work fine.
+///
+/// Returns `Some(true)` if either attempt's response contains a structured tool call,
+/// `Some(false)` if both attempts were rejected or responded with text only, `None` on
+/// network error on either attempt.
 async fn check_tool_support(
     client: &reqwest::Client,
     provider: &Provider,
     api_key: &str,
     model: &str,
 ) -> Option<bool> {
-    let req = json!({
+    let base_req = json!({
         "model": model,
         "max_tokens": 64,
         "messages": [{"role": "user", "content": "call the noop tool"}],
@@ -282,10 +286,20 @@ async fn check_tool_support(
             "description": "no-op",
             "input_schema": {"type": "object", "properties": {}}
         }],
-        // "any" converts to "required" for OpenAI providers via convert_tool_choice_to_openai.
-        "tool_choice": {"type": "any"},
     });
-    match probe_provider_message_with_body(client, provider, api_key, &req).await {
+
+    let mut forced_req = base_req.clone();
+    // "any" converts to "required" for OpenAI providers via convert_tool_choice_to_openai.
+    forced_req["tool_choice"] = json!({"type": "any"});
+    match probe_provider_message_with_body(client, provider, api_key, &forced_req).await {
+        Ok((status, body)) if status.is_success() => {
+            return Some(response_body_has_tool_call(&body));
+        }
+        Ok(_) => {}
+        Err(_) => return None,
+    }
+
+    match probe_provider_message_with_body(client, provider, api_key, &base_req).await {
         Ok((status, body)) => {
             if !status.is_success() {
                 return Some(false);
@@ -387,6 +401,22 @@ async fn fetch_models(
     let Ok(r) = req.send().await else {
         return (None, None);
     };
+
+    if r.status() == reqwest::StatusCode::NOT_FOUND
+        && let Some(root) = crate::proxy::forwarder::root_base_url(&provider.base_url)
+    {
+        let fallback_req =
+            crate::proxy::forwarder::models_request_at(client, provider, api_key, &root)
+                .timeout(Duration::from_secs(TEST_TIMEOUT_SECS));
+        if let Ok(r2) = fallback_req.send().await {
+            return parse_models_response(r2).await;
+        }
+    }
+
+    parse_models_response(r).await
+}
+
+async fn parse_models_response(r: reqwest::Response) -> (Option<usize>, Option<Vec<String>>) {
     if !r.status().is_success() {
         return (None, None);
     }
@@ -409,8 +439,114 @@ pub(crate) mod tests {
 
     use tokio::net::TcpListener;
 
-    use super::{TestStatus, test_latency};
+    use super::{TestStatus, check_tool_support, test_latency};
     use crate::config::{ApiFormat, Provider};
+
+    fn test_provider(base_url: String) -> Provider {
+        Provider {
+            id: "test-id".into(),
+            base_url,
+            api_key: "test-key".into(),
+            api_format: ApiFormat::OpenAI,
+            model_map: Default::default(),
+            routes: vec![],
+            enabled: true,
+            fallback: true,
+            api_version: Some(crate::config::OpenAiApiVersion::ChatCompletions),
+            inject_thinking_history: true,
+            quota_command: None,
+            port: None,
+            test_model: None,
+        }
+    }
+
+    /// Regression test for the `openc` false negative: a backend that rejects any forced
+    /// `tool_choice` (both `"required"` and a named-function choice) with 4xx, but honors
+    /// tool calling fine under the default `auto` choice. `check_tool_support` must fall
+    /// back to the unforced attempt instead of reporting "no tool support".
+    #[tokio::test]
+    async fn check_tool_support_falls_back_when_forced_choice_is_rejected() {
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use axum::{Json, Router};
+
+        async fn chat(body: axum::body::Bytes) -> impl IntoResponse {
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            if v.get("tool_choice").is_some() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": {"message": "Upstream request failed"}})),
+                )
+                    .into_response();
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "choices": [{"message": {"tool_calls": [
+                        {"id": "call_0", "type": "function", "function": {"name": "noop", "arguments": "{}"}}
+                    ]}}]
+                })),
+            )
+                .into_response()
+        }
+
+        let app = Router::new().route("/v1/chat/completions", post(chat));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let provider = test_provider(format!("http://{addr}"));
+        let result = check_tool_support(&reqwest::Client::new(), &provider, "test-key", "m").await;
+        assert_eq!(result, Some(true));
+    }
+
+    /// Regression test for the DeepSeek-style asymmetric gateway: `/v1/models`
+    /// 404s under the provider's configured path (however deeply nested) but
+    /// is reachable at the bare scheme+host root. `fetch_models` must retry
+    /// there instead of reporting no models.
+    #[tokio::test]
+    async fn fetch_models_falls_back_to_root_domain_on_404() {
+        use axum::Router;
+        use axum::extract::Path;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use axum::routing::get;
+
+        async fn nested_404(Path(_rest): Path<String>) -> impl IntoResponse {
+            StatusCode::NOT_FOUND
+        }
+        async fn root_models() -> impl IntoResponse {
+            axum::Json(serde_json::json!({
+                "data": [{"id": "deepseek-v4-flash"}, {"id": "deepseek-v4-pro"}]
+            }))
+        }
+
+        let app = Router::new()
+            // Two levels deep — proves the fallback goes straight to the
+            // root, not just one segment up.
+            .route("/{*rest}", get(nested_404))
+            .route("/v1/models", get(root_models));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let provider = test_provider(format!("http://{addr}/org123/anthropic"));
+        let (count, names) = super::fetch_models(&reqwest::Client::new(), &provider, "key").await;
+
+        assert_eq!(count, Some(2));
+        assert_eq!(
+            names,
+            Some(vec![
+                "deepseek-v4-flash".to_string(),
+                "deepseek-v4-pro".to_string()
+            ])
+        );
+    }
 
     #[tokio::test]
     async fn test_latency_times_out_and_returns_connection_error() {
