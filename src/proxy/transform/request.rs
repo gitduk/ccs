@@ -437,13 +437,16 @@ fn convert_assistant_blocks_to_openai(blocks: &[Value], is_responses: bool) -> R
                 "content": [{"type": "output_text", "text": text_content}]
             }));
         }
-        items.extend(tool_calls);
+        // Reasoning must precede the function_call it led to: the upstream
+        // pairs each function_call with the following function_call_output,
+        // and an interleaved reasoning item breaks that pairing.
         if !reasoning_content.is_empty() {
             items.push(json!({
                 "type": "reasoning",
                 "summary": [{"type": "summary_text", "text": reasoning_content}]
             }));
         }
+        items.extend(tool_calls);
         if items.is_empty() {
             items.push(json!({"type": "message", "role": "assistant", "content": []}));
         }

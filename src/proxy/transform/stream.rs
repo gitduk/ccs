@@ -2024,4 +2024,317 @@ mod tests {
             .unwrap();
         assert_eq!(completed["response"]["status"], "incomplete");
     }
+
+    // ─── e2e: tool roundtrip id preservation ─────────────────────────────────
+
+    #[test]
+    fn e2e_tool_roundtrip_preserves_call_id() {
+        use crate::config::{ApiFormat, OpenAiApiVersion, Provider};
+        use crate::proxy::transform::request::anthropic_to_openai_request;
+        use std::collections::HashMap;
+
+        let provider = Provider {
+            id: "id".into(),
+            base_url: "https://api.example.com".into(),
+            api_key: "key".into(),
+            api_format: ApiFormat::OpenAI,
+            model_map: HashMap::new(),
+            routes: Vec::new(),
+            enabled: true,
+            fallback: true,
+            api_version: Some(OpenAiApiVersion::ChatCompletions),
+            inject_thinking_history: true,
+            quota_command: None,
+            port: None,
+            test_model: None,
+        };
+
+        // Round 1: Claude Code request (thinking on) -> upstream OpenAI request
+        let req1 = json!({
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 8000,
+            "stream": true,
+            "thinking": {"type": "enabled", "budget_tokens": 1000},
+            "tools": [{"name": "ls", "description": "list dir",
+                        "input_schema": {"type": "object", "properties": {"-la": {"type": "boolean"}}}}],
+            "messages": [{"role": "user", "content": "看看这是什么项目"}]
+        });
+        let up1 = anthropic_to_openai_request(&req1, &provider).unwrap();
+        eprintln!("REQ1 upstream: {}", serde_json::to_string(&up1).unwrap());
+
+        // Upstream SSE: thinking, then tool call, then finish
+        let mut state = StreamState::new(None);
+        let chunks = vec![
+            json!({"model": "console-go", "choices": [{"delta": {"role": "assistant", "reasoning_content": "Thinking..."}, "finish_reason": null}]}),
+            json!({"model": "console-go", "choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_00_5d8FPybV7Lq0m3CfOW2O9183", "type": "function", "function": {"name": "ls", "arguments": ""}}]}, "finish_reason": null}]}),
+            json!({"model": "console-go", "choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "{\"-la\":true}"}}]}, "finish_reason": null}]}),
+            json!({"model": "console-go", "choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
+        ];
+        let mut raw = Vec::new();
+        for c in &chunks {
+            raw.extend(state.process_chunk(c));
+        }
+        let events = parse_events(&raw);
+        for (t, d) in &events {
+            eprintln!("SSE {t}: {d}");
+        }
+        let tool_start = events
+            .iter()
+            .find(|(t, d)| t == "content_block_start" && d["content_block"]["type"] == "tool_use")
+            .map(|(_, d)| d.clone())
+            .expect("no tool_use block start emitted");
+        let delivered_id = tool_start["content_block"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        eprintln!("Tool id delivered to Claude Code: {delivered_id}");
+        assert_eq!(delivered_id, "call_00_5d8FPybV7Lq0m3CfOW2O9183");
+
+        // Round 2: Claude Code echoes assistant tool_use + user tool_result
+        let req2 = json!({
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 8000,
+            "stream": true,
+            "messages": [
+                {"role": "user", "content": "看看这是什么项目"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "Thinking..."},
+                    {"type": "tool_use", "id": delivered_id, "name": "ls", "input": {"-la": true}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": delivered_id, "content": "Cargo.toml\nCargo.lock\nsrc\n"}
+                ]}
+            ]
+        });
+        let up2 = anthropic_to_openai_request(&req2, &provider).unwrap();
+        eprintln!("REQ2 upstream: {}", serde_json::to_string(&up2).unwrap());
+
+        let assistant = up2["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("no assistant message");
+        let tool_msg = up2["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["role"] == "tool")
+            .expect("no tool message");
+        assert_eq!(assistant["tool_calls"][0]["id"], delivered_id);
+        assert_eq!(tool_msg["tool_call_id"], delivered_id);
+
+        // Message order sanity: tool message must follow its assistant tool_calls
+        let msgs = up2["messages"].as_array().unwrap();
+        let a_idx = msgs.iter().position(|m| m["role"] == "assistant").unwrap();
+        let t_idx = msgs.iter().position(|m| m["role"] == "tool").unwrap();
+        assert!(t_idx > a_idx, "tool message must come after assistant tool_calls");
+    }
+
+    #[test]
+    fn e2e_multi_round_tool_calls_keep_ids_consistent() {
+        use crate::config::{ApiFormat, OpenAiApiVersion, Provider};
+        use crate::proxy::transform::request::anthropic_to_openai_request;
+        use std::collections::HashMap;
+
+        let provider = Provider {
+            id: "id".into(),
+            base_url: "https://api.example.com".into(),
+            api_key: "key".into(),
+            api_format: ApiFormat::OpenAI,
+            model_map: HashMap::new(),
+            routes: Vec::new(),
+            enabled: true,
+            fallback: true,
+            api_version: Some(OpenAiApiVersion::ChatCompletions),
+            inject_thinking_history: true,
+            quota_command: None,
+            port: None,
+            test_model: None,
+        };
+
+        let ids = ["call_00_AAAA", "call_00_BBBB"];
+
+        // Round 2: Claude Code echoes assistant ls + user ls result
+        let round2 = json!({
+            "model": "m", "stream": true, "max_tokens": 8000,
+            "messages": [
+                {"role": "user", "content": "看看这是什么项目"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "Need to inspect the repo"},
+                    {"type": "tool_use", "id": ids[0], "name": "ls", "input": {"-la": true}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": ids[0], "content": "Cargo.toml\nCargo.lock\nsrc\n"}
+                ]}
+            ]
+        });
+        let up2 = anthropic_to_openai_request(&round2, &provider).unwrap();
+        eprintln!("ROUND2: {}", serde_json::to_string(&up2).unwrap());
+
+        // Round 3: history now has ls + read tool_use and both results
+        let round3 = json!({
+            "model": "m", "stream": true, "max_tokens": 8000,
+            "messages": [
+                {"role": "user", "content": "看看这是什么项目"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "Need to inspect the repo"},
+                    {"type": "tool_use", "id": ids[0], "name": "ls", "input": {"-la": true}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": ids[0], "content": "Cargo.toml\nCargo.lock\nsrc\n"}
+                ]},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "Now read the Cargo.toml"},
+                    {"type": "tool_use", "id": ids[1], "name": "read", "input": {"file_path": "/home/wukaige/ccs/Cargo.toml"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": ids[1], "content": "[package]\nname = \"ccs\""}
+                ]}
+            ]
+        });
+        let up3 = anthropic_to_openai_request(&round3, &provider).unwrap();
+        eprintln!("ROUND3: {}", serde_json::to_string_pretty(&up3).unwrap());
+
+        let msgs = up3["messages"].as_array().unwrap();
+        // assistant messages: tool_calls ids must be consumed by following tool results
+        let mut pending: Vec<String> = Vec::new();
+        for m in msgs {
+            let role = m["role"].as_str().unwrap_or("");
+            match role {
+                "assistant" => {
+                    if let Some(tcs) = m.get("tool_calls").and_then(|t| t.as_array()) {
+                        for tc in tcs {
+                            pending.push(tc["id"].as_str().unwrap_or("").to_string());
+                        }
+                    }
+                }
+                "tool" => {
+                    let cid = m["tool_call_id"].as_str().unwrap_or("").to_string();
+                    let pos = pending.iter().position(|p| p == &cid);
+                    assert!(pos.is_some(), "tool message references unknown {cid}");
+                    pending.remove(pos.unwrap());
+                }
+                _ => {}
+            }
+        }
+        // every declared tool call must have produced output (i.e. be consumed)
+        assert!(pending.is_empty(), "unconsumed tool calls: {pending:?}");
+    }
+
+    #[test]
+    fn e2e_responses_api_tool_roundtrip_preserves_call_id() {
+        use crate::config::{ApiFormat, OpenAiApiVersion, Provider};
+        use crate::proxy::transform::request::anthropic_to_openai_request;
+        use std::collections::HashMap;
+
+        let provider = Provider {
+            id: "id".into(),
+            base_url: "https://opencode.ai/zen/go".into(),
+            api_key: "key".into(),
+            api_format: ApiFormat::OpenAI,
+            model_map: HashMap::new(),
+            routes: Vec::new(),
+            enabled: true,
+            fallback: true,
+            api_version: Some(OpenAiApiVersion::Responses),
+            inject_thinking_history: true,
+            quota_command: None,
+            port: None,
+            test_model: None,
+        };
+        let upstream_call_id = "call_00_5d8FPybV7Lq0m3CfOW2O9183";
+
+        // Round 1: Claude Code request -> Responses API input
+        let req1 = json!({
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 8000,
+            "stream": true,
+            "thinking": {"type": "enabled", "budget_tokens": 1000},
+            "tools": [{"name": "ls", "description": "list dir",
+                        "input_schema": {"type": "object", "properties": {"-la": {"type": "boolean"}}}}],
+            "messages": [{"role": "user", "content": "看看这是什么项目"}]
+        });
+        let up1 = anthropic_to_openai_request(&req1, &provider).unwrap();
+        eprintln!("RESP REQ1: {}", serde_json::to_string(&up1).unwrap());
+
+        // Upstream responses SSE: reasoning, then function call, done, completed
+        let mut state = StreamState::new(None);
+        let chunks = vec![
+            json!({"type": "response.created", "response": {"id": "resp_1", "model": "deepseek-v4-flash"}}),
+            json!({"type": "response.in_progress", "response": {"id": "resp_1"}}),
+            json!({"type": "response.reasoning_summary_text.delta", "delta": "Thinking..."}),
+            json!({"type": "response.output_item.added", "item": {"id": "fc_ls", "type": "function_call", "call_id": upstream_call_id, "name": "ls", "arguments": ""}}),
+            json!({"type": "response.function_call_arguments.delta", "item_id": "fc_ls", "delta": "{\"-la\":true}"}),
+            json!({"type": "response.output_item.done", "item": {"id": "fc_ls", "type": "function_call", "call_id": upstream_call_id, "name": "ls", "arguments": "{\"-la\":true}"}}),
+            json!({"type": "response.completed", "response": {"id": "resp_1", "status": "completed"}}),
+        ];
+        let mut raw = Vec::new();
+        for c in &chunks {
+            raw.extend(state.process_chunk(c));
+        }
+        let events = parse_events(&raw);
+        for (t, d) in &events {
+            eprintln!("RESP SSE {t}: {d}");
+        }
+        let tool_start = events
+            .iter()
+            .find(|(t, d)| t == "content_block_start" && d["content_block"]["type"] == "tool_use")
+            .map(|(_, d)| d.clone())
+            .expect("no tool_use block start");
+        let delivered_id = tool_start["content_block"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        eprintln!("RESP tool id delivered: {delivered_id}");
+        assert_eq!(delivered_id, upstream_call_id);
+
+        // Round 2: Claude Code echoes tool_use + tool_result
+        let req2 = json!({
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 8000,
+            "stream": true,
+            "messages": [
+                {"role": "user", "content": "看看这是什么项目"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "Thinking..."},
+                    {"type": "tool_use", "id": delivered_id, "name": "ls", "input": {"-la": true}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": delivered_id, "content": "Cargo.toml\nCargo.lock\nsrc\n"}
+                ]}
+            ]
+        });
+        let up2 = anthropic_to_openai_request(&req2, &provider).unwrap();
+        eprintln!("RESP REQ2: {}", serde_json::to_string_pretty(&up2).unwrap());
+
+        let input = up2["input"].as_array().unwrap();
+        let fc = input
+            .iter()
+            .find(|i| i["type"] == "function_call")
+            .expect("no function_call item");
+        let fco = input
+            .iter()
+            .find(|i| i["type"] == "function_call_output")
+            .expect("no function_call_output item");
+        assert_eq!(fc["call_id"], delivered_id);
+        assert_eq!(fco["call_id"], delivered_id);
+        let fc_idx = input.iter().position(|i| i["type"] == "function_call").unwrap();
+        let fco_idx = input
+            .iter()
+            .position(|i| i["type"] == "function_call_output")
+            .unwrap();
+        assert!(fco_idx > fc_idx, "function_call_output must follow function_call");
+        // reasoning must precede function_call, never sit between a call and its output
+        if let Some(r_idx) = input.iter().position(|i| i["type"] == "reasoning") {
+            assert!(
+                r_idx < fc_idx,
+                "reasoning item must come before function_call, got: {:?}",
+                input
+                    .iter()
+                    .map(|i| i["type"].as_str().unwrap_or(""))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
 }
