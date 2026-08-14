@@ -281,7 +281,7 @@ pub(crate) mod tests {
 
     use crate::config::test_support::ConfigDirGuard;
 
-    /// `pub(crate)`: reused by `port_panel`'s tests, not just this module's.
+    /// `pub(crate)`: reused by `quick_panel`'s tests, not just this module's.
     pub(crate) fn provider(id: &str) -> Provider {
         Provider {
             id: id.to_string(),
@@ -300,7 +300,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// `pub(crate)`: reused by `port_panel`'s tests, not just this module's.
+    /// `pub(crate)`: reused by `quick_panel`'s tests, not just this module's.
     pub(crate) fn app_with_current(current: &str) -> App {
         let path = format!("/tmp/ccs-startup-test-{}.db", uuid::Uuid::new_v4());
         let mut providers = IndexMap::new();
@@ -358,7 +358,7 @@ pub(crate) mod tests {
             pending_key: None,
             quota_status: std::collections::HashMap::new(),
             quota_form: None,
-            port_form: None,
+            quick_form: None,
             detail_line_count: 0,
             sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler::new(),
             config_needs_sync: false,
@@ -412,12 +412,14 @@ pub(crate) mod tests {
         );
     }
 
-    /// Server that answers only `/v1/messages` (Anthropic format) — reuses
-    /// tester.rs's scenario server instead of a second axum test harness.
+    /// Server that answers `/v1/messages` (Anthropic format) plus a small
+    /// model list — reuses tester.rs's scenario server instead of a second
+    /// axum test harness.
     async fn spawn_anthropic_only_server() -> String {
         use crate::tester::tests::{Scenario, spawn_scenario_server};
         spawn_scenario_server(Scenario {
             messages_ok: true,
+            models_ok: true,
             ..Default::default()
         })
         .await
@@ -430,9 +432,7 @@ pub(crate) mod tests {
     /// hand-off, not just `detect_api_format` in isolation.
     #[tokio::test]
     async fn add_provider_detects_format_and_completes_save() {
-        use crate::tui::state::{
-            API_KEY_FIELD_IDX, BASE_URL_FIELD_IDX, NAME_FIELD_IDX, TEST_MODEL_FIELD_IDX,
-        };
+        use crate::tui::state::{API_KEY_FIELD_IDX, BASE_URL_FIELD_IDX, NAME_FIELD_IDX};
 
         let _guard = ConfigDirGuard::new();
         let mut app = app_with_current("first");
@@ -450,7 +450,6 @@ pub(crate) mod tests {
             form.fields[NAME_FIELD_IDX].value = "brand-new".to_string();
             form.fields[BASE_URL_FIELD_IDX].value = base_url;
             form.fields[API_KEY_FIELD_IDX].value = "sk-test".to_string();
-            form.fields[TEST_MODEL_FIELD_IDX].value = "probe-model".to_string();
         }
 
         app.save_form_and_close().unwrap();
@@ -485,9 +484,7 @@ pub(crate) mod tests {
     /// or inserting a provider nobody asked for anymore.
     #[tokio::test]
     async fn cancelling_add_discards_late_format_detection_result() {
-        use crate::tui::state::{
-            API_KEY_FIELD_IDX, BASE_URL_FIELD_IDX, NAME_FIELD_IDX, TEST_MODEL_FIELD_IDX,
-        };
+        use crate::tui::state::{API_KEY_FIELD_IDX, BASE_URL_FIELD_IDX, NAME_FIELD_IDX};
 
         let _guard = ConfigDirGuard::new();
         let mut app = app_with_current("first");
@@ -505,7 +502,6 @@ pub(crate) mod tests {
             form.fields[NAME_FIELD_IDX].value = "abandoned".to_string();
             form.fields[BASE_URL_FIELD_IDX].value = base_url;
             form.fields[API_KEY_FIELD_IDX].value = "sk-test".to_string();
-            form.fields[TEST_MODEL_FIELD_IDX].value = "probe-model".to_string();
         }
         app.save_form_and_close().unwrap();
         assert!(app.form.as_ref().is_some_and(|f| f.detect_token.is_some()));

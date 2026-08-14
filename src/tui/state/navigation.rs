@@ -71,7 +71,7 @@ impl App {
             pending_key: None,
             quota_status: std::collections::HashMap::new(),
             quota_form: None,
-            port_form: None,
+            quick_form: None,
             detail_line_count,
             sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler::new(),
             config_needs_sync: false,

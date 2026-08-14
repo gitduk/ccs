@@ -3,7 +3,7 @@ use crate::error::Result;
 
 use super::{
     API_KEY_FIELD_IDX, App, BASE_URL_FIELD_IDX, ConfirmAction, MessageKind, Mode, NAME_FIELD_IDX,
-    ProviderForm, TEST_MODEL_FIELD_IDX,
+    ProviderForm,
 };
 
 /// Parsed and validated fields extracted from a [`ProviderForm`].
@@ -14,7 +14,6 @@ struct ParsedProviderFields {
     name: String,
     base_url: String,
     api_key: String,
-    test_model: Option<String>,
     routes: Vec<RouteRule>,
     original_name: Option<String>,
 }
@@ -39,10 +38,6 @@ fn parse_provider_form(
         .trim_end_matches('/')
         .to_string();
     let api_key = form.fields[API_KEY_FIELD_IDX].value.trim().to_string();
-    let test_model = {
-        let v = form.fields[TEST_MODEL_FIELD_IDX].value.trim().to_string();
-        (!v.is_empty()).then_some(v)
-    };
     let original_name = form.original_name.clone();
 
     let routes: Vec<RouteRule> = form
@@ -66,7 +61,6 @@ fn parse_provider_form(
         name,
         base_url,
         api_key,
-        test_model,
         routes,
         original_name,
     })
@@ -170,7 +164,7 @@ impl App {
             inject_thinking_history,
             quota_command,
             port,
-            test_model: fields.test_model.clone(),
+            test_model: existing.and_then(|p| p.test_model.clone()),
         };
 
         if fields.is_new() {
@@ -190,21 +184,15 @@ impl App {
             let name = fields.name.clone();
             let base_url = fields.base_url.clone();
             let api_key = fields.api_key.clone();
-            let test_model = fields.test_model.clone();
             let routes = fields.routes.clone();
             tokio::spawn(async move {
                 let detected = match config::resolve_api_key_str(&api_key) {
-                    Ok(key) => crate::tester::detect_api_format(
-                        &client,
-                        &base_url,
-                        &key,
-                        test_model.as_deref(),
-                    )
-                    .await
-                    .ok_or_else(|| {
-                        "Could not detect API format — check Base URL / API Key, or fill in Test Model"
-                            .to_string()
-                    }),
+                    Ok(key) => crate::tester::detect_api_format(&client, &base_url, &key, None)
+                        .await
+                        .ok_or_else(|| {
+                            "Could not detect API format — check Base URL / API Key, or add the provider manually in the config file with a Test Model"
+                                .to_string()
+                        }),
                     Err(e) => Err(format!("API key resolution failed: {e}")),
                 };
                 let _ = tx.send(super::TestEvent::FormatDetected {
@@ -216,7 +204,6 @@ impl App {
                     port,
                     routes,
                     detected,
-                    test_model,
                 });
             });
 
@@ -591,7 +578,6 @@ impl App {
                     port,
                     routes,
                     detected,
-                    test_model,
                 } => {
                     let still_pending = self
                         .form
@@ -601,7 +587,6 @@ impl App {
                         // Add was cancelled or the form moved on; drop the result.
                         continue;
                     }
-                    let used_test_model = test_model.is_some();
                     match detected {
                         Ok(d) => {
                             let provider_id = uuid::Uuid::new_v4().to_string();
@@ -618,7 +603,7 @@ impl App {
                                 inject_thinking_history: true,
                                 quota_command: None,
                                 port,
-                                test_model,
+                                test_model: None,
                             };
                             let is_first = self.config.providers.is_empty();
                             self.config.providers.insert(name.clone(), provider);
@@ -643,26 +628,6 @@ impl App {
                                     self.form = None;
                                     self.mode = Mode::Normal;
                                     self.config_needs_sync = true;
-                                    // Test Model seeded detection with a single model — fetch the
-                                    // full catalog now, same as every other new-provider add does.
-                                    if used_test_model
-                                        && let Some(p) = self.config.providers.get(&name).cloned()
-                                    {
-                                        let tx = self.tests.tx.clone();
-                                        let client = self.tests.client.clone();
-                                        let name_owned = name.clone();
-                                        tokio::spawn(async move {
-                                            let models =
-                                                crate::tester::fetch_provider_models(&client, &p)
-                                                    .await;
-                                            if !models.is_empty() {
-                                                let _ = tx.send(super::TestEvent::ModelsOnly {
-                                                    provider: name_owned,
-                                                    models,
-                                                });
-                                            }
-                                        });
-                                    }
                                 }
                                 Err(e) => {
                                     self.config.providers.shift_remove(&name);

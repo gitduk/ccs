@@ -138,7 +138,8 @@ pub(super) fn handle_key(
             server::sync_proxy_config(app, server_handle);
         }
         KeyCode::Char('a') => app.add(),
-        KeyCode::Char('o') => super::port_panel::open(app),
+        KeyCode::Char('o') => super::quick_panel::open(app, super::state::QuickFormKind::Port),
+        KeyCode::Char('T') => super::quick_panel::open(app, super::state::QuickFormKind::TestModel),
         KeyCode::Enter | KeyCode::Char('e') => {
             if app.selected_name().is_some() {
                 app.start_edit();
@@ -674,7 +675,7 @@ mod tests {
             pending_key: None,
             quota_status: std::collections::HashMap::new(),
             quota_form: None,
-            port_form: None,
+            quick_form: None,
             detail_line_count: 0,
             sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler::new(),
             config_needs_sync: false,

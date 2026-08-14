@@ -6,12 +6,9 @@ use std::time::Duration;
 pub(super) const NAME_FIELD_IDX: usize = 0;
 pub(super) const BASE_URL_FIELD_IDX: usize = 1;
 pub(super) const API_KEY_FIELD_IDX: usize = 2;
-/// Pinned model for the Test/Retest action and (on add) format
-/// auto-detection, persisted as `Provider::test_model`.
-pub(super) const TEST_MODEL_FIELD_IDX: usize = 3;
-// Fallback (`f`/`F`) and port (`o`) are edited via main-table shortcuts, not
-// this form — `do_save_form` inherits both unchanged from `existing` (or
-// `false`/`None` for a new provider).
+// Fallback (`f`/`F`), port (`o`), and Test Model (`T`) are edited via
+// main-table shortcuts, not this form — `do_save_form` inherits them
+// unchanged from `existing` (or their defaults for a new provider).
 
 use ratatui::widgets::TableState;
 
@@ -50,8 +47,8 @@ pub enum Mode {
     Logs,
     /// Quota configuration editor for the selected provider.
     QuotaConfig,
-    /// Quick port-editing popup for the selected provider, opened with `o`.
-    PortInput,
+    /// Quick single-field popup (Port via `o`, Test Model via `T`).
+    QuickInput,
 }
 
 /// Vim-style sub-mode used inside the provider editor form.
@@ -130,11 +127,6 @@ pub(super) enum TestEvent {
         port: Option<u16>,
         routes: Vec<RouteRule>,
         detected: Result<crate::tester::DetectedFormat, String>,
-        /// Pinned Test/Retest model, persisted onto the new `Provider`. When
-        /// `Some`, detection used it instead of a full `/v1/models` fetch, so
-        /// `detected`'s model list is just that one entry and the full
-        /// catalog still needs fetching.
-        test_model: Option<String>,
     },
 }
 
@@ -243,8 +235,8 @@ pub struct App {
     pub quota_status: HashMap<String, QuotaStatus>,
     /// Quota configuration form for the selected provider.
     pub quota_form: Option<QuotaForm>,
-    /// Quick port-editing popup for the selected provider.
-    pub port_form: Option<PortForm>,
+    /// Quick single-field popup (Port / Test Model) for the selected provider.
+    pub quick_form: Option<QuickForm>,
     /// Line count from the last rendered detail panel, used to size the panel next frame.
     pub detail_line_count: u16,
     pub(super) sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler,
@@ -256,7 +248,7 @@ pub struct App {
 }
 
 /// Keyboard-navigable suggestion dropdown state shared by any text field
-/// offering model-name autocomplete (route Target, provider Test Model).
+/// offering model-name autocomplete (route Target).
 #[derive(Default)]
 pub struct SuggestState {
     /// True when keyboard navigation focus is inside the suggestion list.
@@ -328,8 +320,6 @@ pub struct ProviderForm {
     pub route_tgt_field: FormField,
     /// Suggestion dropdown for the route target field.
     pub route_suggest: SuggestState,
-    /// Suggestion dropdown for the Test Model field.
-    pub test_model_suggest: SuggestState,
 
     /// Pending first key of a two-key sequence (`dd`, `gg`, `yy`) inside the form.
     pub pending_key: Option<(char, std::time::Instant)>,
@@ -361,8 +351,16 @@ pub struct QuotaForm {
     pub preview_scroll: u16,
 }
 
-/// Quick port-editing popup, opened with `o` on the main provider table.
-pub struct PortForm {
+/// Which quick single-field popup is open (see `Mode::QuickInput`).
+#[derive(Clone, Copy, PartialEq)]
+pub enum QuickFormKind {
+    Port,
+    TestModel,
+}
+
+/// Quick single-field popup (Port / Test Model), opened from the provider table.
+pub struct QuickForm {
+    pub kind: QuickFormKind,
     /// Provider name being configured.
     pub provider_name: String,
     pub field: FormField,
@@ -371,12 +369,16 @@ pub struct PortForm {
     pub error: Option<String>,
 }
 
-impl PortForm {
-    pub(super) fn new(provider_name: &str, current_port: Option<u16>) -> Self {
-        let value = current_port.map(|p| p.to_string()).unwrap_or_default();
+impl QuickForm {
+    pub(super) fn new(kind: QuickFormKind, provider_name: &str, current: Option<&str>) -> Self {
+        let label = match kind {
+            QuickFormKind::Port => "Port",
+            QuickFormKind::TestModel => "Test Model",
+        };
         Self {
+            kind,
             provider_name: provider_name.to_string(),
-            field: FormField::text("Port", &value),
+            field: FormField::text(label, current.unwrap_or("")),
             pending_key: None,
             error: None,
         }
@@ -560,14 +562,9 @@ impl ProviderForm {
     /// resolved by auto-detection on save (see `TestEvent::FormatDetected`);
     /// for an existing one it's fixed and simply carried over unchanged.
     pub(super) fn new(name: &str, provider: Option<&Provider>) -> Self {
-        let (base_url, api_key, test_model, routes) = match provider {
-            Some(p) => (
-                p.base_url.as_str(),
-                p.api_key.as_str(),
-                p.test_model.as_deref().unwrap_or(""),
-                p.routes.clone(),
-            ),
-            None => ("", "", "", vec![]),
+        let (base_url, api_key, routes) = match provider {
+            Some(p) => (p.base_url.as_str(), p.api_key.as_str(), p.routes.clone()),
+            None => ("", "", vec![]),
         };
         Self {
             original_name: if name.is_empty() {
@@ -579,7 +576,6 @@ impl ProviderForm {
                 FormField::text("Name", name),
                 FormField::text("Base URL", base_url),
                 FormField::text("API Key", api_key),
-                FormField::text("Test Model", test_model),
             ],
             focused: 0,
             vim_mode: VimMode::Normal,
@@ -590,7 +586,6 @@ impl ProviderForm {
             route_edit_target: false,
             route_tgt_field: FormField::text("", ""),
             route_suggest: SuggestState::default(),
-            test_model_suggest: SuggestState::default(),
             pending_key: None,
             error: None,
             detect_token: None,
@@ -627,14 +622,14 @@ impl ProviderForm {
     }
 
     /// Move focus to the next editable slot.
-    /// Visual order: Name → Base URL → API Key → Test Model → Routes → (wrap)
+    /// Visual order: Name → Base URL → API Key → Routes → (wrap)
     pub fn focus_next(&mut self) {
         let routes_slot = self.fields.len(); // virtual index for Routes (past last regular field)
 
         let next = if self.focused == routes_slot {
             0 // Routes → Name (wrap)
         } else {
-            self.focused + 1 // sequential: Test Model → Routes naturally
+            self.focused + 1 // sequential: API Key → Routes naturally
         };
 
         self.focused = next;
@@ -645,14 +640,14 @@ impl ProviderForm {
     }
 
     /// Move focus to the previous editable slot.
-    /// Visual order (reverse): Routes → Test Model → API Key → Base URL → Name → (wrap)
+    /// Visual order (reverse): Routes → API Key → Base URL → Name → (wrap)
     pub fn focus_prev(&mut self) {
         let routes_slot = self.fields.len();
 
         let prev = if self.focused == 0 {
             routes_slot // Name → Routes (wrap)
         } else {
-            self.focused - 1 // sequential: Routes → Test Model → ...
+            self.focused - 1 // sequential: Routes → API Key → ...
         };
 
         self.focused = prev;
@@ -766,7 +761,7 @@ mod tests {
             pending_key: None,
             quota_status: std::collections::HashMap::new(),
             quota_form: None,
-            port_form: None,
+            quick_form: None,
             detail_line_count: 6,
             sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler::new(),
             config_needs_sync: false,

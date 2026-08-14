@@ -27,6 +27,7 @@ pub(super) fn draw_help(f: &mut Frame, _app: &App) {
                 ("f", "Toggle selected provider's fallback participation"),
                 ("F", "Toggle fallback mode (global)"),
                 ("o", "Set/clear selected provider's pinned port"),
+                ("T", "Set/clear selected provider's Test Model"),
                 ("r", "Reload config from disk"),
                 ("S", "Toggle background proxy"),
                 ("c", "Clear current provider usage data"),

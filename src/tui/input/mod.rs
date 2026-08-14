@@ -30,7 +30,7 @@ pub(super) fn handle_key(
         Mode::Editing => super::editor::handle_key(app, code, modifiers, server),
         Mode::Confirm => confirm::handle_confirm_key(app, code, server),
         Mode::QuotaConfig => super::quota_panel::handle_key(app, code, modifiers),
-        Mode::PortInput => super::port_panel::handle_key(app, code, modifiers, server),
+        Mode::QuickInput => super::quick_panel::handle_key(app, code, modifiers, server),
         Mode::Help => {
             app.mode = Mode::Normal;
             Ok(())
@@ -44,7 +44,7 @@ pub(super) fn handle_paste(app: &mut App, text: &str) -> crate::error::Result<()
     match &app.mode {
         Mode::QuotaConfig => super::quota_panel::handle_paste(app, text),
         Mode::Editing => super::editor::handle_paste(app, text),
-        Mode::PortInput => super::port_panel::handle_paste(app, text),
+        Mode::QuickInput => super::quick_panel::handle_paste(app, text),
         Mode::Models => {
             super::models::handle_paste(app, text);
             Ok(())

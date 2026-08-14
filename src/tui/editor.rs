@@ -15,8 +15,7 @@ use super::App;
 use super::ServerHandle;
 use super::server::sync_proxy_config;
 use super::state::{
-    FormField, MessageKind, Mode, NAME_FIELD_IDX, ProviderForm, TEST_MODEL_FIELD_IDX, VimMode,
-    filter_suggestions,
+    FormField, MessageKind, Mode, NAME_FIELD_IDX, ProviderForm, VimMode, filter_suggestions,
 };
 use super::theme::{self as t};
 use super::ui::format::mask_api_key_str;
@@ -45,9 +44,6 @@ pub(super) fn handle_paste(app: &mut App, text: &str) -> crate::error::Result<()
         }
     } else if let Some(field) = form.fields.get_mut(form.focused) {
         field.insert_str(text);
-        if form.focused == TEST_MODEL_FIELD_IDX {
-            form.test_model_suggest.reset();
-        }
     }
     Ok(())
 }
@@ -102,11 +98,7 @@ pub(super) fn handle_key(
                 form.reset_route_editing();
             }
         } else if form.vim_mode == VimMode::Insert {
-            if form.focused == TEST_MODEL_FIELD_IDX && form.test_model_suggest.active {
-                form.test_model_suggest.active = false;
-            } else {
-                form.vim_mode = VimMode::Normal;
-            }
+            form.vim_mode = VimMode::Normal;
         } else {
             close(app, server);
         }
@@ -182,52 +174,6 @@ pub(super) fn handle_key(
         return Ok(());
     }
 
-    if form.focused == TEST_MODEL_FIELD_IDX {
-        let provider_models: Vec<String> = app
-            .models
-            .provider_models
-            .get(form.prov_key())
-            .cloned()
-            .unwrap_or_default();
-
-        let suggest_len =
-            filter_suggestions(&provider_models, &form.fields[TEST_MODEL_FIELD_IDX].value).len();
-
-        match code {
-            KeyCode::Down => {
-                if nav_suggest_down(&mut form.test_model_suggest, suggest_len) {
-                    return Ok(());
-                }
-            }
-            KeyCode::Char('j') if ctrl => {
-                if nav_suggest_down(&mut form.test_model_suggest, suggest_len) {
-                    return Ok(());
-                }
-            }
-            KeyCode::Up => {
-                if nav_suggest_up(&mut form.test_model_suggest) {
-                    return Ok(());
-                }
-            }
-            KeyCode::Char('k') if ctrl => {
-                if nav_suggest_up(&mut form.test_model_suggest) {
-                    return Ok(());
-                }
-            }
-            KeyCode::Enter if form.test_model_suggest.active => {
-                let filter = form.fields[TEST_MODEL_FIELD_IDX].value.clone();
-                let suggestions = filter_suggestions(&provider_models, &filter);
-                if let Some(&model) = suggestions.get(form.test_model_suggest.idx) {
-                    form.fields[TEST_MODEL_FIELD_IDX] = FormField::text("Test Model", model);
-                }
-                form.test_model_suggest.reset();
-                form.vim_mode = VimMode::Normal;
-                return Ok(());
-            }
-            _ => {}
-        }
-    }
-
     match code {
         KeyCode::Enter => {
             form.vim_mode = VimMode::Normal;
@@ -260,22 +206,15 @@ pub(super) fn handle_key(
         _ => {}
     }
 
-    match super::input::insert::handle_field_insert_key(
-        &mut form.fields[form.focused],
-        code,
-        ctrl,
-        &mut form.pending_key,
-    ) {
-        super::input::insert::InsertKeyResult::ExitInsert => {
-            form.vim_mode = VimMode::Normal;
-        }
-        super::input::insert::InsertKeyResult::TextChanged => {
-            if form.focused == TEST_MODEL_FIELD_IDX {
-                form.test_model_suggest.reset();
-            }
-        }
-        super::input::insert::InsertKeyResult::Consumed
-        | super::input::insert::InsertKeyResult::NotHandled => {}
+    if let super::input::insert::InsertKeyResult::ExitInsert =
+        super::input::insert::handle_field_insert_key(
+            &mut form.fields[form.focused],
+            code,
+            ctrl,
+            &mut form.pending_key,
+        )
+    {
+        form.vim_mode = VimMode::Normal;
     }
     Ok(())
 }
@@ -301,11 +240,7 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
         vim_tag
     );
 
-    let test_model_suggest_items = test_model_suggest_panel_height(form, app);
-    let mut field_heights: Vec<u16> = vec![2; form.fields.len()];
-    if test_model_suggest_items > 0 {
-        field_heights[TEST_MODEL_FIELD_IDX] = 2 + 1 + test_model_suggest_items;
-    }
+    let field_heights: Vec<u16> = vec![2; form.fields.len()];
     let fields_total: u16 = field_heights.iter().sum();
     let routes_items = form.routes.len().max(1) as u16;
     let suggest_section = if suggest_items > 0 {
@@ -380,16 +315,7 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
             ])
         };
 
-        let mut field_lines = vec![value_display];
-        if ci == TEST_MODEL_FIELD_IDX {
-            let suggestions = get_test_model_suggestions(form, app);
-            field_lines.extend(render_suggestion_lines(
-                &suggestions,
-                &form.test_model_suggest,
-                prov_color,
-            ));
-        }
-        f.render_widget(Paragraph::new(field_lines), chunks[ci]);
+        f.render_widget(Paragraph::new(vec![value_display]), chunks[ci]);
     }
 
     let routes_chunk = chunks[form.fields.len()];
@@ -778,25 +704,6 @@ fn get_route_suggestions<'a>(form: &ProviderForm, app: &'a App) -> Vec<&'a str> 
 
 fn route_suggest_panel_height(form: &ProviderForm, app: &App) -> u16 {
     get_route_suggestions(form, app).len().min(8) as u16
-}
-
-/// Mirrors the route Target field's autocomplete, but for Test Model.
-fn get_test_model_suggestions<'a>(form: &ProviderForm, app: &'a App) -> Vec<&'a str> {
-    if form.focused == TEST_MODEL_FIELD_IDX && form.vim_mode == VimMode::Insert {
-        let models = app
-            .models
-            .provider_models
-            .get(form.prov_key())
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
-        filter_suggestions(models, &form.fields[TEST_MODEL_FIELD_IDX].value)
-    } else {
-        vec![]
-    }
-}
-
-fn test_model_suggest_panel_height(form: &ProviderForm, app: &App) -> u16 {
-    get_test_model_suggestions(form, app).len().min(8) as u16
 }
 
 fn draw_routes_section(
