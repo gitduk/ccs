@@ -6,10 +6,12 @@ on:
       - master
     paths:
       - Cargo.toml
+    tags: ["v*"]
   workflow_dispatch:
 
 jobs:
   tag:
+    if: github.ref_type == 'branch'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -37,7 +39,7 @@ jobs:
 
   build:
     needs: tag
-    if: needs.tag.outputs.created == 'true'
+    if: github.ref_type == 'tag' || needs.tag.outputs.created == 'true'
     name: Build ${{ matrix.artifact }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -85,7 +87,7 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.tag.outputs.version }}
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || needs.tag.outputs.version }}
           generate_release_notes: true
           files: |
             ccs-linux-x86_64
