@@ -36,6 +36,12 @@ impl App {
 
         let detail_line_count = crate::tui::ui::format::DETAIL_HEIGHT;
 
+        // Restore the last test results; drop entries whose provider no longer
+        // exists in config (deleted externally while ccs wasn't running).
+        let mut tests = super::TestState::new();
+        tests.results = crate::test_store::load();
+        tests.results.retain(|name, _| config.providers.contains_key(name));
+
         Ok(Self {
             config,
             mode: super::Mode::Normal,
@@ -47,7 +53,7 @@ impl App {
             should_quit: false,
             server_status: super::ServerStatus::Stopped,
             metrics,
-            tests: super::TestState::new(),
+            tests,
             db,
             bg_proxy_pid,
             models: ModelsState {

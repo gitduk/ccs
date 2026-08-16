@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -413,14 +413,12 @@ pub fn load_config() -> Result<AppConfig> {
     Ok(config)
 }
 
-/// Save config to file atomically (write to temp file, then rename).
-pub fn save_config(config: &AppConfig) -> Result<()> {
-    config.validate_ports()?;
-    let path = config_path()?;
+/// Write a file atomically: write to a `.tmp` sibling with 0600 permissions,
+/// fsync, then rename over the target — a crash never leaves a partial file.
+pub(crate) fn write_file_atomic(path: &Path, content: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let content = serde_json::to_string_pretty(config)?;
     let tmp_path = path.with_extension("json.tmp");
     #[cfg(unix)]
     {
@@ -437,8 +435,16 @@ pub fn save_config(config: &AppConfig) -> Result<()> {
     }
     #[cfg(not(unix))]
     std::fs::write(&tmp_path, &content)?;
-    std::fs::rename(&tmp_path, &path)?;
+    std::fs::rename(&tmp_path, path)?;
     Ok(())
+}
+
+/// Save config to file atomically (write to temp file, then rename).
+pub fn save_config(config: &AppConfig) -> Result<()> {
+    config.validate_ports()?;
+    let path = config_path()?;
+    let content = serde_json::to_string_pretty(config)?;
+    write_file_atomic(&path, &content)
 }
 
 fn default_config() -> AppConfig {

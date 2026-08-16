@@ -117,19 +117,20 @@ pub async fn detect_api_format(
     None
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum TestStatus {
     Ok,
     AuthFailed,
     Error(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TestResult {
     pub status: TestStatus,
     pub latency_ms: u64,
     pub model_count: Option<usize>,
     pub model_names: Option<Vec<String>>,
+    #[serde(skip, default = "Instant::now")]
     pub tested_at: Instant,
     /// The model name used for the connectivity test.
     pub used_model: String,

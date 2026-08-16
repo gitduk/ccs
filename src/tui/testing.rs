@@ -207,12 +207,6 @@ pub(super) fn test_provider_after_add(app: &mut App, name: &str) {
     });
 }
 
-pub(super) fn start_background_tests(app: &mut App) {
-    let name = app.config.current.clone();
-    test_provider_by_name(app, &name);
-    start_quota_queries(app);
-}
-
 /// Run quota commands for all providers that have one configured.
 pub(super) fn start_quota_queries(app: &mut App) {
     let jobs: Vec<(String, String)> = app
@@ -369,17 +363,6 @@ pub(crate) mod tests {
             .build()
             .unwrap();
         app
-    }
-
-    #[tokio::test]
-    async fn startup_tests_only_current_provider() {
-        let _guard = ConfigDirGuard::new();
-        let mut app = app_with_current("second");
-
-        start_background_tests(&mut app);
-
-        assert!(app.tests.pending.contains("second"));
-        assert!(!app.tests.pending.contains("first"));
     }
 
     /// A pinned Test Model must win over the normal best-model auto-pick,

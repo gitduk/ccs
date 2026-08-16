@@ -16,9 +16,10 @@ use super::ServerHandle;
 use super::server::sync_proxy_config;
 use super::state::{
     FormField, MessageKind, Mode, NAME_FIELD_IDX, ProviderForm, VimMode, filter_suggestions,
+    provider_model_suggestions,
 };
 use super::theme::{self as t};
-use super::ui::format::mask_api_key_str;
+use super::ui::format::{SuggestionStyle, mask_api_key_str, render_suggestion_lines};
 use super::ui::layout::centered_fixed;
 
 pub(super) fn handle_paste(app: &mut App, text: &str) -> crate::error::Result<()> {
@@ -685,18 +686,12 @@ fn handle_routes_key(
 
 fn get_route_suggestions<'a>(form: &ProviderForm, app: &'a App) -> Vec<&'a str> {
     if form.route_editing && form.route_edit_target && form.in_routes() {
-        let models = app
-            .models
-            .provider_models
-            .get(form.prov_key())
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
         let tgt_filter = form
             .routes
             .get(form.route_cursor)
             .map(|r| r.target.as_str())
             .unwrap_or("");
-        filter_suggestions(models, tgt_filter)
+        provider_model_suggestions(&app.models.provider_models, form.prov_key(), tgt_filter)
     } else {
         vec![]
     }
@@ -820,57 +815,9 @@ fn draw_routes_section(
         &suggestions,
         &form.route_suggest,
         prov_color,
+        SuggestionStyle::Classic,
     ));
 
     lines.push(Line::from(""));
     f.render_widget(Paragraph::new(lines), area);
-}
-
-/// Empty list → empty Vec, so callers can unconditionally `extend`.
-fn render_suggestion_lines(
-    suggestions: &[&str],
-    suggest: &super::state::SuggestState,
-    prov_color: Color,
-) -> Vec<Line<'static>> {
-    if suggestions.is_empty() {
-        return vec![];
-    }
-
-    let mut lines = Vec::new();
-    let scroll = suggest.scroll;
-    let total = suggestions.len();
-    let window = &suggestions[scroll..total.min(scroll + 8)];
-
-    let scroll_hint = if total > 8 {
-        format!(
-            "  ── Suggestions ({}/{}) ─────────────────",
-            scroll + window.len(),
-            total
-        )
-    } else {
-        "  ── Suggestions ────────────────────────".to_string()
-    };
-    lines.push(Line::from(Span::styled(
-        scroll_hint,
-        Style::default().fg(t::MUTED),
-    )));
-    for (wi, model) in window.iter().enumerate() {
-        let global_idx = scroll + wi;
-        let is_hi = suggest.active && global_idx == suggest.idx;
-        if is_hi {
-            lines.push(Line::from(vec![
-                Span::styled("  ▶ ", Style::default().fg(prov_color)),
-                Span::styled(
-                    model.to_string(),
-                    Style::default().fg(prov_color).add_modifier(Modifier::BOLD),
-                ),
-            ]));
-        } else {
-            lines.push(Line::from(vec![
-                Span::styled("    ", Style::default()),
-                Span::styled(model.to_string(), Style::default().fg(t::MUTED)),
-            ]));
-        }
-    }
-    lines
 }

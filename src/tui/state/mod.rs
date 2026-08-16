@@ -27,7 +27,7 @@ mod metrics_sync;
 mod navigation;
 
 pub use bg_proxy::{is_process_alive, send_sighup};
-pub use filter::filter_suggestions;
+pub use filter::{filter_suggestions, provider_model_suggestions};
 
 /// Snapshot of DB-backed metrics loaded off the hot path for non-blocking TUI redraws.
 pub(crate) struct MetricsSnapshot {
@@ -367,6 +367,8 @@ pub struct QuickForm {
     /// Pending first key of a two-key sequence (`jk` escape).
     pub pending_key: Option<(char, std::time::Instant)>,
     pub error: Option<String>,
+    /// Model-name suggestion navigation state (Test Model form only).
+    pub suggest: SuggestState,
 }
 
 impl QuickForm {
@@ -381,6 +383,7 @@ impl QuickForm {
             field: FormField::text(label, current.unwrap_or("")),
             pending_key: None,
             error: None,
+            suggest: SuggestState::default(),
         }
     }
 }
@@ -830,5 +833,60 @@ mod tests {
         app.set_message("fresh", super::MessageKind::Info);
         assert!(!app.tick_message());
         assert!(app.message.is_some());
+    }
+
+    /// A completed test must survive a restart: `drain_test_results` persists
+    /// the result to the ccs.json store, and `App::new` restores it.
+    #[tokio::test]
+    async fn completed_test_event_persists_across_restart() {
+        let _guard = ConfigDirGuard::new();
+        // Pre-populate config so the restored App knows the provider and the
+        // startup retain-filter keeps its result.
+        let mut cfg = crate::config::load_config().unwrap();
+        cfg.providers.insert(
+            "vllm".to_string(),
+            Provider {
+                id: "vllm-id".into(),
+                base_url: "http://127.0.0.1:1".into(),
+                api_key: "test-key".into(),
+                api_format: ApiFormat::OpenAI,
+                model_map: Default::default(),
+                routes: vec![],
+                enabled: true,
+                fallback: true,
+                api_version: None,
+                inject_thinking_history: true,
+                quota_command: None,
+                port: None,
+                test_model: None,
+            },
+        );
+        crate::config::save_config(&cfg).unwrap();
+
+        let mut app = App::new().unwrap();
+        app.tests
+            .tx
+            .send(TestEvent::Completed {
+                provider: "vllm".into(),
+                result: TestResult {
+                    status: TestStatus::Ok,
+                    latency_ms: 55,
+                    model_count: Some(1),
+                    model_names: Some(vec!["gemma-4-31b-it".into()]),
+                    tested_at: Instant::now(),
+                    used_model: "gemma-4-31b-it".into(),
+                    tools_supported: Some(true),
+                    images_supported: None,
+                },
+            })
+            .unwrap();
+        assert!(app.drain_test_results());
+
+        // Simulate a restart: a fresh App must restore the persisted result.
+        let restored = App::new().unwrap();
+        let r = restored.tests.results.get("vllm").expect("restored result");
+        assert_eq!(r.latency_ms, 55);
+        assert_eq!(r.used_model, "gemma-4-31b-it");
+        assert_eq!(r.tools_supported, Some(true));
     }
 }

@@ -1,7 +1,8 @@
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Span;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Cell;
 
+use super::super::state::SuggestState;
 use super::super::theme::{self as t};
 
 /// Split `text` at `cursor` into three spans — text before, the
@@ -21,6 +22,82 @@ pub(crate) fn cursor_split_spans(text: &str, cursor: usize, color: Color) -> Vec
         ),
         Span::raw(after),
     ]
+}
+
+/// Suggestion list presentation.
+pub(crate) enum SuggestionStyle {
+    /// Routes target: titled list with (n/m) counter, indented, ▶ highlight.
+    Classic,
+    /// Quick form: bare entries aligned with the input, inverted highlight.
+    Compact,
+}
+
+/// Render a model-suggestion list (8-row window).
+/// Empty list → empty Vec, so callers can unconditionally `extend`.
+pub(crate) fn render_suggestion_lines(
+    suggestions: &[&str],
+    suggest: &SuggestState,
+    prov_color: Color,
+    style: SuggestionStyle,
+) -> Vec<Line<'static>> {
+    if suggestions.is_empty() {
+        return vec![];
+    }
+
+    let mut lines = Vec::new();
+    let scroll = suggest.scroll;
+    let total = suggestions.len();
+    let window = &suggestions[scroll..total.min(scroll + 8)];
+
+    if matches!(style, SuggestionStyle::Classic) {
+        let scroll_hint = if total > 8 {
+            format!(
+                "  ── Suggestions ({}/{}) ─────────────────",
+                scroll + window.len(),
+                total
+            )
+        } else {
+            "  ── Suggestions ────────────────────────".to_string()
+        };
+        lines.push(Line::from(Span::styled(
+            scroll_hint,
+            Style::default().fg(t::MUTED),
+        )));
+    }
+
+    for (wi, model) in window.iter().enumerate() {
+        let is_hi = suggest.active && scroll + wi == suggest.idx;
+        let span = match style {
+            SuggestionStyle::Compact => {
+                if is_hi {
+                    // Bare entry with inverted background keeps the column
+                    // alignment with the field text in both states.
+                    Span::styled(
+                        model.to_string(),
+                        Style::default()
+                            .fg(prov_color)
+                            .add_modifier(Modifier::REVERSED),
+                    )
+                } else {
+                    Span::styled(model.to_string(), Style::default().fg(t::MUTED))
+                }
+            }
+            SuggestionStyle::Classic => {
+                if is_hi {
+                    Span::styled(
+                        format!("  ▶ {model}"),
+                        Style::default()
+                            .fg(prov_color)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    Span::styled(format!("    {model}"), Style::default().fg(t::MUTED))
+                }
+            }
+        };
+        lines.push(Line::from(span));
+    }
+    lines
 }
 
 /// Truncate a string to `max` display columns (wide chars count as 2),

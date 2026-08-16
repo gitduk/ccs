@@ -6,4 +6,5 @@ pub mod metrics;
 pub mod proxy;
 pub mod repo;
 pub mod tester;
+pub(crate) mod test_store;
 pub mod tui;

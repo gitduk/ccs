@@ -237,6 +237,7 @@ impl App {
             if let Some(result) = self.tests.results.remove(old_name) {
                 self.tests.results.insert(fields.name.clone(), result);
             }
+            crate::test_store::save(&self.tests.results);
             if self.tests.pending.remove(old_name) {
                 self.tests.pending.insert(fields.name.clone());
             }
@@ -361,6 +362,7 @@ impl App {
         }
         self.models.provider_models.remove(name);
         self.tests.results.remove(name);
+        crate::test_store::save(&self.tests.results);
         self.tests.pending.remove(name);
         self.tests.testing_model.remove(name);
         if self.config.current == name {
@@ -521,7 +523,8 @@ impl App {
                     if !failed && let Ok(mut m) = self.metrics.lock() {
                         m.clear_error(&name);
                     }
-                    self.tests.results.insert(name, result);
+                    self.tests.results.insert(name.clone(), result);
+                    crate::test_store::save(&self.tests.results);
                 }
                 TestEvent::ModelsOnly {
                     provider: name,
