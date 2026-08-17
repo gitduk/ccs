@@ -86,9 +86,7 @@ pub(crate) fn render_suggestion_lines(
                 if is_hi {
                     Span::styled(
                         format!("  ▶ {model}"),
-                        Style::default()
-                            .fg(prov_color)
-                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(prov_color).add_modifier(Modifier::BOLD),
                     )
                 } else {
                     Span::styled(format!("    {model}"), Style::default().fg(t::MUTED))

@@ -40,7 +40,9 @@ impl App {
         // exists in config (deleted externally while ccs wasn't running).
         let mut tests = super::TestState::new();
         tests.results = crate::test_store::load();
-        tests.results.retain(|name, _| config.providers.contains_key(name));
+        tests
+            .results
+            .retain(|name, _| config.providers.contains_key(name));
 
         Ok(Self {
             config,

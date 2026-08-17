@@ -2128,7 +2128,10 @@ mod tests {
         let msgs = up2["messages"].as_array().unwrap();
         let a_idx = msgs.iter().position(|m| m["role"] == "assistant").unwrap();
         let t_idx = msgs.iter().position(|m| m["role"] == "tool").unwrap();
-        assert!(t_idx > a_idx, "tool message must come after assistant tool_calls");
+        assert!(
+            t_idx > a_idx,
+            "tool message must come after assistant tool_calls"
+        );
     }
 
     #[test]
@@ -2319,12 +2322,18 @@ mod tests {
             .expect("no function_call_output item");
         assert_eq!(fc["call_id"], delivered_id);
         assert_eq!(fco["call_id"], delivered_id);
-        let fc_idx = input.iter().position(|i| i["type"] == "function_call").unwrap();
+        let fc_idx = input
+            .iter()
+            .position(|i| i["type"] == "function_call")
+            .unwrap();
         let fco_idx = input
             .iter()
             .position(|i| i["type"] == "function_call_output")
             .unwrap();
-        assert!(fco_idx > fc_idx, "function_call_output must follow function_call");
+        assert!(
+            fco_idx > fc_idx,
+            "function_call_output must follow function_call"
+        );
         // reasoning must precede function_call, never sit between a call and its output
         if let Some(r_idx) = input.iter().position(|i| i["type"] == "reasoning") {
             assert!(

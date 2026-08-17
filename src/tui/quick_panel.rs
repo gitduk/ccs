@@ -67,7 +67,11 @@ pub(super) fn handle_key(
             .as_ref()
             .is_some_and(|f| f.kind == QuickFormKind::TestModel && f.suggest.active)
         {
-            app.quick_form.as_mut().expect("checked above").suggest.reset();
+            app.quick_form
+                .as_mut()
+                .expect("checked above")
+                .suggest
+                .reset();
         } else {
             app.quick_form = None;
             app.mode = Mode::Normal;
@@ -434,10 +438,7 @@ mod tests {
         open(&mut app, QuickFormKind::TestModel);
 
         assert_eq!(app.mode, Mode::QuickInput);
-        assert_eq!(
-            app.quick_form.unwrap().field.value,
-            "gemma-4-31b-it"
-        );
+        assert_eq!(app.quick_form.unwrap().field.value, "gemma-4-31b-it");
     }
 
     #[test]
@@ -551,7 +552,13 @@ mod tests {
         handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut server).unwrap();
         assert!(app.quick_form.as_ref().unwrap().suggest.active);
 
-        handle_key(&mut app, KeyCode::Char('x'), KeyModifiers::NONE, &mut server).unwrap();
+        handle_key(
+            &mut app,
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+            &mut server,
+        )
+        .unwrap();
         assert!(!app.quick_form.as_ref().unwrap().suggest.active);
     }
 
@@ -582,19 +589,16 @@ mod tests {
     fn test_model_hides_single_duplicate_suggestion() {
         let _guard = ConfigDirGuard::new();
         let mut app = app_with_current("first");
-        app.models.provider_models.insert(
-            "first".to_string(),
-            vec!["deepseek-v4-flash".to_string()],
-        );
+        app.models
+            .provider_models
+            .insert("first".to_string(), vec!["deepseek-v4-flash".to_string()]);
         open(&mut app, QuickFormKind::TestModel);
         app.quick_form.as_mut().unwrap().field.value = "deepseek-v4-flash".to_string();
         app.quick_form.as_mut().unwrap().field.cursor = 17;
 
         let backend = TestBackend::new(60, 30);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| draw_popup(f, &app))
-            .unwrap();
+        terminal.draw(|f| draw_popup(f, &app)).unwrap();
 
         let buffer = terminal.backend().buffer();
         let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
@@ -607,19 +611,16 @@ mod tests {
     fn test_model_shows_suggestion_when_it_differs_from_input() {
         let _guard = ConfigDirGuard::new();
         let mut app = app_with_current("first");
-        app.models.provider_models.insert(
-            "first".to_string(),
-            vec!["deepseek-v4-flash".to_string()],
-        );
+        app.models
+            .provider_models
+            .insert("first".to_string(), vec!["deepseek-v4-flash".to_string()]);
         open(&mut app, QuickFormKind::TestModel);
         app.quick_form.as_mut().unwrap().field.value = "deepseek".to_string();
         app.quick_form.as_mut().unwrap().field.cursor = 7;
 
         let backend = TestBackend::new(60, 30);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| draw_popup(f, &app))
-            .unwrap();
+        terminal.draw(|f| draw_popup(f, &app)).unwrap();
 
         let buffer = terminal.backend().buffer();
         let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
@@ -635,7 +636,10 @@ mod tests {
         let mut app = app_with_current("first");
         app.models.provider_models.insert(
             "first".to_string(),
-            vec!["deepseek-v4-flash".to_string(), "deepseek-v4-pro".to_string()],
+            vec![
+                "deepseek-v4-flash".to_string(),
+                "deepseek-v4-pro".to_string(),
+            ],
         );
         open(&mut app, QuickFormKind::TestModel);
         app.quick_form.as_mut().unwrap().field.value = "x".to_string();
@@ -643,9 +647,7 @@ mod tests {
 
         let backend = TestBackend::new(60, 30);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| draw_popup(f, &app))
-            .unwrap();
+        terminal.draw(|f| draw_popup(f, &app)).unwrap();
 
         let buffer = terminal.backend().buffer();
         let content = buffer.content();
