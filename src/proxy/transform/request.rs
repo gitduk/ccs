@@ -76,6 +76,10 @@ pub fn to_openai(req: &Value, provider: &Provider, api_version: OpenAiApiVersion
         }
     }
 
+    if !is_responses && provider.inject_thinking_history {
+        inject_missing_reasoning_content(&mut converted_msgs);
+    }
+
     let is_stream = req.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
 
     // Responses API uses "input"; Chat Completions uses "messages"
@@ -1202,6 +1206,25 @@ pub fn patch_thinking_history(req: &Value) -> Option<Value> {
     Some(patched)
 }
 
+/// DeepSeek-family upstreams reject assistant `tool_calls` carrying no
+/// `reasoning_content`; an empty string satisfies the check.
+fn inject_missing_reasoning_content(msgs: &mut [Value]) {
+    for msg in msgs {
+        if msg.get("role").and_then(|r| r.as_str()) != Some("assistant")
+            || msg.get("reasoning_content").is_some()
+        {
+            continue;
+        }
+        let has_tool_calls = msg
+            .get("tool_calls")
+            .and_then(|t| t.as_array())
+            .is_some_and(|calls| !calls.is_empty());
+        if has_tool_calls {
+            msg["reasoning_content"] = json!("");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -2208,6 +2231,94 @@ mod tests {
         let content = patched["messages"][1]["content"].as_array().unwrap();
         assert_eq!(content[0]["signature"], "sig-a");
         assert!(content[1].get("signature").is_none());
+    }
+
+    // ─── inject_missing_reasoning_content ────────────────────────────────────
+
+    fn tool_loop_request() -> Value {
+        json!({
+            "model": "m",
+            "messages": [
+                {"role": "user", "content": "what time is it?"},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "Let me check."},
+                    {"type": "tool_use", "id": "call_1", "name": "get_time", "input": {"tz": "UTC"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "call_1", "content": "12:00"}
+                ]}
+            ]
+        })
+    }
+
+    #[test]
+    fn chat_tool_call_without_thinking_gets_empty_reasoning_content() {
+        let out = to_openai(
+            &tool_loop_request(),
+            &provider_chat_completions(),
+            OpenAiApiVersion::ChatCompletions,
+        )
+        .unwrap();
+        let assistant = &out["messages"][1];
+        assert_eq!(assistant["role"], "assistant");
+        assert_eq!(assistant["reasoning_content"], "");
+    }
+
+    #[test]
+    fn chat_tool_call_keeps_existing_reasoning_content() {
+        let mut req = tool_loop_request();
+        req["messages"][1]["content"][0] = json!({"type": "thinking", "thinking": "hmm"});
+        let out = to_openai(
+            &req,
+            &provider_chat_completions(),
+            OpenAiApiVersion::ChatCompletions,
+        )
+        .unwrap();
+        assert_eq!(out["messages"][1]["reasoning_content"], "hmm");
+    }
+
+    #[test]
+    fn chat_text_only_assistant_gets_no_reasoning_content() {
+        let req = json!({
+            "model": "m",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+                {"role": "user", "content": "again"}
+            ]
+        });
+        let out = to_openai(
+            &req,
+            &provider_chat_completions(),
+            OpenAiApiVersion::ChatCompletions,
+        )
+        .unwrap();
+        assert!(out["messages"][2].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn chat_injection_skipped_when_thinking_history_disabled() {
+        let mut provider = provider_chat_completions();
+        provider.inject_thinking_history = false;
+        let out = to_openai(
+            &tool_loop_request(),
+            &provider,
+            OpenAiApiVersion::ChatCompletions,
+        )
+        .unwrap();
+        assert!(out["messages"][1].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn responses_tool_call_gets_no_reasoning_content() {
+        let out = to_openai(
+            &tool_loop_request(),
+            &provider_responses(),
+            OpenAiApiVersion::Responses,
+        )
+        .unwrap();
+        let items = out["input"].as_array().unwrap();
+        assert!(items.iter().all(|i| i.get("reasoning_content").is_none()));
     }
 
     #[test]
