@@ -209,20 +209,16 @@ pub(super) fn test_provider_after_add(app: &mut App, name: &str) {
 
 /// Run quota commands for all providers that have one configured.
 pub(super) fn start_quota_queries(app: &mut App) {
-    let jobs: Vec<(String, String)> = app
+    let names: Vec<String> = app
         .config
         .providers
-        .values()
-        .filter_map(|provider| {
-            provider
-                .quota_command
-                .as_ref()
-                .map(|command| (provider.id.clone(), command.clone()))
-        })
+        .iter()
+        .filter(|(_, provider)| provider.quota_command.is_some())
+        .map(|(name, _)| name.clone())
         .collect();
 
-    for (provider_id, command) in jobs {
-        start_quota_query(app, provider_id, command);
+    for name in names {
+        run_quota_for_name(app, &name);
     }
 }
 
@@ -233,11 +229,20 @@ pub(super) fn run_quota_for_name(app: &mut App, name: &str) {
     let Some(command) = &provider.quota_command else {
         return;
     };
+    let command = command.clone();
+    let provider_id = provider.id.clone();
+    let env = super::quota_command::provider_env(name, provider);
 
-    start_quota_query(app, provider.id.clone(), command.clone());
+    start_quota_query(app, provider_id, command, env);
 }
 
-fn start_quota_query(app: &mut App, provider_id: String, command: String) {
+/// `pub(super)`: the quota panel's manual preview dispatches through this too.
+pub(super) fn start_quota_query(
+    app: &mut App,
+    provider_id: String,
+    command: String,
+    env: Result<super::quota_command::ProviderEnv, String>,
+) {
     use super::state::QuotaStatus;
 
     let tx = app.tests.tx.clone();
@@ -246,7 +251,10 @@ fn start_quota_query(app: &mut App, provider_id: String, command: String) {
         .insert(provider_id.clone(), QuotaStatus::Running);
 
     tokio::spawn(async move {
-        let result = super::quota_command::run(&command).await;
+        let result = match env {
+            Ok(env) => super::quota_command::run(&command, &env).await,
+            Err(e) => Err(e),
+        };
         let _ = tx.send(TestEvent::QuotaCompleted {
             provider_id,
             result,

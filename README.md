@@ -196,7 +196,7 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
 - `f` - Toggle provider fallback participation
 - `F` - Toggle global fallback mode
 - `t` - Test connectivity
-- `u` - Configure quota for selected provider
+- `u` - Configure quota for selected provider. The command runs in `sh` with `$_API_KEY`, `$_BASE_URL` and `$_PROVIDER` exported, so the key never has to be written into the command in plaintext
 - `yy` - Duplicate selected provider
 - `yc` - Copy provider config to clipboard
 

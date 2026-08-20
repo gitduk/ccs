@@ -116,6 +116,18 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
         curl_inner,
     );
 
+    let mut vars = vec![Span::styled("Vars: ", Style::default().fg(t::MUTED))];
+    for (i, name) in super::quota_command::ENV_VARS.iter().enumerate() {
+        if i > 0 {
+            vars.push(Span::raw("  "));
+        }
+        vars.push(Span::styled(
+            format!("${name}"),
+            Style::default().fg(t::PRIMARY),
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(vars)), chunks[2]);
+
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "Response Preview",
@@ -262,12 +274,6 @@ fn run_preview(app: &mut App) {
         .as_ref()
         .map(|f| f.curl_field.value.trim().to_string())
         .unwrap_or_default();
-    let provider_id = app
-        .quota_form
-        .as_ref()
-        .and_then(|f| app.config.providers.get(&f.provider_name))
-        .map(|p| p.id.clone());
-
     if command.is_empty() {
         if let Some(form) = app.quota_form.as_mut() {
             form.error = Some("Command cannot be empty".to_string());
@@ -275,26 +281,22 @@ fn run_preview(app: &mut App) {
         return;
     }
 
+    let provider = app.quota_form.as_ref().and_then(|f| {
+        let p = app.config.providers.get(&f.provider_name)?;
+        Some((
+            p.id.clone(),
+            super::quota_command::provider_env(&f.provider_name, p),
+        ))
+    });
+
     if let Some(form) = app.quota_form.as_mut() {
         form.preview_loading = true;
         form.preview = None;
         form.error = None;
         form.preview_scroll = 0;
     }
-    if let Some(provider_id) = provider_id.as_ref() {
-        app.quota_status
-            .insert(provider_id.clone(), super::state::QuotaStatus::Running);
-    }
-
-    if let Some(provider_id) = provider_id {
-        let tx = app.tests.tx.clone();
-        tokio::spawn(async move {
-            let result = super::quota_command::run(&command).await;
-            let _ = tx.send(super::state::TestEvent::QuotaCompleted {
-                provider_id,
-                result,
-            });
-        });
+    if let Some((provider_id, env)) = provider {
+        super::testing::start_quota_query(app, provider_id, command, env);
     }
 }
 
@@ -352,5 +354,31 @@ fn preview_line_count(form: &super::state::QuotaForm) -> usize {
         preview.lines().count().max(1)
     } else {
         1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::test_support::ConfigDirGuard;
+    use crate::tui::state::QuotaForm;
+    use crate::tui::testing::tests::app_with_current;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn popup_advertises_every_exported_env_var() {
+        let _guard = ConfigDirGuard::new();
+        let mut app = app_with_current("first");
+        app.quota_form = Some(QuotaForm::new("first", Some("echo hi")));
+
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw_popup(f, &app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
+        for name in super::super::quota_command::ENV_VARS {
+            assert!(text.contains(&format!("${name}")), "hint missing {name}");
+        }
     }
 }
