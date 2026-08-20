@@ -23,7 +23,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     match &app.mode {
         Mode::Editing => super::editor::draw_popup(f, app),
         Mode::Confirm => dialogs::draw_confirm(f, app),
-        Mode::Help => dialogs::draw_help(f, app),
+        Mode::Help => dialogs::draw_help(f, &mut app.help_scroll),
         Mode::Models => super::models::draw_popup(f, app),
         Mode::Logs => super::logs::draw_popup(f, app),
         Mode::QuotaConfig => super::quota_panel::draw_popup(f, app),

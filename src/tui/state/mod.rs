@@ -239,6 +239,8 @@ pub struct App {
     pub quick_form: Option<QuickForm>,
     /// Line count from the last rendered detail panel, used to size the panel next frame.
     pub detail_line_count: u16,
+    /// Scroll offset of the Help dialog; it is taller than most terminals.
+    pub help_scroll: u16,
     pub(super) sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler,
     /// Set when a background task (currently: format auto-detection landing
     /// a new provider) mutated `config` outside the normal input-handling
@@ -766,6 +768,7 @@ mod tests {
             quota_form: None,
             quick_form: None,
             detail_line_count: 6,
+            help_scroll: 0,
             sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler::new(),
             config_needs_sync: false,
         };

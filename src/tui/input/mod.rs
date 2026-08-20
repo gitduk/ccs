@@ -1,4 +1,5 @@
 mod confirm;
+mod help;
 pub(super) mod insert;
 
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -32,7 +33,7 @@ pub(super) fn handle_key(
         Mode::QuotaConfig => super::quota_panel::handle_key(app, code, modifiers),
         Mode::QuickInput => super::quick_panel::handle_key(app, code, modifiers, server),
         Mode::Help => {
-            app.mode = Mode::Normal;
+            help::handle_help_key(app, code);
             Ok(())
         }
         Mode::Logs => super::logs::handle_key(app, code, modifiers),

@@ -81,6 +81,7 @@ impl App {
             quota_form: None,
             quick_form: None,
             detail_line_count,
+            help_scroll: 0,
             sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler::new(),
             config_needs_sync: false,
         })

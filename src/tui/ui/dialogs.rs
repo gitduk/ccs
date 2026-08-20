@@ -7,7 +7,9 @@ use super::super::state::{App, ConfirmAction};
 use super::super::theme::{self as t};
 use super::layout::{centered_fixed, centered_rect};
 
-pub(super) fn draw_help(f: &mut Frame, _app: &App) {
+/// `scroll` is the caller's persisted offset; it is clamped here because
+/// only the draw knows how many rows the sections actually render to.
+pub(super) fn draw_help(f: &mut Frame, scroll: &mut u16) {
     // Section: (heading, &[(key, desc)])
     type Section = (&'static str, &'static [(&'static str, &'static str)]);
     let sections: &[Section] = &[
@@ -16,26 +18,29 @@ pub(super) fn draw_help(f: &mut Frame, _app: &App) {
             &[
                 ("j / k / ↑↓", "Navigate providers"),
                 ("gg / G", "Go to top / bottom"),
+                ("K / J", "Move provider up / down"),
                 ("s", "Switch to selected provider"),
                 ("a", "Add new provider"),
                 ("e / Enter", "Edit selected provider"),
                 ("dd", "Delete selected provider"),
+                ("p", "Toggle provider enabled / disabled"),
                 ("t", "Test provider availability"),
-                ("yy", "Copy provider base URL to clipboard"),
-                ("yc", "Copy test curl command to clipboard"),
-                ("K / J", "Move provider up / down"),
-                ("f", "Toggle selected provider's fallback participation"),
+                ("f", "Toggle this provider's fallback"),
                 ("F", "Toggle fallback mode (global)"),
                 ("o", "Set/clear selected provider's pinned port"),
                 ("T", "Set/clear selected provider's Test Model"),
-                ("r", "Reload config from disk"),
+                ("u", "Configure selected provider's quota command"),
+                ("yy", "Copy provider base URL to clipboard"),
+                ("yc", "Copy test curl command to clipboard"),
                 ("S", "Toggle background proxy"),
+                ("r", "Reload config from disk"),
                 ("c", "Clear current provider usage data"),
                 ("C", "Clear all providers' usage data"),
-                ("L", "Open request log"),
+                ("l", "Open request log"),
                 ("m", "Browse models"),
-                ("q / Esc", "Quit (direct exit if bg proxy running)"),
+                ("Ctrl-L", "Clear message log"),
                 ("h / ?", "Show this help"),
+                ("q / Esc", "Quit (direct exit if bg proxy running)"),
             ],
         ),
         (
@@ -45,6 +50,7 @@ pub(super) fn draw_help(f: &mut Frame, _app: &App) {
                 ("Esc / q", "Exit Insert → Normal  |  Normal → save & close"),
                 ("j / k", "Navigate fields (Normal)"),
                 ("h / l", "Move cursor (Normal)"),
+                ("0 / $", "Jump to field start / end (Normal)"),
                 ("Tab / S-Tab", "Next / previous field"),
             ],
         ),
@@ -52,28 +58,60 @@ pub(super) fn draw_help(f: &mut Frame, _app: &App) {
             "Route Rules  (inside editor, Routes section)",
             &[
                 ("j / k", "Navigate rules"),
-                ("n", "New rule (auto-enters Insert)"),
+                ("a / o", "New rule (auto-enters Insert)"),
                 ("Space", "Toggle rule enabled / disabled"),
                 ("i / Enter", "Edit rule pattern (Insert mode)"),
+                ("t", "Edit rule target (with suggestions)"),
                 ("dd", "Delete selected rule"),
                 ("K / J", "Move rule up / down (priority)"),
                 ("Esc", "Exit Insert → Normal"),
             ],
         ),
+        (
+            "Request Log  (l)",
+            &[
+                ("j / k", "Select request"),
+                ("J / K", "Scroll detail half a page"),
+                ("gg / G", "Detail to top / bottom"),
+                ("Home / End", "Detail to top / bottom"),
+                ("q / Esc", "Back to provider list"),
+            ],
+        ),
+        (
+            "Models  (m)",
+            &[
+                ("j / k", "Navigate models"),
+                ("C-d / C-u", "Jump 10 entries"),
+                ("gg / G", "Go to top / bottom"),
+                ("i", "Filter models (Insert)"),
+                ("C-j / C-k", "Navigate while filtering"),
+                ("yy / Enter", "Copy selected model name"),
+                ("q / Esc", "Back to provider list"),
+            ],
+        ),
+        (
+            "Quota  (u)",
+            &[
+                ("i / a", "Edit command (Insert)"),
+                ("s", "Run command and preview output"),
+                ("j / k", "Scroll preview"),
+                ("C-l", "Clear command (Insert)"),
+                ("q / Esc", "Save and close"),
+            ],
+        ),
     ];
 
     let key_w = 14usize;
-    let content_width: u16 = 62;
+    let width_pct: u16 = 66;
 
     // Count total lines needed.
     let total_lines: u16 = sections
         .iter()
         .map(|(_, entries)| 2 + entries.len() as u16) // heading blank + heading + entries
-        .sum::<u16>()
-        + 2; // footer
+        .sum::<u16>();
     let dialog_height = total_lines + 4; // borders + padding
 
-    let area = centered_fixed(content_width, dialog_height, f.area());
+    let area = centered_fixed(width_pct, dialog_height, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
@@ -81,9 +119,14 @@ pub(super) fn draw_help(f: &mut Frame, _app: &App) {
         .border_style(Style::default().fg(t::PRIMARY))
         .title(" Help ")
         .title_style(Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD))
+        .title_bottom(
+            Line::from(" j / k scroll · any other key closes ")
+                .style(Style::default().fg(t::MUTED))
+                .centered(),
+        )
         .padding(Padding::new(2, 2, 1, 1));
     let inner = block.inner(area);
-    f.render_widget(block.clone(), area);
+    f.render_widget(block, area);
 
     let mut lines: Vec<Line> = Vec::new();
 
@@ -108,13 +151,22 @@ pub(super) fn draw_help(f: &mut Frame, _app: &App) {
         }
     }
 
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Press any key to close",
-        Style::default().fg(t::MUTED),
-    )));
+    // Wrapping is on, so the scrollable extent is counted in rendered rows,
+    // not source lines: a description too long for the dialog occupies several.
+    let inner_w = inner.width.max(1) as usize;
+    let rendered_rows: usize = lines
+        .iter()
+        .map(|l| l.width().div_ceil(inner_w).max(1))
+        .sum();
+    let max_scroll = (rendered_rows as u16).saturating_sub(inner.height);
+    *scroll = (*scroll).min(max_scroll);
 
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((*scroll, 0)),
+        inner,
+    );
 }
 
 pub(super) fn draw_confirm(f: &mut Frame, app: &App) {
@@ -190,4 +242,49 @@ pub(super) fn draw_confirm(f: &mut Frame, app: &App) {
         Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    use super::draw_help;
+
+    fn render_help(width: u16, height: u16, scroll: &mut u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| draw_help(f, scroll)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn help_top_shows_first_section_and_hides_last() {
+        let mut scroll = 0;
+        let out = render_help(120, 24, &mut scroll);
+        assert!(out.contains("Provider List"));
+        assert!(!out.contains("Quota  (u)"));
+    }
+
+    #[test]
+    fn help_scroll_clamps_to_the_last_rendered_row() {
+        let mut scroll = u16::MAX;
+        let out = render_help(120, 24, &mut scroll);
+        assert!(scroll < u16::MAX, "scroll was not clamped");
+        assert!(out.contains("Quota  (u)"));
+        assert!(out.contains("Save and close"));
+    }
+
+    #[test]
+    fn help_does_not_scroll_when_the_terminal_fits_every_section() {
+        let mut scroll = u16::MAX;
+        render_help(120, 80, &mut scroll);
+        assert_eq!(scroll, 0);
+    }
 }

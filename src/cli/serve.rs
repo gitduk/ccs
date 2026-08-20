@@ -13,9 +13,10 @@ pub async fn run(listen: Option<String>) -> Result<()> {
 
     if config.providers.is_empty() {
         eprintln!(
-            "{} No providers configured. Run {} to add one.",
+            "{} No providers configured. Run {} and press {} to add one.",
             "Warning:".yellow(),
-            "ccs provider add".cyan()
+            "ccs".cyan(),
+            "a".cyan()
         );
     } else if let Ok((name, provider)) = config.current_provider() {
         eprintln!(

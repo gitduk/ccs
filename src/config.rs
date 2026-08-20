@@ -144,7 +144,8 @@ pub struct Provider {
     #[serde(default)]
     pub model_map: HashMap<String, String>,
     /// Model-routing rules. The first enabled rule whose pattern matches the
-    /// incoming request model causes this provider to be selected.
+    /// incoming request model rewrites it before forwarding (see
+    /// [`Provider::resolve_model`]); routes never influence provider choice.
     #[serde(default)]
     pub routes: Vec<RouteRule>,
     /// When false, this provider is skipped during request forwarding.
