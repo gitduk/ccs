@@ -134,7 +134,8 @@ impl Repository {
         }
     }
 
-    pub fn upsert_provider_models(
+    /// Overwrite a provider's model catalog with a freshly discovered list.
+    pub fn replace_provider_models(
         &self,
         provider_id: &str,
         provider_name: &str,
@@ -142,9 +143,9 @@ impl Repository {
     ) {
         if let Ok(mut conn) = self.0.lock()
             && let Err(e) =
-                db::upsert_provider_models(&mut conn, provider_id, provider_name, models)
+                db::replace_provider_models(&mut conn, provider_id, provider_name, models)
         {
-            tracing::warn!("Failed to upsert provider models for {provider_name}: {e}");
+            tracing::warn!("Failed to replace provider models for {provider_name}: {e}");
         }
     }
 
@@ -164,11 +165,21 @@ impl Repository {
         }
     }
 
+    /// Reset a provider's usage data, keeping its model catalog.
     pub fn clear_provider(&self, provider_id: &str) {
         if let Ok(mut conn) = self.0.lock()
             && let Err(e) = db::clear_provider(&mut conn, provider_id)
         {
             tracing::warn!("Failed to clear stats for provider {provider_id}: {e}");
+        }
+    }
+
+    /// Drop a provider entirely: usage data and model catalog.
+    pub fn delete_provider(&self, provider_id: &str) {
+        if let Ok(mut conn) = self.0.lock()
+            && let Err(e) = db::delete_provider(&mut conn, provider_id)
+        {
+            tracing::warn!("Failed to delete provider {provider_id}: {e}");
         }
     }
 

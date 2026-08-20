@@ -28,44 +28,43 @@ pub(super) fn test_provider_by_name(app: &mut App, name: &str) {
 
     // A pinned Test Model always wins over auto-picking one; otherwise fall
     // back to the fetch-then-test flow if no model list is known yet.
-    let (candidates, known_models): (Vec<String>, Option<Vec<String>>) =
-        match (provider.test_model.clone(), cached) {
-            (Some(model), cached) => (vec![model], cached),
-            (None, Some(supported)) => {
-                // Pick the best test model:
-                // 1. Most-used model from the provider list (by input + output tokens).
-                // 2. Random model from the provider list (no usage data yet).
-                let best_model: String = app
-                    .metrics
-                    .lock()
-                    .ok()
-                    .and_then(|m| {
-                        supported
-                            .iter()
-                            .max_by_key(|model| {
-                                m.by_model.get(*model).map_or(0, |s| s.input + s.output)
-                            })
-                            .filter(|model| m.by_model.contains_key(*model))
-                            .map(|s| s.to_string())
-                    })
-                    .unwrap_or_else(|| pick_next(&supported));
+    let candidates: Vec<String> = match (provider.test_model.clone(), cached) {
+        (Some(model), _) => vec![model],
+        (None, Some(supported)) => {
+            // Pick the best test model:
+            // 1. Most-used model from the provider list (by input + output tokens).
+            // 2. Random model from the provider list (no usage data yet).
+            let best_model: String = app
+                .metrics
+                .lock()
+                .ok()
+                .and_then(|m| {
+                    supported
+                        .iter()
+                        .max_by_key(|model| {
+                            m.by_model.get(*model).map_or(0, |s| s.input + s.output)
+                        })
+                        .filter(|model| m.by_model.contains_key(*model))
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_else(|| pick_next(&supported));
 
-                // Build a fallback candidate list: best_model first, then remaining
-                // models (up to MAX_TEST_ATTEMPTS total). Used when best_model
-                // errors so a broken model doesn't permanently block health-checking.
-                const MAX_TEST_ATTEMPTS: usize = 3;
-                let candidates: Vec<String> = std::iter::once(best_model.clone())
-                    .chain(supported.iter().filter(|m| **m != best_model).cloned())
-                    .take(MAX_TEST_ATTEMPTS)
-                    .collect();
+            // Build a fallback candidate list: best_model first, then remaining
+            // models (up to MAX_TEST_ATTEMPTS total). Used when best_model
+            // errors so a broken model doesn't permanently block health-checking.
+            const MAX_TEST_ATTEMPTS: usize = 3;
+            let candidates: Vec<String> = std::iter::once(best_model.clone())
+                .chain(supported.iter().filter(|m| **m != best_model).cloned())
+                .take(MAX_TEST_ATTEMPTS)
+                .collect();
 
-                (candidates, Some(supported))
-            }
-            (None, None) => {
-                test_provider_after_add(app, name);
-                return;
-            }
-        };
+            candidates
+        }
+        (None, None) => {
+            test_provider_after_add(app, name);
+            return;
+        }
+    };
 
     let tx = app.tests.tx.clone();
     let name_owned = name.to_string();
@@ -77,6 +76,9 @@ pub(super) fn test_provider_by_name(app: &mut App, name: &str) {
     tokio::spawn(async move {
         // candidates is always non-empty (a pinned model, or best_model at minimum).
         let mut result = None;
+        // First attempt that returns a catalog refreshes it; later retries reuse
+        // that one — it cannot have changed in the few hundred ms between them.
+        let mut fetched: Option<Vec<String>> = None;
         for model in candidates {
             // Notify TUI which model we're about to test so the display updates
             // in real time when a fallback retry kicks in.
@@ -86,12 +88,7 @@ pub(super) fn test_provider_by_name(app: &mut App, name: &str) {
             });
             let r = match tokio::time::timeout(
                 Duration::from_secs(TEST_TASK_TIMEOUT_SECS),
-                crate::tester::test_latency(
-                    &client,
-                    &provider,
-                    model.clone(),
-                    known_models.clone(),
-                ),
+                crate::tester::test_latency(&client, &provider, model.clone(), fetched.clone()),
             )
             .await
             {
@@ -99,14 +96,17 @@ pub(super) fn test_provider_by_name(app: &mut App, name: &str) {
                 Err(_) => crate::tester::TestResult {
                     status: crate::tester::TestStatus::Error("Connection error".to_string()),
                     latency_ms: 0,
-                    model_count: known_models.as_ref().map(|v| v.len()),
-                    model_names: known_models.clone(),
+                    model_count: None,
+                    model_names: None,
                     tested_at: std::time::Instant::now(),
                     used_model: model.clone(),
                     tools_supported: None,
                     images_supported: None,
                 },
             };
+            if fetched.is_none() {
+                fetched = r.model_names.clone();
+            }
             let done = matches!(
                 &r.status,
                 // Success or auth failure — no point trying other models.

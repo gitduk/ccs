@@ -54,6 +54,12 @@ fn init_schema(conn: &Connection) -> Result<()> {
             output        INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (provider_id, model_name)
         );
+        CREATE TABLE IF NOT EXISTS provider_models (
+            provider_id   TEXT NOT NULL,
+            provider_name TEXT NOT NULL,
+            model_name    TEXT NOT NULL,
+            PRIMARY KEY (provider_id, model_name)
+        );
         CREATE TABLE IF NOT EXISTS request_log (
             id            INTEGER PRIMARY KEY,
             timestamp_ms  INTEGER NOT NULL,
@@ -92,7 +98,33 @@ pub(crate) fn migrate_schema(
     let Ok(mut conn) = db.lock() else {
         return Ok(());
     };
-    do_migrate(&mut conn, name_to_id)
+    do_migrate(&mut conn, name_to_id)?;
+    backfill_provider_models(&mut conn)
+}
+
+/// Schema version stamped in `PRAGMA user_version` once the model catalog has
+/// been split out of `model_stats`.
+const SCHEMA_VERSION_CATALOG_SPLIT: i64 = 1;
+
+/// One-shot seed of `provider_models` from the pre-split `model_stats` rows, so
+/// an upgrade doesn't blank every model list until each provider is re-tested.
+/// The seed is unverified — `model_stats` also held client-requested aliases
+/// that the provider never served — but the next successful discovery replaces
+/// a provider's catalog wholesale. Runs after `do_migrate`, which guarantees
+/// `model_stats` already carries `provider_id`.
+fn backfill_provider_models(conn: &mut Connection) -> Result<()> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version >= SCHEMA_VERSION_CATALOG_SPLIT {
+        return Ok(());
+    }
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT OR IGNORE INTO provider_models (provider_id, provider_name, model_name)
+         SELECT provider_id, provider_name, model_name FROM model_stats",
+        [],
+    )?;
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION_CATALOG_SPLIT)?;
+    tx.commit()
 }
 
 fn do_migrate(conn: &mut Connection, name_to_id: &HashMap<String, String>) -> Result<()> {
@@ -318,13 +350,17 @@ pub fn rename_provider(conn: &Connection, provider_id: &str, new_name: &str) -> 
         "UPDATE model_stats SET provider_name = ?1 WHERE provider_id = ?2",
         params![new_name, provider_id],
     )?;
+    conn.execute(
+        "UPDATE provider_models SET provider_name = ?1 WHERE provider_id = ?2",
+        params![new_name, provider_id],
+    )?;
     Ok(())
 }
 
 pub fn load_provider_models(conn: &Connection) -> HashMap<String, Vec<String>> {
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
     if let Ok(mut stmt) = conn.prepare(
-        "SELECT provider_name, model_name FROM model_stats ORDER BY provider_name, model_name",
+        "SELECT provider_name, model_name FROM provider_models ORDER BY provider_name, model_name",
     ) && let Ok(rows) = stmt.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     }) {
@@ -335,18 +371,27 @@ pub fn load_provider_models(conn: &Connection) -> HashMap<String, Vec<String>> {
     map
 }
 
-/// Ensure discovered models exist in model_stats (preserves existing usage data).
-pub fn upsert_provider_models(
+/// Overwrite a provider's model catalog with what discovery just returned.
+/// Replaces rather than merges, so a model the upstream dropped disappears.
+/// An empty list is a no-op: a failed fetch must not erase a known catalog.
+pub fn replace_provider_models(
     conn: &mut Connection,
     provider_id: &str,
     provider_name: &str,
     models: &[String],
 ) -> Result<()> {
+    if models.is_empty() {
+        return Ok(());
+    }
     let tx = conn.transaction()?;
+    tx.execute(
+        "DELETE FROM provider_models WHERE provider_id = ?1",
+        [provider_id],
+    )?;
     {
         let mut stmt = tx.prepare(
-            "INSERT OR IGNORE INTO model_stats (provider_id, provider_name, model_name, input, output)
-             VALUES (?1, ?2, ?3, 0, 0)",
+            "INSERT OR IGNORE INTO provider_models (provider_id, provider_name, model_name)
+             VALUES (?1, ?2, ?3)",
         )?;
         for model in models {
             stmt.execute(params![provider_id, provider_name, model])?;
@@ -363,14 +408,31 @@ pub fn clear_all(conn: &mut Connection) -> Result<()> {
     tx.commit()
 }
 
-pub fn clear_provider(conn: &mut Connection, provider_id: &str) -> Result<()> {
-    let tx = conn.transaction()?;
-    tx.execute(
+fn delete_provider_usage(conn: &Connection, provider_id: &str) -> Result<()> {
+    conn.execute(
         "DELETE FROM provider_stats WHERE provider_id = ?1",
         [provider_id],
     )?;
-    tx.execute(
+    conn.execute(
         "DELETE FROM model_stats WHERE provider_id = ?1",
+        [provider_id],
+    )?;
+    Ok(())
+}
+
+pub fn clear_provider(conn: &mut Connection, provider_id: &str) -> Result<()> {
+    let tx = conn.transaction()?;
+    delete_provider_usage(&tx, provider_id)?;
+    tx.commit()
+}
+
+/// Remove every trace of a provider — usage stats plus model catalog.
+/// Distinct from `clear_provider`, which resets usage but keeps the catalog.
+pub fn delete_provider(conn: &mut Connection, provider_id: &str) -> Result<()> {
+    let tx = conn.transaction()?;
+    delete_provider_usage(&tx, provider_id)?;
+    tx.execute(
+        "DELETE FROM provider_models WHERE provider_id = ?1",
         [provider_id],
     )?;
     tx.commit()
@@ -538,6 +600,94 @@ mod tests {
         drop(a);
         drop(b);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Traffic records the *client-requested* model name (an alias the provider
+    /// may never serve), so it must never leak into the discovered catalog.
+    #[test]
+    fn traffic_model_names_stay_out_of_the_catalog() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        replace_provider_models(
+            &mut conn,
+            "ds-id",
+            "ds",
+            &[
+                "deepseek-v4-flash".to_string(),
+                "deepseek-v4-pro".to_string(),
+            ],
+        )
+        .unwrap();
+        upsert_model(&conn, "ds-id", "ds", "claude-opus-5", 100, 20).unwrap();
+
+        let catalog = load_provider_models(&conn);
+        assert_eq!(
+            catalog.get("ds").unwrap(),
+            &[
+                "deepseek-v4-flash".to_string(),
+                "deepseek-v4-pro".to_string()
+            ]
+        );
+        let metrics = load_metrics(&conn);
+        assert_eq!(metrics.by_model["claude-opus-5"].input, 100);
+    }
+
+    #[test]
+    fn replace_drops_models_the_upstream_no_longer_serves() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        replace_provider_models(&mut conn, "id", "p", &["a".to_string(), "b".to_string()]).unwrap();
+        replace_provider_models(&mut conn, "id", "p", &["b".to_string()]).unwrap();
+        assert_eq!(
+            load_provider_models(&conn).get("p").unwrap(),
+            &["b".to_string()]
+        );
+
+        // A failed fetch (empty list) must not erase the known catalog.
+        replace_provider_models(&mut conn, "id", "p", &[]).unwrap();
+        assert_eq!(
+            load_provider_models(&conn).get("p").unwrap(),
+            &["b".to_string()]
+        );
+    }
+
+    #[test]
+    fn clear_keeps_the_catalog_but_delete_removes_it() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        replace_provider_models(&mut conn, "id", "p", &["a".to_string()]).unwrap();
+        upsert_model(&conn, "id", "p", "a", 5, 5).unwrap();
+
+        clear_provider(&mut conn, "id").unwrap();
+        assert_eq!(
+            load_provider_models(&conn).get("p").unwrap(),
+            &["a".to_string()]
+        );
+        assert!(load_metrics(&conn).by_model.is_empty());
+
+        delete_provider(&mut conn, "id").unwrap();
+        assert!(load_provider_models(&conn).is_empty());
+    }
+
+    /// The seed runs once. A later catalog wipe must stay wiped instead of
+    /// being repopulated from traffic rows on the next startup.
+    #[test]
+    fn catalog_backfill_runs_only_once() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        upsert_model(&conn, "id", "p", "legacy-model", 1, 1).unwrap();
+
+        backfill_provider_models(&mut conn).unwrap();
+        assert_eq!(
+            load_provider_models(&conn).get("p").unwrap(),
+            &["legacy-model".to_string()]
+        );
+
+        conn.execute("DELETE FROM provider_models", []).unwrap();
+        backfill_provider_models(&mut conn).unwrap();
+        assert!(load_provider_models(&conn).is_empty());
     }
 
     #[test]

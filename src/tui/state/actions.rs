@@ -292,6 +292,24 @@ impl App {
         Ok(())
     }
 
+    /// Store a freshly discovered catalog in the DB and its in-memory mirror.
+    /// An empty list means the fetch came back with nothing — keep the last
+    /// known catalog rather than blanking the provider's model list.
+    /// Returns whether anything was written.
+    fn store_provider_models(
+        &mut self,
+        provider_id: &str,
+        name: &str,
+        models: Vec<String>,
+    ) -> bool {
+        if models.is_empty() {
+            return false;
+        }
+        self.db.replace_provider_models(provider_id, name, &models);
+        self.models.provider_models.insert(name.to_string(), models);
+        true
+    }
+
     pub fn confirm(&mut self, action: ConfirmAction) {
         self.confirm_action = Some(action);
         self.mode = Mode::Confirm;
@@ -356,7 +374,7 @@ impl App {
     pub(super) fn do_delete(&mut self, name: &str) -> Result<()> {
         let removed = self.config.providers.shift_remove(name);
         let id = removed.as_ref().map(|p| p.id.as_str()).unwrap_or(name);
-        self.db.clear_provider(id);
+        self.db.delete_provider(id);
         if let Ok(mut m) = self.metrics.lock() {
             m.clear_error(name);
         }
@@ -499,11 +517,8 @@ impl App {
                         .get(&name)
                         .map(|p| p.id.clone())
                         .unwrap_or_else(|| name.clone());
-                    if let Some(models) = &result.model_names {
-                        self.db.upsert_provider_models(&provider_id, &name, models);
-                        self.models
-                            .provider_models
-                            .insert(name.clone(), models.clone());
+                    if let Some(models) = result.model_names.clone() {
+                        self.store_provider_models(&provider_id, &name, models);
                     }
                     // Record the test request in provider stats so it appears in By Provider.
                     let failed = !matches!(result.status, crate::tester::TestStatus::Ok);
@@ -536,8 +551,7 @@ impl App {
                         .get(&name)
                         .map(|p| p.id.clone())
                         .unwrap_or_else(|| name.clone());
-                    self.db.upsert_provider_models(&provider_id, &name, &models);
-                    self.models.provider_models.insert(name, models);
+                    self.store_provider_models(&provider_id, &name, models);
                 }
                 TestEvent::QuotaCompleted {
                     provider_id,
@@ -613,12 +627,8 @@ impl App {
                             if is_first {
                                 self.config.current = name.clone();
                             }
-                            let wrote_models = !d.models.is_empty();
-                            if wrote_models {
-                                self.db
-                                    .upsert_provider_models(&provider_id, &name, &d.models);
-                                self.models.provider_models.insert(name.clone(), d.models);
-                            }
+                            let wrote_models =
+                                self.store_provider_models(&provider_id, &name, d.models);
                             match config::save_config(&self.config) {
                                 Ok(()) => {
                                     if let Some(idx) = self.config.providers.get_index_of(&name) {

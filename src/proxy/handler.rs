@@ -300,12 +300,10 @@ async fn try_providers(
             name: provider_name.clone(),
         };
 
-        // Per-provider route pattern for metrics: reflects which rule (if any)
-        // of *this* provider matched the requested model.
-        let route_pattern = provider
-            .resolve_model(&pipeline.req_model_hint)
-            .1
-            .unwrap_or_default();
+        // Per-provider route resolution: the model actually sent upstream, plus
+        // the rule (if any) of *this* provider that matched the requested model.
+        let (upstream_model, route_pattern) = provider.resolve_model(&pipeline.req_model_hint);
+        let route_pattern = route_pattern.unwrap_or_default();
 
         let api_key = match provider.resolve_api_key() {
             Ok(k) => k,
@@ -476,6 +474,7 @@ async fn try_providers(
                     latency: latency_ms,
                     request_log_limit: pipeline.request_log_limit,
                     model_override,
+                    upstream_model,
                 },
             )
             .await
@@ -494,6 +493,7 @@ async fn try_providers(
                     },
                     request_log_limit: pipeline.request_log_limit,
                     model_override,
+                    upstream_model,
                 },
             )
             .await
@@ -593,6 +593,7 @@ async fn handle_buffered_response(
         mut log_entry,
         request_log_limit,
         model_override,
+        upstream_model,
     } = bctx;
     let entry_id = log_entry.id;
     let ProviderKey {
@@ -624,7 +625,15 @@ async fn handle_buffered_response(
         serde_json::from_slice::<serde_json::Value>(&body).ok()
     };
 
-    // Rewrite model in canonical form so the client sees what it requested.
+    // Stats record what actually served the request, so read the model before
+    // the client-facing rewrite below replaces it with the requested alias.
+    let model = served_model(
+        usage_json.as_ref().and_then(|json| json["model"].as_str()),
+        &upstream_model,
+    );
+
+    // Echo the requested name back — only in a re-serialized body; the
+    // Anthropic pass-through below returns raw upstream bytes untouched.
     if let (Some(m), Some(json)) = (&model_override, &mut usage_json) {
         json["model"] = serde_json::Value::String(m.clone());
     }
@@ -641,13 +650,13 @@ async fn handle_buffered_response(
         _ => body,
     };
 
-    let (input, output, model) = if let Some(ref json) = usage_json {
-        let input = json["usage"]["input_tokens"].as_u64().unwrap_or(0);
-        let output = json["usage"]["output_tokens"].as_u64().unwrap_or(0);
-        let model = json["model"].as_str().map(|s| s.to_string());
-        (input, output, model)
+    let (input, output) = if let Some(ref json) = usage_json {
+        (
+            json["usage"]["input_tokens"].as_u64().unwrap_or(0),
+            json["usage"]["output_tokens"].as_u64().unwrap_or(0),
+        )
     } else {
-        (0, 0, None)
+        (0, 0)
     };
     db.persist_stats_async(
         &provider_id,
@@ -692,34 +701,35 @@ async fn handle_streaming_response(
     ctx: StreamTrackingCtx,
 ) -> Result<Response, AppError> {
     let model_override = ctx.model_override.clone();
+    // Canonical Anthropic SSE, still carrying the upstream's own model name.
     let raw_stream: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>> =
         if !is_openai {
-            let base = Box::pin(response.bytes_stream().map(|r| {
+            Box::pin(response.bytes_stream().map(|r| {
                 r.map_err(|e| {
                     tracing::error!("Stream error: {e}");
                     std::io::Error::other(e)
                 })
-            }));
-            if let Some(m) = model_override {
-                Box::pin(transform::rewrite_model_in_stream(base, m))
-            } else {
-                base
-            }
+            }))
         } else {
-            Box::pin(transform::openai_stream_to_anthropic(
-                response,
-                ctx.model_override.clone(),
-            ))
+            Box::pin(transform::openai_stream_to_anthropic(response, None))
         };
 
+    // Track first, rewrite second: stats must see what actually served the
+    // request, the client sees the alias it asked for.
     let tracked = track_tokens_in_stream(raw_stream, ctx);
+
+    let renamed: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>> =
+        match model_override {
+            Some(m) => Box::pin(transform::rewrite_model_in_stream(tracked, m)),
+            None => Box::pin(tracked),
+        };
 
     let final_stream: std::pin::Pin<
         Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>,
     > = if let Some(api_version) = client_format.openai_variant() {
-        Box::pin(transform::anthropic_stream_to_openai(tracked, api_version))
+        Box::pin(transform::anthropic_stream_to_openai(renamed, api_version))
     } else {
-        Box::pin(tracked)
+        renamed
     };
 
     let body = Body::from_stream(final_stream);
@@ -740,6 +750,9 @@ struct BufferedTrackingCtx {
     log_entry: RequestLogEntry,
     request_log_limit: usize,
     model_override: Option<String>,
+    /// Model sent upstream after route resolution — recorded when the response
+    /// itself carries no model name.
+    upstream_model: String,
 }
 
 /// Context for tracking tokens in a streaming response.
@@ -752,6 +765,9 @@ struct StreamTrackingCtx {
     latency: u64,
     request_log_limit: usize,
     model_override: Option<String>,
+    /// Model sent upstream after route resolution — recorded when the response
+    /// itself carries no model name.
+    upstream_model: String,
 }
 
 struct StreamFinalizer {
@@ -816,6 +832,19 @@ impl Drop for StreamFinalizer {
 
 /// Wrap a byte stream to extract token usage from anthropic SSE events.
 /// Passes all bytes through unchanged; records metrics when the stream ends.
+/// An empty model name means the source reported none — treat it as absent.
+fn non_empty_model(name: Option<&str>) -> Option<&str> {
+    name.filter(|m| !m.is_empty())
+}
+
+/// Model to record for a request: the name the response reported, falling back
+/// to the model routing actually sent upstream.
+fn served_model(reported: Option<&str>, upstream: &str) -> Option<String> {
+    non_empty_model(reported)
+        .or_else(|| non_empty_model(Some(upstream)))
+        .map(str::to_string)
+}
+
 fn track_tokens_in_stream(
     mut inner: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>>,
     ctx: StreamTrackingCtx,
@@ -832,7 +861,8 @@ fn track_tokens_in_stream(
             request_log_limit: ctx.request_log_limit,
             input_tokens: 0,
             output_tokens: 0,
-            model: None,
+            // Falls back to the routed model when the stream carries no name.
+            model: served_model(None, &ctx.upstream_model),
             finished: false,
         };
         let mut line_buf = String::new();
@@ -863,7 +893,9 @@ fn track_tokens_in_stream(
                                     finalizer.input_tokens = json["message"]["usage"]["input_tokens"]
                                         .as_u64()
                                         .unwrap_or(0);
-                                    if let Some(m) = json["message"]["model"].as_str() {
+                                    if let Some(m) =
+                                        non_empty_model(json["message"]["model"].as_str())
+                                    {
                                         finalizer.model = Some(m.to_string());
                                     }
                                 }
@@ -929,6 +961,25 @@ mod tests {
             db: Repository::open(&path),
             pinned_provider: None,
         })
+    }
+
+    /// Stats must record what served the request. An upstream that reports no
+    /// model name must not overwrite the routed fallback with an empty string.
+    #[test]
+    fn served_model_prefers_the_reported_name_over_the_routed_one() {
+        assert_eq!(
+            served_model(Some("deepseek-v4-flash"), "coder-ds4"),
+            Some("deepseek-v4-flash".into())
+        );
+        // A blank or absent report must not shadow the routed fallback.
+        assert_eq!(
+            served_model(Some(""), "coder-ds4"),
+            Some("coder-ds4".into())
+        );
+        assert_eq!(served_model(None, "coder-ds4"), Some("coder-ds4".into()));
+        // Nothing known at all — record no model rather than an empty name.
+        assert_eq!(served_model(Some(""), ""), None);
+        assert_eq!(served_model(None, ""), None);
     }
 
     #[tokio::test]

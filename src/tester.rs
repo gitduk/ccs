@@ -144,14 +144,15 @@ pub struct TestResult {
 
 /// Run a latency test against the provider using `model`.
 ///
-/// If `known_models` is supplied (e.g. pre-fetched by the caller), it is
-/// attached directly to the result and the internal `/v1/models` fetch is
-/// skipped, saving one extra HTTP request.
+/// `prefetched` is for callers that already fetched the catalog this round —
+/// it is attached directly to the result and the internal `/v1/models` fetch is
+/// skipped, saving one extra HTTP request. Pass `None` to have the test refresh
+/// the catalog; never pass a cached copy, or the catalog can never go stale-free.
 pub async fn test_latency(
     client: &reqwest::Client,
     provider: &Provider,
     model: String,
-    known_models: Option<Vec<String>>,
+    prefetched: Option<Vec<String>>,
 ) -> TestResult {
     // Record the start time before any fallible work so all early-return
     // paths share the same reference point.
@@ -171,8 +172,8 @@ pub async fn test_latency(
             return TestResult {
                 status: TestStatus::Error("Configuration error".to_string()),
                 latency_ms: 0,
-                model_count: known_models.as_ref().map(|v| v.len()),
-                model_names: known_models,
+                model_count: prefetched.as_ref().map(|v| v.len()),
+                model_names: prefetched,
                 tested_at,
                 used_model: used_model.clone(),
                 tools_supported: None,
@@ -189,8 +190,8 @@ pub async fn test_latency(
                 return TestResult {
                     status: TestStatus::Error("Connection error".to_string()),
                     latency_ms: 0,
-                    model_count: known_models.as_ref().map(|v| v.len()),
-                    model_names: known_models,
+                    model_count: prefetched.as_ref().map(|v| v.len()),
+                    model_names: prefetched,
                     tested_at,
                     used_model: used_model.clone(),
                     tools_supported: None,
@@ -226,7 +227,7 @@ pub async fn test_latency(
             }
         },
         async {
-            if let Some(models) = known_models {
+            if let Some(models) = prefetched {
                 (Some(models.len()), Some(models))
             } else {
                 fetch_models(client, provider, &api_key).await

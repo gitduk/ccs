@@ -892,4 +892,71 @@ mod tests {
         assert_eq!(r.used_model, "gemma-4-31b-it");
         assert_eq!(r.tools_supported, Some(true));
     }
+
+    /// An upstream that answers `/v1/models` with an empty list must not blank
+    /// the provider's known catalog — in the DB or in the in-memory mirror.
+    #[tokio::test]
+    async fn empty_model_list_from_a_test_keeps_the_known_catalog() {
+        let _guard = ConfigDirGuard::new();
+        let mut cfg = crate::config::load_config().unwrap();
+        cfg.providers.insert(
+            "vllm".to_string(),
+            Provider {
+                id: "vllm-id".into(),
+                base_url: "http://127.0.0.1:1".into(),
+                api_key: "test-key".into(),
+                api_format: ApiFormat::OpenAI,
+                model_map: Default::default(),
+                routes: vec![],
+                enabled: true,
+                fallback: true,
+                api_version: None,
+                inject_thinking_history: true,
+                quota_command: None,
+                port: None,
+                test_model: None,
+            },
+        );
+        crate::config::save_config(&cfg).unwrap();
+
+        let mut app = App::new().unwrap();
+        let send = |app: &App, names: Option<Vec<String>>| {
+            app.tests
+                .tx
+                .send(TestEvent::Completed {
+                    provider: "vllm".into(),
+                    result: TestResult {
+                        status: TestStatus::Ok,
+                        latency_ms: 1,
+                        model_count: names.as_ref().map(|v| v.len()),
+                        model_names: names,
+                        tested_at: Instant::now(),
+                        used_model: "gemma-4-31b-it".into(),
+                        tools_supported: None,
+                        images_supported: None,
+                    },
+                })
+                .unwrap();
+        };
+
+        send(&app, Some(vec!["gemma-4-31b-it".into()]));
+        assert!(app.drain_test_results());
+        assert_eq!(
+            app.models.provider_models.get("vllm"),
+            Some(&vec!["gemma-4-31b-it".to_string()])
+        );
+
+        send(&app, Some(vec![]));
+        assert!(app.drain_test_results());
+        assert_eq!(
+            app.models.provider_models.get("vllm"),
+            Some(&vec!["gemma-4-31b-it".to_string()]),
+            "an empty fetch must not blank the in-memory catalog"
+        );
+        assert_eq!(
+            app.db.load_provider_models().get("vllm"),
+            Some(&vec!["gemma-4-31b-it".to_string()]),
+            "an empty fetch must not blank the persisted catalog"
+        );
+    }
 }
