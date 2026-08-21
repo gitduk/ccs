@@ -210,11 +210,11 @@ fn draw_detail(f: &mut Frame, entry: &RequestLogEntry, area: Rect, logs: &mut Lo
     push_summary_line(&mut lines, entry, avail);
 
     if let Some(req_body) = &entry.request_body {
-        push_body_section(&mut lines, "Request", req_body, avail);
+        push_body_section(&mut lines, req_body, avail);
     }
 
     if let Some(resp_body) = &entry.response_body {
-        push_body_section(&mut lines, "Response", resp_body, avail);
+        push_body_section(&mut lines, resp_body, avail);
     }
 
     let max_scroll = lines.len().saturating_sub(area.height as usize) as u16;
@@ -245,20 +245,13 @@ fn push_summary_line<'a>(lines: &mut Vec<Line<'a>>, entry: &RequestLogEntry, ava
     }
 }
 
-fn push_body_section<'a>(lines: &mut Vec<Line<'a>>, title: &'static str, body: &str, avail: usize) {
+fn push_body_section<'a>(lines: &mut Vec<Line<'a>>, body: &str, avail: usize) {
     lines.push(Line::raw(""));
-    push_wrapped_lines(
-        lines,
-        &format!("{title}:"),
-        0,
-        avail,
-        Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD),
-    );
     let body = body.strip_suffix(TRUNCATED_BODY_MARKER).unwrap_or(body);
 
     match parse_log_json(body) {
         Some(value) => push_json_summary(lines, &value, avail),
-        None => push_wrapped_lines(lines, body, 2, avail, Style::default().fg(t::MUTED)),
+        None => push_wrapped_lines(lines, body, 0, avail, Style::default().fg(t::MUTED)),
     }
 }
 
@@ -281,7 +274,7 @@ fn push_json_summary<'a>(lines: &mut Vec<Line<'a>>, value: &serde_json::Value, a
 
     if let Some(error) = obj.get("error") {
         push_section_header(lines, "error:", avail, t::ERROR);
-        push_json_value(lines, error, 4, avail, true);
+        push_json_value(lines, error, 2, avail, true);
     }
 
     if let Some(messages) = obj.get("messages").and_then(|v| v.as_array()) {
@@ -293,7 +286,7 @@ fn push_json_summary<'a>(lines: &mut Vec<Line<'a>>, value: &serde_json::Value, a
 
     if let Some(content) = obj.get("content") {
         push_section_header(lines, "content:", avail, t::TEXT);
-        push_content(lines, content, 4, avail);
+        push_content(lines, content, 2, avail);
     }
 
     if let Some(tools) = obj.get("tools").and_then(|v| v.as_array()) {
@@ -339,7 +332,7 @@ fn push_section_header<'a>(
     push_wrapped_lines(
         lines,
         label,
-        2,
+        0,
         avail,
         Style::default().fg(color).add_modifier(Modifier::BOLD),
     );
@@ -445,18 +438,18 @@ fn push_message<'a>(
                 _ => None,
             });
     if let Some((header, part)) = lone {
-        push_wrapped_lines(lines, &format!("#{idx} {role} {header}"), 4, avail, head);
-        push_block_body(lines, part, 6, avail);
+        push_wrapped_lines(lines, &format!("#{idx} {role} {header}"), 2, avail, head);
+        push_block_body(lines, part, 4, avail);
         return;
     }
 
-    push_wrapped_lines(lines, &format!("#{idx} {role}"), 4, avail, head);
+    push_wrapped_lines(lines, &format!("#{idx} {role}"), 2, avail, head);
     match message.get("content") {
-        Some(content) => push_content(lines, content, 6, avail),
+        Some(content) => push_content(lines, content, 4, avail),
         None => push_wrapped_lines(
             lines,
             &compact_json(message),
-            6,
+            4,
             avail,
             Style::default().fg(t::MUTED),
         ),
@@ -536,7 +529,7 @@ fn push_key_value<'a>(lines: &mut Vec<Line<'a>>, key: &str, value: &str, avail: 
     push_wrapped_lines(
         lines,
         &format!("{key}: {value}"),
-        2,
+        0,
         avail,
         Style::default().fg(t::MUTED),
     );
@@ -907,7 +900,7 @@ mod tests {
                 },
                 width,
             );
-            push_body_section(&mut lines, "Request", &body, width);
+            push_body_section(&mut lines, &body, width);
             for line in &lines {
                 let text = line
                     .spans
@@ -946,7 +939,7 @@ mod tests {
                 }]}),
                 60,
             ),
-            ["    #2 user [tool_result]", "      ok"],
+            ["  #2 user [tool_result]", "    ok"],
         );
     }
 
@@ -960,7 +953,7 @@ mod tests {
                 }]}),
                 60,
             ),
-            ["    #2 assistant [tool_use] read /tmp/x.md"],
+            ["  #2 assistant [tool_use] read /tmp/x.md"],
         );
     }
 
@@ -975,9 +968,9 @@ mod tests {
                 60,
             ),
             [
-                "    #2 assistant [tool_use] edit",
-                "      path: /tmp/x",
-                "      text: y",
+                "  #2 assistant [tool_use] edit",
+                "    path: /tmp/x",
+                "    text: y",
             ],
         );
         assert_eq!(
@@ -987,11 +980,7 @@ mod tests {
                 }]}),
                 60,
             ),
-            [
-                "    #2 assistant [tool_use] bash",
-                "      command: a",
-                "      b",
-            ],
+            ["  #2 assistant [tool_use] bash", "    command: a", "    b",],
         );
     }
 
@@ -1006,10 +995,10 @@ mod tests {
                 60,
             ),
             [
-                "    #2 assistant",
-                "      [thinking]",
-                "        hmm",
-                "      [tool_use] read /tmp/x",
+                "  #2 assistant",
+                "    [thinking]",
+                "      hmm",
+                "    [tool_use] read /tmp/x",
             ],
         );
     }
@@ -1021,7 +1010,7 @@ mod tests {
                 json!({"role": "user", "content": [{"type": "image", "source": "s"}]}),
                 60,
             ),
-            ["    #2 user", "      source: s", "      type: image"],
+            ["  #2 user", "    source: s", "    type: image"],
         );
     }
 }
