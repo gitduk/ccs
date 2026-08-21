@@ -161,43 +161,35 @@ pub(crate) fn sync_next_request_log_id(next_id: u64) {
     }
 }
 
+/// Minimal entry for tests; set only the fields the test is about.
+#[cfg(test)]
+pub(crate) fn entry_with_id(id: u64) -> RequestLogEntry {
+    RequestLogEntry {
+        id,
+        timestamp: SystemTime::UNIX_EPOCH,
+        provider: "prov".into(),
+        model: String::new(),
+        status: 200,
+        latency_ms: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        is_stream: false,
+        error: None,
+        request_body: None,
+        response_body: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn entry_with_id(id: u64) -> RequestLogEntry {
-        RequestLogEntry {
-            id,
-            timestamp: SystemTime::UNIX_EPOCH,
-            provider: "prov".into(),
-            model: String::new(),
-            status: 200,
-            latency_ms: 0,
-            input_tokens: 0,
-            output_tokens: 0,
-            is_stream: false,
-            error: None,
-            request_body: None,
-            response_body: None,
-        }
-    }
 
     #[test]
     fn backfill_updates_to_final_response_model() {
         let mut log = RequestLog::default();
         let id = log.push(RequestLogEntry {
-            id: 0,
-            timestamp: SystemTime::UNIX_EPOCH,
-            provider: "yc".into(),
             model: "sonnet-4-6".into(),
-            status: 200,
-            latency_ms: 1500,
-            input_tokens: 0,
-            output_tokens: 0,
-            is_stream: false,
-            error: None,
-            request_body: None,
-            response_body: None,
+            ..entry_with_id(0)
         });
 
         log.backfill(id, 1234, 5678, Some("gpt-5.4"));
