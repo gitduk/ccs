@@ -6,9 +6,8 @@ use std::time::Duration;
 pub(super) const NAME_FIELD_IDX: usize = 0;
 pub(super) const BASE_URL_FIELD_IDX: usize = 1;
 pub(super) const API_KEY_FIELD_IDX: usize = 2;
-// Fallback (`f`/`F`), port (`o`), and Test Model (`T`) are edited via
-// main-table shortcuts, not this form — `do_save_form` inherits them
-// unchanged from `existing` (or their defaults for a new provider).
+// Fallback, port, and Test Model are set via shortcuts outside this form;
+// `do_save_form` inherits them from `existing` (or defaults for a new provider).
 
 use ratatui::widgets::TableState;
 
@@ -47,7 +46,7 @@ pub enum Mode {
     Logs,
     /// Quota configuration editor for the selected provider.
     QuotaConfig,
-    /// Quick single-field popup (Port via `o`, Test Model via `T`).
+    /// Quick single-field popup (Port via `o`).
     QuickInput,
 }
 
@@ -235,7 +234,7 @@ pub struct App {
     pub quota_status: HashMap<String, QuotaStatus>,
     /// Quota configuration form for the selected provider.
     pub quota_form: Option<QuotaForm>,
-    /// Quick single-field popup (Port / Test Model) for the selected provider.
+    /// Quick single-field popup (Port) for the selected provider.
     pub quick_form: Option<QuickForm>,
     /// Line count from the last rendered detail panel, used to size the panel next frame.
     pub detail_line_count: u16,
@@ -357,10 +356,9 @@ pub struct QuotaForm {
 #[derive(Clone, Copy, PartialEq)]
 pub enum QuickFormKind {
     Port,
-    TestModel,
 }
 
-/// Quick single-field popup (Port / Test Model), opened from the provider table.
+/// Quick single-field popup (Port), opened from the provider table.
 pub struct QuickForm {
     pub kind: QuickFormKind,
     /// Provider name being configured.
@@ -369,15 +367,12 @@ pub struct QuickForm {
     /// Pending first key of a two-key sequence (`jk` escape).
     pub pending_key: Option<(char, std::time::Instant)>,
     pub error: Option<String>,
-    /// Model-name suggestion navigation state (Test Model form only).
-    pub suggest: SuggestState,
 }
 
 impl QuickForm {
     pub(super) fn new(kind: QuickFormKind, provider_name: &str, current: Option<&str>) -> Self {
         let label = match kind {
             QuickFormKind::Port => "Port",
-            QuickFormKind::TestModel => "Test Model",
         };
         Self {
             kind,
@@ -385,7 +380,6 @@ impl QuickForm {
             field: FormField::text(label, current.unwrap_or("")),
             pending_key: None,
             error: None,
-            suggest: SuggestState::default(),
         }
     }
 }

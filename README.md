@@ -158,7 +158,7 @@ Configuration is stored in `~/.ccs/config.json`. Set `CCS_CONFIG_DIR` to use a d
 | `routes` | `[]` | Glob routing rules (see below) |
 | `inject_thinking_history` | `true` | Inject empty thinking blocks into assistant history turns; needed by DeepSeek-compatible upstreams |
 | `port` | unset | Dedicated pinned listener port (see below) |
-| `test_model` | unset | Model to pin for the `t` connectivity test |
+| `test_model` | unset | Model pinned for the connectivity test (set via `m` → `t` in the Models panel) |
 | `quota_command` | unset | Shell command backing the Quota column |
 
 ### API Key Resolution
@@ -273,7 +273,6 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
 | `F` | Toggle global fallback mode |
 | `t` | Test connectivity |
 | `o` | Set/clear the provider's pinned port |
-| `T` | Set/clear the provider's Test Model |
 | `u` | Configure the provider's quota command |
 | `yy` | Copy the provider's base URL to the clipboard |
 | `yc` | Copy a ready-to-run test curl command to the clipboard |
@@ -335,6 +334,7 @@ Fields: Name, Base URL, API Key, then the Routes section. Vim-style, starts in N
 | `Ctrl-J` / `Ctrl-K` | Navigate while filtering |
 | `yy` / `Enter` | Copy the selected model name |
 | `q` / `Esc` / `Ctrl-C` | Back to the provider list |
+| `t` | Set/clear the provider's Test Model |
 
 ### Quota panel (`u`)
 

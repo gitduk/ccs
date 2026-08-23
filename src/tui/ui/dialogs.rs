@@ -28,7 +28,6 @@ pub(super) fn draw_help(f: &mut Frame, scroll: &mut u16) {
                 ("f", "Toggle this provider's fallback"),
                 ("F", "Toggle fallback mode (global)"),
                 ("o", "Set/clear selected provider's pinned port"),
-                ("T", "Set/clear selected provider's Test Model"),
                 ("u", "Configure selected provider's quota command"),
                 ("yy", "Copy provider base URL to clipboard"),
                 ("yc", "Copy test curl command to clipboard"),
@@ -81,6 +80,7 @@ pub(super) fn draw_help(f: &mut Frame, scroll: &mut u16) {
             "Models  (m)",
             &[
                 ("j / k", "Navigate models"),
+                ("t", "Set/clear this provider's Test Model"),
                 ("C-d / C-u", "Jump 10 entries"),
                 ("gg / G", "Go to top / bottom"),
                 ("i", "Filter models (Insert)"),

@@ -158,7 +158,7 @@ export OPENAI_API_KEY=any-value
 | `routes` | `[]` | glob 路由规则（见下文） |
 | `inject_thinking_history` | `true` | 向历史 assistant 轮注入空 thinking 块，DeepSeek 兼容上游需要 |
 | `port` | 未设置 | 该提供商独占的 pinned 监听端口（见下文） |
-| `test_model` | 未设置 | `t` 连通性测试固定使用的模型 |
+| `test_model` | 未设置 | 固定用于连通性测试的模型（在模型面板中按 `m` → `t` 设置） |
 | `quota_command` | 未设置 | Quota 列背后的 shell 命令 |
 
 ### API Key 解析
@@ -273,7 +273,6 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
 | `F` | 切换全局 fallback 模式 |
 | `t` | 测试连通性 |
 | `o` | 设置 / 清除该提供商的 pinned 端口 |
-| `T` | 设置 / 清除该提供商的 Test Model |
 | `u` | 配置该提供商的额度命令 |
 | `yy` | 复制该提供商的 Base URL 到剪贴板 |
 | `yc` | 复制可直接运行的测试 curl 命令到剪贴板 |
@@ -335,6 +334,7 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
 | `Ctrl-J` / `Ctrl-K` | 过滤状态下上下移动 |
 | `yy` / `Enter` | 复制选中的模型名 |
 | `q` / `Esc` / `Ctrl-C` | 返回提供商列表 |
+| `t` | 设置 / 清除该提供商的 Test Model |
 
 ### 额度面板（`u`）
 

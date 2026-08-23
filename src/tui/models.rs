@@ -1,7 +1,8 @@
 //! Models browser popup.
 //!
-//! This module owns the searchable models dialog, its navigation, and
-//! clipboard actions for the currently highlighted model.
+//! This module owns the searchable models dialog, its navigation, clipboard
+//! actions for the currently highlighted model, and pinning a model as the
+//! provider's Test Model (`t`).
 
 use std::time::Instant;
 
@@ -101,6 +102,14 @@ pub(super) fn handle_key(
             KeyCode::Char('i') => {
                 app.models.search_active = true;
             }
+            KeyCode::Char('t') => {
+                let Some(prov) = current_provider(app).map(str::to_string) else {
+                    return Ok(());
+                };
+                if let Some(&name) = refs.get(app.models.selected) {
+                    set_test_model(app, &prov, name);
+                }
+            }
             KeyCode::Down | KeyCode::Char('j') => nav_down(app, total, 1),
             KeyCode::Up | KeyCode::Char('k') => nav_up(app, 1),
             KeyCode::Char('G') => {
@@ -141,16 +150,18 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
     let dialog_height = (content_lines + 4).min(f.area().height * 4 / 5).max(6);
     let area = centered_fixed(80, dialog_height, f.area());
     f.render_widget(Clear, area);
-
     let mode_tag = if app.models.search_active {
         "[I]"
     } else {
         "[N]"
     };
+    let test_tag = current_test_model(app)
+        .map(|m| format!("  Test: {m}"))
+        .unwrap_or_default();
     let outer_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(t::PRIMARY))
-        .title(format!(" {prov_name} — Models  {mode_tag} "))
+        .title(format!(" {prov_name} — Models  {mode_tag}{test_tag} "))
         .title_style(Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD))
         .padding(Padding::new(1, 1, 0, 0));
     let inner = outer_block.inner(area);
@@ -242,11 +253,40 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), chunks[2]);
 }
 
-fn current_provider(app: &App) -> Option<&str> {
-    app.providers
-        .table_state
-        .selected()
-        .and_then(|i| app.provider_name_at(i))
+fn current_test_model(app: &App) -> Option<&str> {
+    current_provider(app).and_then(|name| {
+        app.config
+            .providers
+            .get(name)
+            .and_then(|p| p.test_model.as_deref())
+    })
+}
+
+/// Pin the highlighted model as the provider's Test Model and persist it.
+/// Pressing `t` again on the pinned model clears it.
+fn set_test_model(app: &mut App, provider_name: &str, model: &str) {
+    let clearing = current_test_model(app) == Some(model);
+    let mut next = app.config.clone();
+    if let Some(p) = next.providers.get_mut(provider_name) {
+        if clearing {
+            p.test_model = None;
+        } else {
+            p.test_model = Some(model.to_string());
+        }
+    }
+    if let Err(e) = crate::config::save_config(&next) {
+        app.set_message(
+            format!("Failed to save test model: {e}"),
+            MessageKind::Error,
+        );
+        return;
+    }
+    app.config = next;
+    if clearing {
+        app.set_message("Test model cleared".to_string(), MessageKind::Success);
+    } else {
+        app.set_message(format!("Test model set: {model}"), MessageKind::Success);
+    }
 }
 
 fn build_models(app: &App) -> Vec<String> {
@@ -267,6 +307,13 @@ fn build_models(app: &App) -> Vec<String> {
         .collect();
     matched.sort_unstable();
     matched
+}
+
+fn current_provider(app: &App) -> Option<&str> {
+    app.providers
+        .table_state
+        .selected()
+        .and_then(|i| app.provider_name_at(i))
 }
 
 fn nav_down(app: &mut App, total: usize, step: usize) {

@@ -28,8 +28,6 @@ pub(crate) fn cursor_split_spans(text: &str, cursor: usize, color: Color) -> Vec
 pub(crate) enum SuggestionStyle {
     /// Routes target: titled list with (n/m) counter, indented, ▶ highlight.
     Classic,
-    /// Quick form: bare entries aligned with the input, inverted highlight.
-    Compact,
 }
 
 /// Render a model-suggestion list (8-row window).
@@ -67,31 +65,13 @@ pub(crate) fn render_suggestion_lines(
 
     for (wi, model) in window.iter().enumerate() {
         let is_hi = suggest.active && scroll + wi == suggest.idx;
-        let span = match style {
-            SuggestionStyle::Compact => {
-                if is_hi {
-                    // Bare entry with inverted background keeps the column
-                    // alignment with the field text in both states.
-                    Span::styled(
-                        model.to_string(),
-                        Style::default()
-                            .fg(prov_color)
-                            .add_modifier(Modifier::REVERSED),
-                    )
-                } else {
-                    Span::styled(model.to_string(), Style::default().fg(t::MUTED))
-                }
-            }
-            SuggestionStyle::Classic => {
-                if is_hi {
-                    Span::styled(
-                        format!("  ▶ {model}"),
-                        Style::default().fg(prov_color).add_modifier(Modifier::BOLD),
-                    )
-                } else {
-                    Span::styled(format!("    {model}"), Style::default().fg(t::MUTED))
-                }
-            }
+        let span = if is_hi {
+            Span::styled(
+                format!("  ▶ {model}"),
+                Style::default().fg(prov_color).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(format!("    {model}"), Style::default().fg(t::MUTED))
         };
         lines.push(Line::from(span));
     }

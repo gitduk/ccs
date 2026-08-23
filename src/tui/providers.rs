@@ -139,7 +139,6 @@ pub(super) fn handle_key(
         }
         KeyCode::Char('a') => app.add(),
         KeyCode::Char('o') => super::quick_panel::open(app, super::state::QuickFormKind::Port),
-        KeyCode::Char('T') => super::quick_panel::open(app, super::state::QuickFormKind::TestModel),
         KeyCode::Enter | KeyCode::Char('e') => {
             if app.selected_name().is_some() {
                 app.start_edit();
