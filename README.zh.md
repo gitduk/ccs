@@ -249,7 +249,7 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
 
 ### 额度命令
 
-`quota_command` 是一条用 `sh -lc` 执行的 shell 片段（15 秒超时），输出显示在表格的 Quota 列和额度面板中。执行时会导出 `$_API_KEY`、`$_BASE_URL`、`$_PROVIDER`，因此密钥不必明文写进命令里。在 TUI 中按 `u` 配置。
+`quota_command` 是一条用 `sh -lc` 执行的 shell 片段（15 秒超时），输出显示在表格的 Quota 列和额度面板中。执行时会导出 `$_API_KEY`、`$_BASE_URL`、`$_PROVIDER`，因此密钥不必明文写进命令里。在 TUI 中按 `U` 配置，或按 `u` 直接执行并刷新 Quota。
 
 ```json
 "quota_command": "xh -b GET \"$_BASE_URL/v1/credits\" \"Authorization: Bearer $_API_KEY\""
@@ -272,7 +272,8 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
 | `f` | 切换该提供商的 fallback 参与状态 |
 | `F` | 切换全局 fallback 模式 |
 | `o` | 设置 / 清除该提供商的 pinned 端口 |
-| `u` | 配置该提供商的额度命令 |
+| `u` | 立即执行该提供商的额度命令并刷新 Quota |
+| `U` | 配置该提供商的额度命令（打开 Quota Command Preview 面板） |
 | `yy` | 复制该提供商的 Base URL 到剪贴板 |
 | `yc` | 复制可直接运行的测试 curl 命令到剪贴板 |
 | `S` | 切换后台代理服务器 |
@@ -336,7 +337,7 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
 | `t` | 测试光标下的模型（结果显示在模型名后） |
 | `p` | 设置 / 清除该提供商的 Test Model |
 
-### 额度面板（`u`）
+### 额度面板（`U`）
 
 | 按键 | 操作 |
 | --- | --- |

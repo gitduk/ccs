@@ -249,7 +249,7 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
 
 ### Quota Command
 
-`quota_command` is a shell snippet run with `sh -lc` (15s timeout) whose output is shown in the table's Quota column and in the quota panel. It runs with `$_API_KEY`, `$_BASE_URL` and `$_PROVIDER` exported, so the key never has to be written into the command in plaintext. Configure it with `u` in the TUI.
+`quota_command` is a shell snippet run with `sh -lc` (15s timeout) whose output is shown in the table's Quota column and in the quota panel. It runs with `$_API_KEY`, `$_BASE_URL` and `$_PROVIDER` exported, so the key never has to be written into the command in plaintext. Configure it with `U` in the TUI, or press `u` to run it immediately and refresh the Quota column.
 
 ```json
 "quota_command": "xh -b GET \"$_BASE_URL/v1/credits\" \"Authorization: Bearer $_API_KEY\""
@@ -272,7 +272,8 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
 | `f` | Toggle this provider's fallback participation |
 | `F` | Toggle global fallback mode |
 | `o` | Set/clear the provider's pinned port |
-| `u` | Configure the provider's quota command |
+| `u` | Run the provider's quota command immediately and refresh Quota |
+| `U` | Configure the provider's quota command (opens the Quota Command Preview panel) |
 | `yy` | Copy the provider's base URL to the clipboard |
 | `yc` | Copy a ready-to-run test curl command to the clipboard |
 | `S` | Toggle the background proxy server |
@@ -336,7 +337,7 @@ Fields: Name, Base URL, API Key, then the Routes section. Vim-style, starts in N
 | `t` | Test the highlighted model (result shown after its name) |
 | `p` | Set/clear the provider's Test Model |
 
-### Quota panel (`u`)
+### Quota panel (`U`)
 
 | Key | Action |
 | --- | --- |

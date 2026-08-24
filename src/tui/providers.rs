@@ -148,6 +148,11 @@ pub(super) fn handle_key(
         }
         KeyCode::Char('u') => {
             if let Some(name) = app.selected_name().map(|s| s.to_string()) {
+                super::testing::run_quota_for_name(app, &name);
+            }
+        }
+        KeyCode::Char('U') => {
+            if let Some(name) = app.selected_name().map(|s| s.to_string()) {
                 let saved = app
                     .config
                     .providers

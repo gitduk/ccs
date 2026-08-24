@@ -27,7 +27,8 @@ pub(super) fn draw_help(f: &mut Frame, scroll: &mut u16) {
                 ("o", "Set/clear selected provider's pinned port"),
                 ("f", "Toggle this provider's fallback"),
                 ("F", "Toggle fallback mode (global)"),
-                ("u", "Configure selected provider's quota command"),
+                ("u", "Run quota command & refresh"),
+                ("U", "Configure / preview quota command"),
                 ("yy", "Copy provider base URL to clipboard"),
                 ("yc", "Copy test curl command to clipboard"),
                 ("S", "Toggle background proxy"),
@@ -90,7 +91,7 @@ pub(super) fn draw_help(f: &mut Frame, scroll: &mut u16) {
             ],
         ),
         (
-            "Quota  (u)",
+            "Quota  (U)",
             &[
                 ("i / a", "Edit command (Insert)"),
                 ("s", "Run command and preview output"),
@@ -269,7 +270,7 @@ mod tests {
         let mut scroll = 0;
         let out = render_help(120, 24, &mut scroll);
         assert!(out.contains("Provider List"));
-        assert!(!out.contains("Quota  (u)"));
+        assert!(!out.contains("Quota  (U)"));
     }
 
     #[test]
@@ -277,7 +278,7 @@ mod tests {
         let mut scroll = u16::MAX;
         let out = render_help(120, 24, &mut scroll);
         assert!(scroll < u16::MAX, "scroll was not clamped");
-        assert!(out.contains("Quota  (u)"));
+        assert!(out.contains("Quota  (U)"));
         assert!(out.contains("Save and close"));
     }
 
