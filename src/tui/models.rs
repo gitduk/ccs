@@ -1,21 +1,23 @@
 //! Models browser popup.
 //!
 //! This module owns the searchable models dialog, its navigation, clipboard
-//! actions for the currently highlighted model, and pinning a model as the
-//! provider's Test Model (`t`).
+//! actions for the currently highlighted model, testing it (`t`), and pinning
+//! it as the provider's Test Model (`p`). Test results render after each model
+//! name.
 
 use std::time::Instant;
 
+use super::state::{App, MessageKind, Mode};
+use super::theme::{self as t};
+use super::ui::format::{fmt_latency, truncate_error};
+use super::ui::layout::centered_fixed;
+use crate::tester::TestStatus;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
-
-use super::state::{App, MessageKind, Mode};
-use super::theme::{self as t};
-use super::ui::layout::centered_fixed;
 
 /// Estimated visible rows used for scroll look-ahead in nav and 'G' jump.
 /// Matches the viewport assumption in draw_popup's dialog_height calculation.
@@ -103,10 +105,12 @@ pub(super) fn handle_key(
                 app.models.search_active = true;
             }
             KeyCode::Char('t') => {
-                let Some(prov) = current_provider(app).map(str::to_string) else {
-                    return Ok(());
-                };
-                if let Some(&name) = refs.get(app.models.selected) {
+                if let Some((prov, name)) = selected_model(app, &refs) {
+                    super::testing::test_specific_model(app, &prov, name);
+                }
+            }
+            KeyCode::Char('p') => {
+                if let Some((prov, name)) = selected_model(app, &refs) {
                     set_test_model(app, &prov, name);
                 }
             }
@@ -230,20 +234,22 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
     } else {
         for (i, model) in models.iter().enumerate() {
             let is_selected = i == app.models.selected;
-            if is_selected {
-                lines.push(Line::from(vec![
+            let mut spans = if is_selected {
+                vec![
                     Span::styled("  ▶ ", Style::default().fg(prov_color)),
                     Span::styled(
                         model.to_string(),
                         Style::default().fg(prov_color).add_modifier(Modifier::BOLD),
                     ),
-                ]));
+                ]
             } else {
-                lines.push(Line::from(vec![
+                vec![
                     Span::raw("    "),
                     Span::styled(model.to_string(), Style::default().fg(t::TEXT)),
-                ]));
-            }
+                ]
+            };
+            spans.extend(model_result_suffix(app, prov_name, model));
+            lines.push(Line::from(spans));
         }
     }
 
@@ -263,7 +269,7 @@ fn current_test_model(app: &App) -> Option<&str> {
 }
 
 /// Pin the highlighted model as the provider's Test Model and persist it.
-/// Pressing `t` again on the pinned model clears it.
+/// Pressing `p` again on the pinned model clears it.
 fn set_test_model(app: &mut App, provider_name: &str, model: &str) {
     let clearing = current_test_model(app) == Some(model);
     let mut next = app.config.clone();
@@ -286,6 +292,34 @@ fn set_test_model(app: &mut App, provider_name: &str, model: &str) {
         app.set_message("Test model cleared".to_string(), MessageKind::Success);
     } else {
         app.set_message(format!("Test model set: {model}"), MessageKind::Success);
+    }
+}
+/// Suffix spans rendered after a model name: a live "Testing…" indicator or
+/// the last test result for that model (latency for OK, reason otherwise).
+fn model_result_suffix(app: &App, provider: &str, model: &str) -> Vec<Span<'static>> {
+    // Only show the live indicator while a test is actually running; after
+    // completion the row falls through to the stored result below.
+    if app.tests.pending.contains(provider)
+        && app.tests.testing_model.get(provider).map(String::as_str) == Some(model)
+    {
+        return vec![Span::styled(
+            "  Testing…",
+            Style::default().fg(t::MUTED).add_modifier(Modifier::ITALIC),
+        )];
+    }
+    let Some(r) = app.tests.results.get(provider).and_then(|m| m.get(model)) else {
+        return vec![];
+    };
+    match &r.status {
+        TestStatus::Ok => vec![Span::styled(
+            format!("  ✓ {}", fmt_latency(r.latency_ms)),
+            Style::default().fg(t::SUCCESS),
+        )],
+        TestStatus::AuthFailed => vec![Span::styled("  ✗ auth", Style::default().fg(t::ERROR))],
+        TestStatus::Error(e) => vec![Span::styled(
+            format!("  ✗ {}", truncate_error(e)),
+            Style::default().fg(t::ERROR),
+        )],
     }
 }
 
@@ -314,6 +348,13 @@ fn current_provider(app: &App) -> Option<&str> {
         .table_state
         .selected()
         .and_then(|i| app.provider_name_at(i))
+}
+
+/// Provider name and the highlighted model name, if both exist.
+fn selected_model<'a>(app: &App, refs: &'a [&str]) -> Option<(String, &'a str)> {
+    let prov = current_provider(app)?.to_string();
+    let model = *refs.get(app.models.selected)?;
+    Some((prov, model))
 }
 
 fn nav_down(app: &mut App, total: usize, step: usize) {

@@ -1,7 +1,7 @@
-//! Provider list and detail panels.
+//! Provider list panel.
 //!
-//! This module owns the main provider table, its detail panel, and the
-//! Normal-mode key handling that acts on the selected provider.
+//! This module owns the main provider table and the Normal-mode key handling
+//! that acts on the selected provider.
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Frame;
@@ -12,13 +12,11 @@ use ratatui::widgets::{Block, Cell, Padding, Paragraph, Row, Table};
 use unicode_width::UnicodeWidthStr;
 
 use crate::config::{ApiFormat, Provider};
-use crate::tester::TestStatus;
 
 use super::state::{App, ConfirmAction, MessageKind, Mode, QuotaStatus};
 use super::theme::{self as t};
 use super::ui::format::{
-    api_key_display_len, col_width, config_path_display, fmt_latency, masked_api_key,
-    truncate_chars, truncate_error,
+    api_key_display_len, col_width, config_path_display, masked_api_key, truncate_chars,
 };
 use super::{ServerHandle, server};
 
@@ -148,7 +146,6 @@ pub(super) fn handle_key(
             app.toggle_provider_enabled()?;
             server::sync_proxy_config(app, server_handle);
         }
-        KeyCode::Char('t') => super::testing::test_selected(app),
         KeyCode::Char('u') => {
             if let Some(name) = app.selected_name().map(|s| s.to_string()) {
                 let saved = app
@@ -387,160 +384,6 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 const COL_GAP: u16 = 4;
-const MODEL_COUNT_WIDTH: usize = 3;
-const MODEL_NAME_TRUNCATE: usize = 40;
-const INFO_FIELD_SEP: &str = "   ";
-
-pub(super) fn draw_detail_panel(f: &mut Frame, app: &mut App, area: Rect) {
-    let block = Block::default().padding(Padding::horizontal(1));
-
-    let label = Style::default().fg(t::MUTED);
-    let title_line = Line::from(Span::styled(
-        "Info",
-        Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD),
-    ));
-
-    let Some(name) = app
-        .providers
-        .table_state
-        .selected()
-        .and_then(|i| app.provider_name_at(i))
-    else {
-        f.render_widget(
-            Paragraph::new(vec![Line::from(""), title_line]).block(block),
-            area,
-        );
-        return;
-    };
-
-    let mut lines = vec![Line::from(""), title_line];
-    if app.tests.pending.contains(name) {
-        let prev = app.tests.results.get(name);
-        let latency_str = prev
-            .map(|r| fmt_latency(r.latency_ms))
-            .unwrap_or_else(|| "—".to_string());
-        let models_str = prev
-            .and_then(|r| r.model_count)
-            .map(|n| format!("{n:<width$}", width = MODEL_COUNT_WIDTH))
-            .unwrap_or_else(|| format!("{:<width$}", "—", width = MODEL_COUNT_WIDTH));
-        let testing_model = app
-            .tests
-            .testing_model
-            .get(name)
-            .map(|m| format!(" ({})", truncate_chars(m, MODEL_NAME_TRUNCATE)))
-            .unwrap_or_default();
-        let status_text = format!("Testing{testing_model}");
-        let left_w = status_text.as_str().width();
-        let models_pad = left_w.saturating_sub(MODEL_COUNT_WIDTH);
-        lines.push(Line::from(vec![
-            Span::styled("Status ", label),
-            Span::styled(
-                status_text,
-                Style::default().fg(t::MUTED).add_modifier(Modifier::ITALIC),
-            ),
-            Span::styled(format!("{INFO_FIELD_SEP}Latency "), label),
-            Span::styled(latency_str, Style::default().fg(t::MUTED)),
-        ]));
-        let mut pending_metrics = vec![
-            Span::styled("Models ", label),
-            Span::styled(models_str, Style::default().fg(t::MUTED)),
-            Span::raw(" ".repeat(models_pad)),
-        ];
-        let muted = Style::default().fg(t::MUTED);
-        pending_metrics.extend([
-            Span::styled(format!("{INFO_FIELD_SEP}Tools   "), label),
-            capability_span(prev.and_then(|r| r.tools_supported), muted, muted),
-            Span::styled(format!("{INFO_FIELD_SEP}Images "), label),
-            capability_span(prev.and_then(|r| r.images_supported), muted, muted),
-        ]);
-        lines.push(Line::from(pending_metrics));
-    } else if let Some(r) = app.tests.results.get(name) {
-        let (status_str, status_style) = match &r.status {
-            TestStatus::Ok => (
-                "OK".to_string(),
-                Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD),
-            ),
-            TestStatus::AuthFailed => (
-                "Auth failed".to_string(),
-                Style::default().fg(t::ERROR).add_modifier(Modifier::BOLD),
-            ),
-            TestStatus::Error(e) => (truncate_error(e), Style::default().fg(t::ERROR)),
-        };
-        let models_str = match r.model_count {
-            Some(n) => Span::styled(
-                format!("{n:<width$}", width = MODEL_COUNT_WIDTH),
-                Style::default().fg(t::TEXT),
-            ),
-            None => Span::styled(
-                format!("{:<width$}", "—", width = MODEL_COUNT_WIDTH),
-                Style::default().fg(t::MUTED),
-            ),
-        };
-        // Line 1: Status + Latency
-        let status_str_w = status_str.as_str().width();
-        let model_display = if !r.used_model.is_empty() {
-            format!(" ({})", truncate_chars(&r.used_model, MODEL_NAME_TRUNCATE))
-        } else {
-            String::new()
-        };
-        let left_w = status_str_w + model_display.as_str().width();
-        let mut status_spans = vec![
-            Span::styled("Status ", label),
-            Span::styled(status_str, status_style),
-        ];
-        if !model_display.is_empty() {
-            status_spans.push(Span::styled(model_display, Style::default().fg(t::MUTED)));
-        }
-        status_spans.extend([
-            Span::styled(format!("{INFO_FIELD_SEP}Latency "), label),
-            Span::styled(fmt_latency(r.latency_ms), Style::default().fg(t::TEXT)),
-        ]);
-        lines.push(Line::from(status_spans));
-        // Line 2: Models + Tools  (left side padded to match line 1)
-        let models_pad = left_w.saturating_sub(MODEL_COUNT_WIDTH);
-        let mut metrics_spans = vec![
-            Span::styled("Models ", label),
-            models_str,
-            Span::raw(" ".repeat(models_pad)),
-        ];
-        metrics_spans.extend([
-            Span::styled(format!("{INFO_FIELD_SEP}Tools   "), label),
-            capability_span(
-                r.tools_supported,
-                Style::default().fg(t::SUCCESS),
-                Style::default().fg(t::ERROR),
-            ),
-            Span::styled(format!("{INFO_FIELD_SEP}Images "), label),
-            capability_span(
-                r.images_supported,
-                Style::default().fg(t::SUCCESS),
-                Style::default().fg(t::ERROR),
-            ),
-        ]);
-        lines.push(Line::from(metrics_spans));
-    } else {
-        lines.push(Line::from(vec![
-            Span::styled("Press ", Style::default().fg(t::MUTED)),
-            Span::styled(
-                "[t]",
-                Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" to test provider", Style::default().fg(t::MUTED)),
-        ]));
-    }
-
-    app.detail_line_count = super::ui::format::DETAIL_HEIGHT;
-    f.render_widget(Paragraph::new(lines).block(block), area);
-}
-
-/// Render a capability probe result (Tools / Images): yes / no / not probed.
-fn capability_span(v: Option<bool>, yes: Style, no: Style) -> Span<'static> {
-    match v {
-        Some(true) => Span::styled("yes", yes),
-        Some(false) => Span::styled("no", no),
-        None => Span::styled("—", Style::default().fg(t::MUTED)),
-    }
-}
 
 fn build_test_curl(provider: &Provider, model: &str) -> Result<String, String> {
     let api_key = provider.resolve_api_key().map_err(|e| e.to_string())?;
@@ -676,7 +519,6 @@ mod tests {
             quota_status: std::collections::HashMap::new(),
             quota_form: None,
             quick_form: None,
-            detail_line_count: 0,
             help_scroll: 0,
             sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler::new(),
             config_needs_sync: false,

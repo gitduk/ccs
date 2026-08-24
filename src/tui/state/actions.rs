@@ -495,9 +495,6 @@ impl App {
         let changed = !events.is_empty();
         for event in events {
             match event {
-                TestEvent::ModelSelected { provider, model } => {
-                    self.tests.testing_model.insert(provider, model);
-                }
                 TestEvent::Completed {
                     provider: name,
                     result,
@@ -534,12 +531,22 @@ impl App {
                             ..Default::default()
                         },
                     );
-                    // Clear stale error when test passes so Info panel shows clean state.
+                    // Clear stale error when test passes so the Models panel
+                    // shows a clean per-model result.
                     if !failed && let Ok(mut m) = self.metrics.lock() {
                         m.clear_error(&name);
                     }
-                    self.tests.results.insert(name.clone(), result);
-                    crate::test_store::save(&self.tests.results);
+                    // Store per-model so the Models panel can show the result
+                    // next to the model name. used_model is empty only when the
+                    // test failed before selecting a model (no per-model entry).
+                    if !result.used_model.is_empty() {
+                        self.tests
+                            .results
+                            .entry(name.clone())
+                            .or_default()
+                            .insert(result.used_model.clone(), result);
+                        crate::test_store::save(&self.tests.results);
+                    }
                 }
                 TestEvent::ModelsOnly {
                     provider: name,

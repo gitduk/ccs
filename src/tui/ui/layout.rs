@@ -11,7 +11,6 @@ use crate::tui::state::App;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PanelId {
     Providers,
-    Detail,
     Stats,
     Logs,
 }
@@ -46,14 +45,13 @@ pub(super) struct ScreenPlan {
     pub split: bool,
     /// Row index (inside the logs inner area) where the Messages section
     /// ends and the Recent Requests section begins. Chosen so the
-    /// Messages end aligns with the left column's Detail end.
+    /// Messages end aligns with the left column's end.
     pub top_height: u16,
 }
 
 /// Allocated heights for left-column panels.
 struct AllocatedHeights {
     providers: u16,
-    detail: u16,
     stats: u16,
 }
 
@@ -63,8 +61,6 @@ struct AllocatedHeights {
 pub(super) const LOGS_PANEL_WIDTH: u16 = 44;
 /// Minimum terminal width to enable the right-column split.
 const MIN_WIDTH_FOR_SPLIT: u16 = 120;
-/// Minimum height for the detail panel to be shown at all.
-const DETAIL_MIN_HEIGHT: u16 = 2;
 
 // ── Per-panel height spec helpers ─────────────────────────────────
 
@@ -74,15 +70,6 @@ const DETAIL_MIN_HEIGHT: u16 = 2;
 fn providers_spec(app: &App) -> HeightSpec {
     let ideal = (app.provider_count() as u16 + 2).max(3);
     HeightSpec { min: 3, ideal }
-}
-
-/// Minimum / ideal height for the Detail panel.
-/// `route_avail` is the inner text width available for route wrapping.
-fn detail_spec(app: &App) -> HeightSpec {
-    HeightSpec {
-        min: DETAIL_MIN_HEIGHT,
-        ideal: app.detail_line_count.max(DETAIL_MIN_HEIGHT),
-    }
 }
 
 /// Minimum / ideal height for the Stats panel (By Provider section only;
@@ -100,29 +87,16 @@ fn stats_spec(app: &App) -> HeightSpec {
 /// Allocate vertical space to left-column panels given their specs.
 fn allocate_heights(
     prov_spec: HeightSpec,
-    det_spec: HeightSpec,
     sta_spec: HeightSpec,
     total_height: u16,
 ) -> AllocatedHeights {
     let providers = prov_spec.ideal.min(total_height.max(prov_spec.min));
-    let remaining = total_height.saturating_sub(providers);
+    let leftover = total_height.saturating_sub(providers);
 
-    let show_detail = remaining >= det_spec.min;
-    let detail = if show_detail {
-        det_spec.ideal.min(remaining)
-    } else {
-        0
-    };
-
-    let leftover = total_height.saturating_sub(providers + detail);
     let show_stats = leftover >= sta_spec.min;
     let stats = if show_stats { leftover } else { 0 };
 
-    AllocatedHeights {
-        providers,
-        detail,
-        stats,
-    }
+    AllocatedHeights { providers, stats }
 }
 
 /// Build left-column panel placements from allocated heights.
@@ -130,7 +104,6 @@ fn allocate_heights(
 fn build_left_column(heights: &AllocatedHeights, left_rect: Rect) -> Vec<PanelPlacement> {
     let panels = [
         (PanelId::Providers, heights.providers),
-        (PanelId::Detail, heights.detail),
         (PanelId::Stats, heights.stats),
     ];
 
@@ -178,22 +151,20 @@ pub(super) fn plan_main_screen(app: &App, area: Rect) -> ScreenPlan {
     };
 
     let prov_spec = providers_spec(app);
-    let det_spec = detail_spec(app);
     let sta_spec = stats_spec(app);
 
-    let heights = allocate_heights(prov_spec, det_spec, sta_spec, inner_left.height);
+    let heights = allocate_heights(prov_spec, sta_spec, inner_left.height);
 
     let left = build_left_column(&heights, inner_left);
 
     // top_height: row inside the logs inner area where Messages ends and
-    // Requests begins. We want Messages' last row to align with Detail's
-    // last content row (with a +1 offset when Stats is shown, to land on
-    // the blank first row of Stats).  Since the left column content is
-    // shifted down by 1 row by the chrome's top border, but the logs
-    // column has no top border, we add 1 here to compensate.
+    // Requests begins. We want Messages' last row to align with the last
+    // content row of the left column (with a +1 offset when Stats is shown,
+    // to land on the blank first row of Stats).  Since the left column
+    // content is shifted down by 1 row by the chrome's top border, but the
+    // logs column has no top border, we add 1 here to compensate.
     let top_height = 1u16
         .saturating_add(heights.providers)
-        .saturating_add(heights.detail)
         .saturating_add(if heights.stats > 0 { 1 } else { 0 });
 
     let logs = if split {

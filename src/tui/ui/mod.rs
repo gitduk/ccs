@@ -14,7 +14,7 @@ use ratatui::layout::Rect;
 use super::state::{App, Mode};
 use crate::tui::logs::draw_panel as draw_logs_panel;
 use crate::tui::provider_stats::draw_panel as draw_provider_stats;
-use crate::tui::providers::{draw_detail_panel, draw_table};
+use crate::tui::providers::draw_table;
 use layout::{PanelId, plan_main_screen};
 
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -40,7 +40,6 @@ fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
     for placement in &plan.left {
         match placement.id {
             PanelId::Providers => draw_table(f, app, placement.area),
-            PanelId::Detail => draw_detail_panel(f, app, placement.area),
             PanelId::Stats => draw_provider_stats(f, app, placement.area),
             PanelId::Logs => {}
         }

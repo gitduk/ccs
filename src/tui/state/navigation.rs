@@ -34,8 +34,6 @@ impl App {
 
         let bg_proxy_pid = super::bg_proxy::load_bg_proxy_pid();
 
-        let detail_line_count = crate::tui::ui::format::DETAIL_HEIGHT;
-
         // Restore the last test results; drop entries whose provider no longer
         // exists in config (deleted externally while ccs wasn't running).
         let mut tests = super::TestState::new();
@@ -80,7 +78,6 @@ impl App {
             quota_status: std::collections::HashMap::new(),
             quota_form: None,
             quick_form: None,
-            detail_line_count,
             help_scroll: 0,
             sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler::new(),
             config_needs_sync: false,

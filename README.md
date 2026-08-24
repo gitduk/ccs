@@ -19,7 +19,7 @@ A lightweight API proxy for routing Claude Code traffic between multiple provide
 - **Per-Provider Fallback**: Each provider independently opts in/out of the fallback rotation
 - **Per-Project Routing**: Give a provider its own pinned port so different projects can use different providers at the same time
 - **Format Auto-Detection**: Adding a provider probes the endpoint to determine `api_format` / `api_version` and fetches its model list
-- **Connectivity Tester**: Tests a provider and shows Status, Latency, Model count, Tool calling support, and Image input support in the Info panel
+- **Connectivity Tester**: Test any model from the Models panel (`t`); the result — latency, auth status, or error — shows right after the model name
 - **Usage Stats & Request Log**: Token usage per provider/model and a browsable request log, both persisted in SQLite
 - **Quota Command**: Attach a shell command per provider to surface its remaining quota in the table
 
@@ -158,7 +158,7 @@ Configuration is stored in `~/.ccs/config.json`. Set `CCS_CONFIG_DIR` to use a d
 | `routes` | `[]` | Glob routing rules (see below) |
 | `inject_thinking_history` | `true` | Inject empty thinking blocks into assistant history turns; needed by DeepSeek-compatible upstreams |
 | `port` | unset | Dedicated pinned listener port (see below) |
-| `test_model` | unset | Model pinned for the connectivity test (set via `m` → `t` in the Models panel) |
+| `test_model` | unset | Model pinned for the connectivity test (set via `m` → `p` in the Models panel) |
 | `quota_command` | unset | Shell command backing the Quota column |
 
 ### API Key Resolution
@@ -271,7 +271,6 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
 | `p` | Toggle provider enabled/disabled |
 | `f` | Toggle this provider's fallback participation |
 | `F` | Toggle global fallback mode |
-| `t` | Test connectivity |
 | `o` | Set/clear the provider's pinned port |
 | `u` | Configure the provider's quota command |
 | `yy` | Copy the provider's base URL to the clipboard |
@@ -334,7 +333,8 @@ Fields: Name, Base URL, API Key, then the Routes section. Vim-style, starts in N
 | `Ctrl-J` / `Ctrl-K` | Navigate while filtering |
 | `yy` / `Enter` | Copy the selected model name |
 | `q` / `Esc` / `Ctrl-C` | Back to the provider list |
-| `t` | Set/clear the provider's Test Model |
+| `t` | Test the highlighted model (result shown after its name) |
+| `p` | Set/clear the provider's Test Model |
 
 ### Quota panel (`u`)
 

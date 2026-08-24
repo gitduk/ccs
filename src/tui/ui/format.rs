@@ -233,7 +233,3 @@ pub(crate) fn shorten_model_name(model: &str) -> &str {
     let stripped = strip_model_prefix(model);
     stripped.strip_prefix("claude-").unwrap_or(stripped)
 }
-
-/// Pack enabled routes into wrapped lines given the available text width.
-/// Returns groups of routes, each group rendered on one line.
-pub(crate) const DETAIL_HEIGHT: u16 = 4;

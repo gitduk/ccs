@@ -96,8 +96,6 @@ pub struct ProviderList {
 /// Background test state: channels, results, and the shared HTTP client.
 /// Events sent from background test tasks back to the TUI.
 pub(super) enum TestEvent {
-    /// The task has selected a model and is about to test it.
-    ModelSelected { provider: String, model: String },
     /// The task completed (success, auth failure, or all retries exhausted).
     Completed {
         provider: String,
@@ -130,7 +128,8 @@ pub(super) enum TestEvent {
 }
 
 pub struct TestState {
-    pub results: HashMap<String, TestResult>,
+    /// Latest test result per provider per model: provider name → model → result.
+    pub results: HashMap<String, HashMap<String, TestResult>>,
     pub pending: HashSet<String>,
     /// Model currently under test for each pending provider.
     pub testing_model: HashMap<String, String>,
@@ -236,8 +235,6 @@ pub struct App {
     pub quota_form: Option<QuotaForm>,
     /// Quick single-field popup (Port) for the selected provider.
     pub quick_form: Option<QuickForm>,
-    /// Line count from the last rendered detail panel, used to size the panel next frame.
-    pub detail_line_count: u16,
     /// Scroll offset of the Help dialog; it is taller than most terminals.
     pub help_scroll: u16,
     pub(super) sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler,
@@ -761,12 +758,10 @@ mod tests {
             quota_status: std::collections::HashMap::new(),
             quota_form: None,
             quick_form: None,
-            detail_line_count: 6,
             help_scroll: 0,
             sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler::new(),
             config_needs_sync: false,
         };
-
         app.tests.pending.insert("vllm".into());
         app.tests
             .testing_model
@@ -789,11 +784,14 @@ mod tests {
             .unwrap();
 
         assert!(app.drain_test_results());
-
         assert!(!app.tests.pending.contains("vllm"));
         assert_eq!(
-            app.tests.results.get("vllm").unwrap().used_model,
-            "sonnet-4-6"
+            app.tests
+                .results
+                .get("vllm")
+                .and_then(|m| m.get("sonnet-4-6"))
+                .map(|r| r.used_model.as_str()),
+            Some("sonnet-4-6")
         );
         assert_eq!(
             app.tests.testing_model.get("vllm").map(String::as_str),
@@ -881,7 +879,12 @@ mod tests {
 
         // Simulate a restart: a fresh App must restore the persisted result.
         let restored = App::new().unwrap();
-        let r = restored.tests.results.get("vllm").expect("restored result");
+        let r = restored
+            .tests
+            .results
+            .get("vllm")
+            .and_then(|m| m.get("gemma-4-31b-it"))
+            .expect("restored result");
         assert_eq!(r.latency_ms, 55);
         assert_eq!(r.used_model, "gemma-4-31b-it");
         assert_eq!(r.tools_supported, Some(true));

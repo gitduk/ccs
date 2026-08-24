@@ -19,7 +19,7 @@
 - **按提供商控制 Fallback**：每个提供商独立控制是否参与 fallback 轮询
 - **按项目路由**：为提供商分配独立监听端口，让不同项目同时使用不同提供商
 - **格式自动探测**：添加提供商时自动探测 `api_format` / `api_version`，并拉取模型列表
-- **连通性测试**：测试提供商后，Info 面板展示状态、延迟、模型数量、工具调用支持、图片输入支持
+- **连通性测试**：在模型面板中对任一模型按 `t` 测试，结果（延迟、认证状态或错误）直接显示在模型名后面
 - **用量统计与请求日志**：按提供商 / 模型统计 token 用量，并可浏览请求日志，均持久化在 SQLite 中
 - **额度命令**：为提供商挂一条 shell 命令，在表格的 Quota 列展示剩余额度
 
@@ -158,7 +158,7 @@ export OPENAI_API_KEY=any-value
 | `routes` | `[]` | glob 路由规则（见下文） |
 | `inject_thinking_history` | `true` | 向历史 assistant 轮注入空 thinking 块，DeepSeek 兼容上游需要 |
 | `port` | 未设置 | 该提供商独占的 pinned 监听端口（见下文） |
-| `test_model` | 未设置 | 固定用于连通性测试的模型（在模型面板中按 `m` → `t` 设置） |
+| `test_model` | 未设置 | 固定用于连通性测试的模型（在模型面板中按 `m` → `p` 设置） |
 | `quota_command` | 未设置 | Quota 列背后的 shell 命令 |
 
 ### API Key 解析
@@ -271,7 +271,6 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
 | `p` | 切换提供商启用 / 禁用 |
 | `f` | 切换该提供商的 fallback 参与状态 |
 | `F` | 切换全局 fallback 模式 |
-| `t` | 测试连通性 |
 | `o` | 设置 / 清除该提供商的 pinned 端口 |
 | `u` | 配置该提供商的额度命令 |
 | `yy` | 复制该提供商的 Base URL 到剪贴板 |
@@ -334,7 +333,8 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
 | `Ctrl-J` / `Ctrl-K` | 过滤状态下上下移动 |
 | `yy` / `Enter` | 复制选中的模型名 |
 | `q` / `Esc` / `Ctrl-C` | 返回提供商列表 |
-| `t` | 设置 / 清除该提供商的 Test Model |
+| `t` | 测试光标下的模型（结果显示在模型名后） |
+| `p` | 设置 / 清除该提供商的 Test Model |
 
 ### 额度面板（`u`）
 

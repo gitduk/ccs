@@ -1,6 +1,7 @@
 //! Persistent test results: one JSON file per install (`~/.ccs/ccs.json`),
-//! holding the latest `TestResult` per provider name. A plain file instead of
-//! the SQLite DB so the store can evolve without a schema migration.
+//! holding the latest `TestResult` per provider per model
+//! (`{ provider: { model: result } }`). A plain file instead of the SQLite DB
+//! so the store can evolve without a schema migration.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -16,7 +17,7 @@ pub fn store_path() -> Option<PathBuf> {
 }
 
 /// Load persisted test results; a missing or corrupt file yields an empty map.
-pub fn load() -> HashMap<String, TestResult> {
+pub fn load() -> HashMap<String, HashMap<String, TestResult>> {
     let Some(path) = store_path() else {
         return HashMap::new();
     };
@@ -31,7 +32,7 @@ pub fn load() -> HashMap<String, TestResult> {
 
 /// Atomically persist the whole map, reusing the config file's atomic-write
 /// pattern so a crash never leaves a partial file.
-pub fn save(results: &HashMap<String, TestResult>) {
+pub fn save(results: &HashMap<String, HashMap<String, TestResult>>) {
     let Some(path) = store_path() else {
         return;
     };
@@ -65,15 +66,24 @@ mod tests {
     #[test]
     fn save_then_load_round_trips() {
         let _guard = ConfigDirGuard::new();
-        let mut map = HashMap::new();
-        map.insert("openc".to_string(), sample_result("deepseek-v4-flash"));
-        map.insert("vllm".to_string(), sample_result("gpt-4o"));
+        let mut map: HashMap<String, HashMap<String, TestResult>> = HashMap::new();
+        map.insert(
+            "openc".to_string(),
+            HashMap::from([(
+                "deepseek-v4-flash".to_string(),
+                sample_result("deepseek-v4-flash"),
+            )]),
+        );
+        map.insert(
+            "vllm".to_string(),
+            HashMap::from([("gpt-4o".to_string(), sample_result("gpt-4o"))]),
+        );
 
         save(&map);
         let loaded = load();
 
         assert_eq!(loaded.len(), 2);
-        let r = &loaded["openc"];
+        let r = &loaded["openc"]["deepseek-v4-flash"];
         assert!(matches!(r.status, TestStatus::Ok));
         assert_eq!(r.latency_ms, 42);
         assert_eq!(r.used_model, "deepseek-v4-flash");
@@ -101,8 +111,11 @@ mod tests {
     fn saved_file_is_0600() {
         use std::os::unix::fs::PermissionsExt;
         let _guard = ConfigDirGuard::new();
-        let mut map = HashMap::new();
-        map.insert("openc".to_string(), sample_result("m"));
+        let mut map: HashMap<String, HashMap<String, TestResult>> = HashMap::new();
+        map.insert(
+            "openc".to_string(),
+            HashMap::from([("m".to_string(), sample_result("m"))]),
+        );
         save(&map);
 
         let mode = std::fs::metadata(store_path().unwrap())
@@ -116,27 +129,33 @@ mod tests {
     #[test]
     fn save_then_load_preserves_error_status() {
         let _guard = ConfigDirGuard::new();
-        let mut map = HashMap::new();
+        let mut map: HashMap<String, HashMap<String, TestResult>> = HashMap::new();
         map.insert(
             "auth".to_string(),
-            TestResult {
-                status: TestStatus::AuthFailed,
-                ..sample_result("m")
-            },
+            HashMap::from([(
+                "m".to_string(),
+                TestResult {
+                    status: TestStatus::AuthFailed,
+                    ..sample_result("m")
+                },
+            )]),
         );
         map.insert(
             "err".to_string(),
-            TestResult {
-                status: TestStatus::Error("HTTP 429".to_string()),
-                ..sample_result("m")
-            },
+            HashMap::from([(
+                "m".to_string(),
+                TestResult {
+                    status: TestStatus::Error("HTTP 429".to_string()),
+                    ..sample_result("m")
+                },
+            )]),
         );
         save(&map);
         let loaded = load();
 
-        assert!(matches!(loaded["auth"].status, TestStatus::AuthFailed));
+        assert!(matches!(loaded["auth"]["m"].status, TestStatus::AuthFailed));
         assert!(matches!(
-            loaded["err"].status,
+            loaded["err"]["m"].status,
             TestStatus::Error(ref e) if e == "HTTP 429"
         ));
     }

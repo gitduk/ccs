@@ -1,4 +1,3 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use super::App;
@@ -6,185 +5,25 @@ use super::state::{MessageKind, TestEvent};
 
 const TEST_TASK_TIMEOUT_SECS: u64 = 10;
 
-pub(super) fn test_selected(app: &mut App) {
-    let Some(name) = app.selected_name().map(|s| s.to_string()) else {
+/// Test a single explicit model for the provider (from the Models panel).
+/// No retries: the user asked for this model specifically.
+pub(super) fn test_specific_model(app: &mut App, provider_name: &str, model: &str) {
+    let Some(provider) = app.config.providers.get(provider_name).cloned() else {
         return;
     };
-    test_provider_by_name(app, &name);
-    run_quota_for_name(app, &name);
-}
-
-pub(super) fn test_provider_by_name(app: &mut App, name: &str) {
-    let Some(provider) = app.config.providers.get(name).cloned() else {
-        return;
-    };
-
-    let cached = app
-        .models
-        .provider_models
-        .get(name)
-        .cloned()
-        .filter(|s| !s.is_empty());
-
-    // A pinned Test Model always wins over auto-picking one; otherwise fall
-    // back to the fetch-then-test flow if no model list is known yet.
-    let candidates: Vec<String> = match (provider.test_model.clone(), cached) {
-        (Some(model), _) => vec![model],
-        (None, Some(supported)) => {
-            // Pick the best test model:
-            // 1. Most-used model from the provider list (by input + output tokens).
-            // 2. Random model from the provider list (no usage data yet).
-            let best_model: String = app
-                .metrics
-                .lock()
-                .ok()
-                .and_then(|m| {
-                    supported
-                        .iter()
-                        .max_by_key(|model| {
-                            m.by_model.get(*model).map_or(0, |s| s.input + s.output)
-                        })
-                        .filter(|model| m.by_model.contains_key(*model))
-                        .map(|s| s.to_string())
-                })
-                .unwrap_or_else(|| pick_next(&supported));
-
-            // Build a fallback candidate list: best_model first, then remaining
-            // models (up to MAX_TEST_ATTEMPTS total). Used when best_model
-            // errors so a broken model doesn't permanently block health-checking.
-            const MAX_TEST_ATTEMPTS: usize = 3;
-            let candidates: Vec<String> = std::iter::once(best_model.clone())
-                .chain(supported.iter().filter(|m| **m != best_model).cloned())
-                .take(MAX_TEST_ATTEMPTS)
-                .collect();
-
-            candidates
-        }
-        (None, None) => {
-            test_provider_after_add(app, name);
-            return;
-        }
-    };
-
     let tx = app.tests.tx.clone();
-    let name_owned = name.to_string();
+    let name = provider_name.to_string();
+    let model = model.to_string();
 
-    app.tests.pending.insert(name_owned.clone());
-    app.set_message(format!("Testing {name}…"), MessageKind::Info);
+    app.tests.pending.insert(name.clone());
+    app.tests.testing_model.insert(name.clone(), model.clone());
+    app.set_message(format!("Testing {model}…"), MessageKind::Info);
 
     let client = app.tests.client.clone();
     tokio::spawn(async move {
-        // candidates is always non-empty (a pinned model, or best_model at minimum).
-        let mut result = None;
-        // First attempt that returns a catalog refreshes it; later retries reuse
-        // that one — it cannot have changed in the few hundred ms between them.
-        let mut fetched: Option<Vec<String>> = None;
-        for model in candidates {
-            // Notify TUI which model we're about to test so the display updates
-            // in real time when a fallback retry kicks in.
-            let _ = tx.send(TestEvent::ModelSelected {
-                provider: name_owned.clone(),
-                model: model.clone(),
-            });
-            let r = match tokio::time::timeout(
-                Duration::from_secs(TEST_TASK_TIMEOUT_SECS),
-                crate::tester::test_latency(&client, &provider, model.clone(), fetched.clone()),
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(_) => crate::tester::TestResult {
-                    status: crate::tester::TestStatus::Error("Connection error".to_string()),
-                    latency_ms: 0,
-                    model_count: None,
-                    model_names: None,
-                    tested_at: std::time::Instant::now(),
-                    used_model: model.clone(),
-                    tools_supported: None,
-                    images_supported: None,
-                },
-            };
-            if fetched.is_none() {
-                fetched = r.model_names.clone();
-            }
-            let done = matches!(
-                &r.status,
-                // Success or auth failure — no point trying other models.
-                crate::tester::TestStatus::Ok | crate::tester::TestStatus::AuthFailed
-            );
-            result = Some(r);
-            if done {
-                break;
-            }
-        }
-        // result is guaranteed to be Some because candidates is non-empty.
-        if let Some(r) = result {
-            let _ = tx.send(TestEvent::Completed {
-                provider: name_owned,
-                result: r,
-            });
-        } else {
-            // This should never happen, but log if it does.
-            tracing::error!("BUG: test task completed with no result");
-        }
-    });
-}
-
-/// Called when no model list is known for the provider (first test or empty list).
-/// Fetches the model list first, then picks a random model to run a latency test.
-/// Passes the fetched list directly to `test_latency` to avoid a redundant fetch.
-pub(super) fn test_provider_after_add(app: &mut App, name: &str) {
-    let Some(provider) = app.config.providers.get(name) else {
-        return;
-    };
-    let provider = provider.clone();
-    let tx = app.tests.tx.clone();
-    let name_owned = name.to_string();
-
-    app.tests.pending.insert(name_owned.clone());
-    // Model is unknown until the async fetch completes; leave entry absent so
-    // the render falls back to "—".
-    app.set_message(format!("Testing {name}…"), MessageKind::Info);
-
-    let client = app.tests.client.clone();
-    tokio::spawn(async move {
-        // Record the test start time before any I/O so the timestamp reflects
-        // when the test was initiated, not when a failure was detected.
-        let tested_at = std::time::Instant::now();
-
-        // Step 1: fetch model list.
-        let models = crate::tester::fetch_provider_models(&client, &provider).await;
-
-        if models.is_empty() {
-            // Provider returned no models — report the error without writing an
-            // empty list to DB (model_names: None keeps provider_models untouched).
-            let result = crate::tester::TestResult {
-                status: crate::tester::TestStatus::Error("No models available".to_string()),
-                latency_ms: 0,
-                model_count: None,
-                model_names: None,
-                tested_at,
-                used_model: String::new(),
-                tools_supported: None,
-                images_supported: None,
-            };
-            let _ = tx.send(TestEvent::Completed {
-                provider: name_owned,
-                result,
-            });
-            return;
-        }
-
-        // Step 2: pick a random model and run the latency test, passing the
-        // already-fetched model list so test_latency skips a redundant fetch.
-        let model = pick_next(&models);
-        let _ = tx.send(TestEvent::ModelSelected {
-            provider: name_owned.clone(),
-            model: model.clone(),
-        });
         let result = match tokio::time::timeout(
             Duration::from_secs(TEST_TASK_TIMEOUT_SECS),
-            crate::tester::test_latency(&client, &provider, model.clone(), Some(models.clone())),
+            crate::tester::test_latency(&client, &provider, model.clone(), None),
         )
         .await
         {
@@ -192,16 +31,16 @@ pub(super) fn test_provider_after_add(app: &mut App, name: &str) {
             Err(_) => crate::tester::TestResult {
                 status: crate::tester::TestStatus::Error("Connection error".to_string()),
                 latency_ms: 0,
-                model_count: Some(models.len()),
-                model_names: Some(models.clone()),
+                model_count: None,
+                model_names: None,
                 tested_at: std::time::Instant::now(),
-                used_model: model,
+                used_model: model.clone(),
                 tools_supported: None,
                 images_supported: None,
             },
         };
         let _ = tx.send(TestEvent::Completed {
-            provider: name_owned,
+            provider: name,
             result,
         });
     });
@@ -260,15 +99,6 @@ pub(super) fn start_quota_query(
             result,
         });
     });
-}
-
-/// Pick a model from a non-empty slice using a module-level counter so
-/// consecutive calls cycle through
-/// models rather than all landing on the same index.
-fn pick_next(items: &[String]) -> String {
-    static CTR: AtomicUsize = AtomicUsize::new(0);
-    let idx = CTR.fetch_add(1, Ordering::Relaxed) % items.len();
-    items[idx].clone()
 }
 
 #[cfg(test)]
@@ -361,7 +191,6 @@ pub(crate) mod tests {
             quota_status: std::collections::HashMap::new(),
             quota_form: None,
             quick_form: None,
-            detail_line_count: 0,
             help_scroll: 0,
             sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler::new(),
             config_needs_sync: false,
@@ -372,36 +201,6 @@ pub(crate) mod tests {
             .build()
             .unwrap();
         app
-    }
-
-    /// A pinned Test Model must win over the normal best-model auto-pick,
-    /// even when a cached model list (with other candidates) already exists.
-    #[tokio::test]
-    async fn pinned_test_model_overrides_auto_selection() {
-        let _guard = ConfigDirGuard::new();
-        let mut app = app_with_current("first");
-        app.config.providers.get_mut("first").unwrap().test_model =
-            Some("pinned-model".to_string());
-        app.models.provider_models.insert(
-            "first".to_string(),
-            vec!["other-a".to_string(), "other-b".to_string()],
-        );
-
-        test_provider_by_name(&mut app, "first");
-
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        while app.tests.pending.contains("first") {
-            if tokio::time::Instant::now() > deadline {
-                panic!("pinned-model test never completed");
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            app.drain_test_results();
-        }
-
-        assert_eq!(
-            app.tests.testing_model.get("first"),
-            Some(&"pinned-model".to_string())
-        );
     }
 
     /// Server that answers `/v1/messages` (Anthropic format) plus a small
