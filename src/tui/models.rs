@@ -159,13 +159,10 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
     } else {
         "[N]"
     };
-    let test_tag = current_test_model(app)
-        .map(|m| format!("  Test: {m}"))
-        .unwrap_or_default();
     let outer_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(t::PRIMARY))
-        .title(format!(" {prov_name} — Models  {mode_tag}{test_tag} "))
+        .title(format!(" {prov_name} — Models  {mode_tag} "))
         .title_style(Style::default().fg(t::TEXT).add_modifier(Modifier::BOLD))
         .padding(Padding::new(1, 1, 0, 0));
     let inner = outer_block.inner(area);
