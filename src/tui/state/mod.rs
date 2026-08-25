@@ -326,6 +326,13 @@ pub struct ProviderForm {
     /// provider; matched against `TestEvent::FormatDetected`'s own token so a
     /// stale result from a cancelled add can't land on a later one.
     pub detect_token: Option<String>,
+    /// True once auto-detection failed; the form stays open so the user can
+    /// either fix the endpoint and retry (`q`) or pick a format manually and
+    /// save anyway (`a` Anthropic / `o` OpenAI, see editor `handle_key`).
+    pub detect_failed: bool,
+    /// Format the user chose explicitly after detection failed; when set,
+    /// `do_save_form` inserts the provider with it instead of re-detecting.
+    pub manual_format: Option<crate::config::ApiFormat>,
 }
 
 // ─── Quota configuration form ─────────────────────────────────────────────────
@@ -585,6 +592,8 @@ impl ProviderForm {
             pending_key: None,
             error: None,
             detect_token: None,
+            detect_failed: false,
+            manual_format: None,
         }
     }
 

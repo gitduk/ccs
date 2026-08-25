@@ -60,7 +60,7 @@ The TUI allows you to:
 - Browse models and request logs
 - Start/stop the proxy server
 
-When adding a provider you only enter **Name**, **Base URL** and **API Key** — the API format is detected automatically on save.
+When adding a provider you only enter **Name**, **Base URL** and **API Key** — the API format is detected automatically on save. If detection fails the form stays open; fix the Base URL / API Key and press `q` to retry, or press `a` (Anthropic) / `o` (OpenAI) to save manually with a chosen format.
 
 ### 2. Or start the proxy directly
 

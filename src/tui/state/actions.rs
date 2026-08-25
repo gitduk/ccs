@@ -88,6 +88,19 @@ impl App {
         self.do_save_form(true)
     }
 
+    /// Save the pending add without format auto-detection, using the format
+    /// the user picked explicitly (`a` Anthropic / `o` OpenAI in the form).
+    /// Only reachable after detection failed; field validation is unchanged.
+    pub fn save_form_manual_format(
+        &mut self,
+        format: crate::config::ApiFormat,
+    ) -> Result<()> {
+        if let Some(f) = self.form.as_mut() {
+            f.manual_format = Some(format);
+        }
+        self.do_save_form(true)
+    }
+
     pub(super) fn do_save_form(&mut self, close: bool) -> Result<()> {
         let Some(form) = &self.form else {
             return Ok(());
@@ -111,7 +124,12 @@ impl App {
             .cloned()
             .unwrap_or_default();
 
-        let fields = match parse_provider_form(form, &known_models) {
+        // One-shot: consume the explicit a/o format choice (if any) on this
+        // save attempt, so a later `q` re-runs detection instead of a stale
+        // manual choice left behind by a validation-error or IO-error attempt.
+        let manual_format = self.form.as_mut().and_then(|f| f.manual_format.take());
+
+        let fields = match parse_provider_form(self.form.as_ref().unwrap(), &known_models) {
             Ok(f) => f,
             Err(err) => {
                 if let Some(f) = self.form.as_mut() {
@@ -151,7 +169,7 @@ impl App {
         // an existing provider always carries its real, already-known format.
         let existing_format = existing.map(|p| p.api_format.clone());
         let existing_version = existing.and_then(|p| p.api_version.clone());
-        let provider = crate::config::Provider {
+        let mut provider = crate::config::Provider {
             id: provider_id.clone(),
             base_url: fields.base_url.clone(),
             api_key: fields.api_key.clone(),
@@ -168,10 +186,18 @@ impl App {
         };
 
         if fields.is_new() {
+            // The user may have picked a format manually after detection
+            // failed — insert immediately instead of re-detecting.
+            if let Some(format) = manual_format {
+                provider.api_format = format;
+                return self.finish_new_provider_save(fields.name.clone(), provider);
+            }
+
             // Format unknown yet — detect async, finish the insert in drain_test_results.
             let token = uuid::Uuid::new_v4().to_string();
             if let Some(f) = self.form.as_mut() {
                 f.detect_token = Some(token.clone());
+                f.detect_failed = false;
                 f.error = None;
             }
             self.set_message(
@@ -190,7 +216,7 @@ impl App {
                     Ok(key) => crate::tester::detect_api_format(&client, &base_url, &key, None)
                         .await
                         .ok_or_else(|| {
-                            "Could not detect API format — check Base URL / API Key, or add the provider manually in the config file with a Test Model"
+                            "Could not detect API format - fix Base URL / API Key and retry, or press a/o in the form to save manually"
                                 .to_string()
                         }),
                     Err(e) => Err(format!("API key resolution failed: {e}")),
@@ -250,24 +276,7 @@ impl App {
             if is_first {
                 self.config.current = fields.name.clone();
             }
-            // Fetch model list in background so routes can be configured immediately.
-            if let Some(p) = self.config.providers.get(&fields.name).cloned()
-                && !p.base_url.is_empty()
-                && !p.api_key.is_empty()
-            {
-                let tx = self.tests.tx.clone();
-                let client = self.tests.client.clone();
-                let name_owned = fields.name.clone();
-                tokio::spawn(async move {
-                    let models = crate::tester::fetch_provider_models(&client, &p).await;
-                    if !models.is_empty() {
-                        let _ = tx.send(super::TestEvent::ModelsOnly {
-                            provider: name_owned,
-                            models,
-                        });
-                    }
-                });
-            }
+            self.spawn_model_fetch(&fields.name);
         }
 
         config::save_config(&self.config)?;
@@ -290,6 +299,62 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// Insert a brand-new provider (fully formed, format resolved) into the
+    /// in-memory config, persist it, and close the editing form. On a save
+    /// failure the insert is rolled back and the form stays open with the error.
+    fn finish_new_provider_save(
+        &mut self,
+        name: String,
+        provider: crate::config::Provider,
+    ) -> Result<()> {
+        let is_first = self.config.providers.is_empty();
+        self.config.providers.insert(name.clone(), provider);
+        if is_first {
+            self.config.current = name.clone();
+        }
+        self.spawn_model_fetch(&name);
+        if let Err(e) = config::save_config(&self.config) {
+            // Roll back so the table never shows a provider that didn't hit
+            // disk; keep the form open with the error so the user can retry.
+            self.config.providers.shift_remove(&name);
+            if let Some(f) = self.form.as_mut() {
+                f.error = Some(format!("Save failed: {e}"));
+            }
+            return Ok(());
+        }
+        if let Some(idx) = self.config.providers.get_index_of(&name) {
+            self.providers.table_state.select(Some(idx));
+        }
+        self.set_message(format!("Added '{name}'"), MessageKind::Success);
+        self.form = None;
+        self.mode = Mode::Normal;
+        self.config_needs_sync = true;
+        Ok(())
+    }
+
+    /// Fetch a provider's model list in the background so routes can be
+    /// configured immediately. Skips providers with no URL or key.
+    fn spawn_model_fetch(&self, name: &str) {
+        let Some(p) = self.config.providers.get(name).cloned() else {
+            return;
+        };
+        if p.base_url.is_empty() || p.api_key.is_empty() {
+            return;
+        }
+        let tx = self.tests.tx.clone();
+        let client = self.tests.client.clone();
+        let provider_name = name.to_string();
+        tokio::spawn(async move {
+            let models = crate::tester::fetch_provider_models(&client, &p).await;
+            if !models.is_empty() {
+                let _ = tx.send(super::TestEvent::ModelsOnly {
+                    provider: provider_name,
+                    models,
+                });
+            }
+        });
     }
 
     /// Store a freshly discovered catalog in the DB and its in-memory mirror.
@@ -665,6 +730,7 @@ impl App {
                         Err(msg) => {
                             if let Some(f) = self.form.as_mut() {
                                 f.detect_token = None;
+                                f.detect_failed = true;
                                 f.error = Some(msg);
                             }
                         }

@@ -77,6 +77,18 @@ pub(super) fn handle_key(
     } else {
         None
     };
+    // Detection failed for this add: a/o pick a format and save without
+    // re-detecting. Skipped in the Routes section, where `a` adds a route.
+    if form.detect_failed && !in_routes && form.vim_mode == VimMode::Normal {
+        let format = match code {
+            KeyCode::Char('a' | 'A') => Some(crate::config::ApiFormat::Anthropic),
+            KeyCode::Char('o' | 'O') => Some(crate::config::ApiFormat::OpenAI),
+            _ => None,
+        };
+        if let Some(format) = format {
+            return app.save_form_manual_format(format);
+        }
+    }
 
     if in_routes
         && !form.route_editing
@@ -380,6 +392,16 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
                     Span::styled(" Quit", Style::default().fg(t::MUTED)),
                 ])
             }
+        } else if form.detect_failed {
+            Line::from(vec![
+                Span::raw("   "),
+                Span::styled("a", Style::default().fg(t::SUCCESS)),
+                Span::styled(" Anthropic  ", Style::default().fg(t::MUTED)),
+                Span::styled("o", Style::default().fg(t::PRIMARY)),
+                Span::styled(" OpenAI  ", Style::default().fg(t::MUTED)),
+                Span::styled("q", Style::default().fg(t::WARNING)),
+                Span::styled(" Retry detection", Style::default().fg(t::MUTED)),
+            ])
         } else if form.vim_mode == VimMode::Insert {
             Line::from(vec![
                 Span::raw("   "),

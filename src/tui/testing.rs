@@ -310,4 +310,57 @@ pub(crate) mod tests {
         assert!(app.form.is_none());
         assert!(!app.config.providers.contains_key("abandoned"));
     }
+
+    /// If format detection fails (nothing answers on the endpoint), the form
+    /// stays open with an error, and the add can still be completed by
+    /// picking a format manually — the `a`/`o` form keys call this.
+    #[tokio::test]
+    async fn manual_format_saves_provider_after_detection_fails() {
+        use crate::tui::state::{API_KEY_FIELD_IDX, BASE_URL_FIELD_IDX, NAME_FIELD_IDX};
+
+        let _guard = ConfigDirGuard::new();
+        let mut app = app_with_current("first");
+        app.tests.client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .connect_timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+
+        // Everything 404s/400s: the model-list fetch fails, so detection
+        // has no model to probe with and reports failure.
+        let base_url =
+            crate::tester::tests::spawn_scenario_server(Default::default()).await;
+
+        app.add();
+        {
+            let form = app.form.as_mut().unwrap();
+            form.fields[NAME_FIELD_IDX].value = "manual".to_string();
+            form.fields[BASE_URL_FIELD_IDX].value = base_url;
+            form.fields[API_KEY_FIELD_IDX].value = "sk-test".to_string();
+        }
+        app.save_form_and_close().unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while app
+            .form
+            .as_ref()
+            .is_none_or(|f| f.detect_token.is_some() || f.error.is_none())
+        {
+            if tokio::time::Instant::now() > deadline {
+                panic!("detection never reported back");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            app.drain_test_results();
+        }
+
+        assert!(app.form.as_ref().is_some_and(|f| f.detect_failed));
+        assert!(!app.config.providers.contains_key("manual"));
+
+        app.save_form_manual_format(ApiFormat::Anthropic).unwrap();
+        assert!(app.form.is_none(), "manual save should close the form");
+        let saved = &app.config.providers["manual"];
+        assert_eq!(saved.api_format, ApiFormat::Anthropic);
+        assert_eq!(saved.api_version, None);
+    }
+
 }
