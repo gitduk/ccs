@@ -119,6 +119,19 @@ pub(crate) fn truncate_error(e: &str) -> String {
         return "non-JSON response (HTML/XML)".to_string();
     }
 
+    // Structured "HTTP <status>: <detail>" from test_latency: keep the status
+    // and truncate the detail, so a 429 rate-limit text stays actionable.
+    if let Some((status, detail)) = e.split_once(": ") && status.starts_with("HTTP ") {
+        let detail = detail.trim();
+        let room = MAX.saturating_sub(status.chars().count() + 2);
+        return if room == 0 || detail.is_empty() {
+            status.to_string()
+        } else {
+            // truncate_chars appends "…" beyond max, so leave one char of room for it.
+            format!("{status}: {}", truncate_chars(detail, room - 1))
+        };
+    }
+
     // Strip verbose reqwest chain: "...: error sending request for url (...): <root cause>"
     // Pick the last colon-separated segment that is short enough and not a URL.
     let msg: &str = e
@@ -232,4 +245,49 @@ pub(crate) fn strip_model_prefix(model: &str) -> &str {
 pub(crate) fn shorten_model_name(model: &str) -> &str {
     let stripped = strip_model_prefix(model);
     stripped.strip_prefix("claude-").unwrap_or(stripped)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_error;
+
+    #[test]
+    fn truncate_error_keeps_http_status_and_message() {
+        let out = truncate_error(
+            "HTTP 429: You have exceeded the rate limit for this model. Please retry in 60 seconds.",
+        );
+        assert!(out.starts_with("HTTP 429: You have exceeded"), "{out}");
+        assert!(out.ends_with('…'), "{out}");
+        assert!(out.chars().count() <= 30, "{out}");
+    }
+
+    #[test]
+    fn truncate_error_short_status_without_detail_is_unchanged() {
+        assert_eq!(truncate_error("HTTP 502"), "HTTP 502");
+    }
+    #[test]
+    fn truncate_error_keeps_detail_starting_with_url() {
+        let out = truncate_error("HTTP 429: https://openrouter.ai/docs/rate-limits exceeded");
+        assert!(
+            out.starts_with("HTTP 429: https://openrouter."),
+            "{out}"
+        );
+        assert!(out.chars().count() <= 30, "{out}");
+    }
+
+    #[test]
+    fn truncate_error_picks_last_reqwest_segment() {
+        assert_eq!(
+            truncate_error("error sending request for url (http://x): connection refused"),
+            "connection refused"
+        );
+    }
+
+    #[test]
+    fn truncate_error_marks_html_bodies() {
+        assert_eq!(
+            truncate_error("<html><body>upstream down</body></html>"),
+            "non-JSON response (HTML/XML)"
+        );
+    }
 }

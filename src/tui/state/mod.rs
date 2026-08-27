@@ -968,4 +968,59 @@ mod tests {
             "an empty fetch must not blank the persisted catalog"
         );
     }
+
+    /// A catalog entry spelled differently than the tested name (a typed
+    /// name vs. the catalog's casing) must not become a duplicate row: the
+    /// row keeps the catalog's spelling, and the result lookup is
+    /// case-insensitive so the result still shows.
+    #[tokio::test]
+    async fn tested_model_casing_variant_does_not_duplicate_the_row() {
+        let _guard = ConfigDirGuard::new();
+        let mut cfg = crate::config::load_config().unwrap();
+        cfg.providers.insert(
+            "vllm".to_string(),
+            Provider {
+                id: "vllm-id".into(),
+                base_url: "http://127.0.0.1:1".into(),
+                api_key: "test-key".into(),
+                api_format: ApiFormat::OpenAI,
+                model_map: Default::default(),
+                routes: vec![],
+                enabled: true,
+                fallback: true,
+                api_version: None,
+                inject_thinking_history: true,
+                strict_thinking_history: false,
+                quota_command: None,
+                port: None,
+                test_model: None,
+            },
+        );
+        crate::config::save_config(&cfg).unwrap();
+
+        let mut app = App::new().unwrap();
+        app.tests
+            .tx
+            .send(TestEvent::Completed {
+                provider: "vllm".into(),
+                result: TestResult {
+                    status: TestStatus::Ok,
+                    latency_ms: 1,
+                    model_count: Some(1),
+                    model_names: Some(vec!["gemma-4-31b-it".into()]),
+                    tested_at: Instant::now(),
+                    used_model: "GEMMA-4-31B-IT".into(),
+                    tools_supported: None,
+                    images_supported: None,
+                },
+            })
+            .unwrap();
+        assert!(app.drain_test_results());
+
+        assert_eq!(
+            app.models.provider_models.get("vllm"),
+            Some(&vec!["gemma-4-31b-it".to_string()]),
+            "a case variant of a catalog entry must not be pushed as a duplicate"
+        );
+    }
 }

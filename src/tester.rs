@@ -3,7 +3,9 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 
 use crate::config::{ApiFormat, OpenAiApiVersion, Provider};
-use crate::proxy::executor::{probe_provider_message, probe_provider_message_with_body};
+use crate::proxy::executor::{
+    extract_error_message, probe_provider_message, probe_provider_message_with_body,
+};
 
 const TEST_TIMEOUT_SECS: u64 = 10;
 
@@ -183,9 +185,9 @@ pub async fn test_latency(
         }
     };
 
-    let (status, latency_ms) =
-        match probe_provider_message(client, provider, &api_key, &req_json).await {
-            Ok((status, latency_ms)) => (status, latency_ms),
+    let (status, latency_ms, resp_body) =
+        match probe_provider_message_with_body(client, provider, &api_key, &req_json).await {
+            Ok(v) => v,
             Err(e) => {
                 tracing::warn!("Provider test connection failed: {e}");
                 return TestResult {
@@ -206,7 +208,14 @@ pub async fn test_latency(
     } else if status.as_u16() == 401 || status.as_u16() == 403 {
         TestStatus::AuthFailed
     } else {
-        TestStatus::Error(format!("HTTP {}", status.as_u16()))
+        // Keep the status code and append the provider's own error message
+        // (e.g. OpenRouter's 429 rate-limit text) so the failure is actionable.
+        let detail = extract_error_message(&resp_body);
+        if detail.is_empty() || detail.starts_with('<') {
+            TestStatus::Error(format!("HTTP {}", status.as_u16()))
+        } else {
+            TestStatus::Error(format!("HTTP {}: {detail}", status.as_u16()))
+        }
     };
 
     // Run models fetch and the capability probes concurrently.
@@ -295,7 +304,7 @@ async fn check_tool_support(
     // "any" converts to "required" for OpenAI providers via convert_tool_choice_to_openai.
     forced_req["tool_choice"] = json!({"type": "any"});
     match probe_provider_message_with_body(client, provider, api_key, &forced_req).await {
-        Ok((status, body)) if status.is_success() => {
+        Ok((status, _, body)) if status.is_success() => {
             return Some(response_body_has_tool_call(&body));
         }
         Ok(_) => {}
@@ -303,7 +312,7 @@ async fn check_tool_support(
     }
 
     match probe_provider_message_with_body(client, provider, api_key, &base_req).await {
-        Ok((status, body)) => {
+        Ok((status, _, body)) => {
             if !status.is_success() {
                 return Some(false);
             }
@@ -440,6 +449,7 @@ async fn parse_models_response(r: reqwest::Response) -> (Option<usize>, Option<V
 pub(crate) mod tests {
     use std::time::Duration;
 
+    use axum::Router;
     use tokio::net::TcpListener;
 
     use super::{TestStatus, check_tool_support, test_latency};
@@ -464,6 +474,16 @@ pub(crate) mod tests {
         }
     }
 
+    /// Bind a test server and serve `app` in the background; returns its address.
+    pub(crate) async fn spawn_test_server(app: Router) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        addr
+    }
+
     /// Regression test for the `openc` false negative: a backend that rejects any forced
     /// `tool_choice` (both `"required"` and a named-function choice) with 4xx, but honors
     /// tool calling fine under the default `auto` choice. `check_tool_support` must fall
@@ -473,7 +493,7 @@ pub(crate) mod tests {
         use axum::http::StatusCode;
         use axum::response::IntoResponse;
         use axum::routing::post;
-        use axum::{Json, Router};
+        use axum::Json;
 
         async fn chat(body: axum::body::Bytes) -> impl IntoResponse {
             let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -495,12 +515,7 @@ pub(crate) mod tests {
                 .into_response()
         }
 
-        let app = Router::new().route("/v1/chat/completions", post(chat));
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
+        let addr = spawn_test_server(Router::new().route("/v1/chat/completions", post(chat))).await;
 
         let provider = test_provider(format!("http://{addr}"));
         let result = check_tool_support(&reqwest::Client::new(), &provider, "test-key", "m").await;
@@ -513,7 +528,6 @@ pub(crate) mod tests {
     /// there instead of reporting no models.
     #[tokio::test]
     async fn fetch_models_falls_back_to_root_domain_on_404() {
-        use axum::Router;
         use axum::extract::Path;
         use axum::http::StatusCode;
         use axum::response::IntoResponse;
@@ -528,16 +542,14 @@ pub(crate) mod tests {
             }))
         }
 
-        let app = Router::new()
-            // Two levels deep — proves the fallback goes straight to the
-            // root, not just one segment up.
-            .route("/{*rest}", get(nested_404))
-            .route("/v1/models", get(root_models));
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
+        let addr = spawn_test_server(
+            Router::new()
+                // Two levels deep — proves the fallback goes straight to the
+                // root, not just one segment up.
+                .route("/{*rest}", get(nested_404))
+                .route("/v1/models", get(root_models)),
+        )
+        .await;
 
         let provider = test_provider(format!("http://{addr}/org123/anthropic"));
         let (count, names) = super::fetch_models(&reqwest::Client::new(), &provider, "key").await;
@@ -583,6 +595,36 @@ pub(crate) mod tests {
 
         assert!(started.elapsed() < Duration::from_secs(12));
         assert!(matches!(result.status, TestStatus::Error(ref e) if e == "Connection error"));
+    }
+
+    #[tokio::test]
+    async fn test_latency_includes_upstream_error_message_on_429() {
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use axum::Json;
+
+        async fn chat() -> impl IntoResponse {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": "You have exceeded the rate limit for this model. Please retry in 60 seconds."
+                    }
+                })),
+            )
+        }
+
+        let addr = spawn_test_server(Router::new().route("/v1/chat/completions", post(chat))).await;
+
+        let provider = test_provider(format!("http://{addr}"));
+        let result = test_latency(&reqwest::Client::new(), &provider, "m".into(), None).await;
+
+        assert!(matches!(
+            result.status,
+            TestStatus::Error(ref e)
+                if e == "HTTP 429: You have exceeded the rate limit for this model. Please retry in 60 seconds."
+        ));
     }
 
     /// Which of the four endpoints a scenario server accepts (200) vs

@@ -209,27 +209,29 @@ pub(crate) async fn probe_provider_message(
     Ok((outcome.status(), outcome.latency_ms()))
 }
 
-/// Like `probe_provider_message` but also returns the response body.
-/// Used to inspect the response content for capability detection.
+/// Like `probe_provider_message` but also returns the response body, for
+/// callers that need to inspect the response content (capability detection,
+/// error-message extraction).
 pub(crate) async fn probe_provider_message_with_body(
     client: &reqwest::Client,
     provider: &Provider,
     api_key: &str,
     req_json: &serde_json::Value,
-) -> Result<(StatusCode, Bytes), AppError> {
+) -> Result<(StatusCode, u64, Bytes), AppError> {
     let body = Bytes::from(serde_json::to_vec(req_json)?);
     let headers = HeaderMap::new();
     let outcome =
         execute_provider_request(client, provider, api_key, &body, Some(req_json), &headers)
             .await?;
     let status = outcome.status();
+    let latency_ms = outcome.latency_ms();
     let resp_body = match outcome {
         ProviderRequestOutcome::Success { response, .. } => {
             response.bytes().await.unwrap_or_default()
         }
         ProviderRequestOutcome::UpstreamError { body, .. } => body,
     };
-    Ok((status, resp_body))
+    Ok((status, latency_ms, resp_body))
 }
 
 fn should_fallback_from_responses_404(body: &[u8]) -> bool {
@@ -270,10 +272,10 @@ pub(crate) fn extract_error_message(body: &[u8]) -> String {
             .and_then(|e| e.get("message"))
             .and_then(|m| m.as_str())
         {
-            return msg.chars().take(120).collect();
+            return msg.trim().chars().take(120).collect();
         }
         if let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
-            return msg.chars().take(120).collect();
+            return msg.trim().chars().take(120).collect();
         }
     }
     String::from_utf8_lossy(&body[..body.len().min(120)])

@@ -107,6 +107,35 @@ pub(super) fn handle_key(
             KeyCode::Char('t') => {
                 if let Some((prov, name)) = selected_model(app, &refs) {
                     super::testing::test_specific_model(app, &prov, name);
+                } else if total == 0 {
+                    // Empty list — the search box is the only source of a name.
+                    // Register it so a row exists and the result stays visible.
+                    let name = app.models.search_field.value.trim().to_string();
+                    if !name.is_empty()
+                        && let Some(prov) = current_provider(app).map(str::to_string)
+                    {
+                        app.models.search_field.value = name.clone();
+                        // Persist too: the periodic metrics sync replaces
+                        // provider_models from the DB, so a memory-only row
+                        // would vanish before the test ends.
+                        let mut models = app
+                            .models
+                            .provider_models
+                            .get(&prov)
+                            .cloned()
+                            .unwrap_or_default();
+                        if !models.contains(&name) {
+                            models.push(name.clone());
+                        }
+                        let provider_id = app
+                            .config
+                            .providers
+                            .get(&prov)
+                            .map(|p| p.id.clone())
+                            .unwrap_or_else(|| prov.clone());
+                        app.store_provider_models(&provider_id, &prov, models);
+                        super::testing::test_specific_model(app, &prov, &name);
+                    }
                 }
             }
             KeyCode::Char('p') => {
@@ -304,7 +333,13 @@ fn model_result_suffix(app: &App, provider: &str, model: &str) -> Vec<Span<'stat
             Style::default().fg(t::MUTED).add_modifier(Modifier::ITALIC),
         )];
     }
-    let Some(r) = app.tests.results.get(provider).and_then(|m| m.get(model)) else {
+    // Row and result keys can differ in case (a typed name vs. the catalog's
+    // spelling); look the result up case-insensitively so it still displays.
+    let Some(r) = app.tests.results.get(provider).and_then(|m| {
+        m.iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(model))
+            .map(|(_, v)| v)
+    }) else {
         return vec![];
     };
     match &r.status {
@@ -379,5 +414,99 @@ fn copy_selected(app: &mut App, flat: &[&str]) {
         } else {
             app.set_message("Copy failed (wl-copy not found?)", MessageKind::Error);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::testing::tests::app_with_current;
+
+    fn app_with_no_models(search: &str) -> App {
+        let mut app = app_with_current("first");
+        app.models.provider_models.insert("first".to_string(), vec![]);
+        app.models.search_field.value = search.to_string();
+        app.models.search_active = false;
+        app
+    }
+
+    #[tokio::test]
+    async fn t_with_empty_list_tests_search_value() {
+        let mut app = app_with_no_models("deepseek-v4-flash");
+
+        handle_key(&mut app, KeyCode::Char('t'), KeyModifiers::NONE).unwrap();
+
+        assert!(app.tests.pending.contains("first"));
+        assert_eq!(
+            app.tests.testing_model.get("first").map(String::as_str),
+            Some("deepseek-v4-flash")
+        );
+        // The name is registered so the panel has a row to render the result.
+        assert_eq!(
+            app.models.provider_models.get("first").map(Vec::as_slice),
+            Some(&["deepseek-v4-flash".to_string()][..])
+        );
+        // Registered in the DB too — the periodic metrics sync replaces
+        // provider_models from the DB, so a memory-only row would vanish.
+        assert_eq!(
+            app.db.load_provider_models().get("first").map(Vec::as_slice),
+            Some(&["deepseek-v4-flash".to_string()][..])
+        );
+    }
+
+    #[tokio::test]
+    async fn t_with_empty_list_and_blank_search_does_nothing() {
+        let mut app = app_with_no_models("   ");
+
+        handle_key(&mut app, KeyCode::Char('t'), KeyModifiers::NONE).unwrap();
+
+        assert!(!app.tests.pending.contains("first"));
+        assert!(app.models.provider_models.get("first").unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn completed_test_keeps_row_when_fresh_catalog_omits_it() {
+        use crate::config::test_support::ConfigDirGuard;
+        use axum::response::IntoResponse;
+        use axum::routing::{get, post};
+        use axum::{Json, Router};
+
+        async fn chat() -> impl IntoResponse {
+            Json(serde_json::json!({"content": [{"type": "text", "text": "pong"}]}))
+        }
+        async fn catalog() -> impl IntoResponse {
+            Json(serde_json::json!({"data": [{"id": "other-model"}]}))
+        }
+
+        let addr = crate::tester::tests::spawn_test_server(
+            Router::new()
+                .route("/v1/messages", post(chat))
+                .route("/v1/models", get(catalog)),
+        )
+        .await;
+
+        let _guard = ConfigDirGuard::new();
+        let mut app = app_with_current("first");
+        app.mode = Mode::Models;
+        app.models.search_active = false;
+        app.models.selected = 0;
+        app.config.providers.get_mut("first").unwrap().base_url = format!("http://{addr}");
+
+        handle_key(&mut app, KeyCode::Char('t'), KeyModifiers::NONE).unwrap();
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !app.drain_test_results() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(!app.tests.pending.contains("first"), "test never completed");
+
+        // The refreshed catalog omits the tested model; the row must survive so
+        // the result stays visible (regression: it used to vanish on completion).
+        assert!(build_models(&app).iter().any(|m| m == "first-model"));
+        assert!(app
+            .tests
+            .results
+            .get("first")
+            .is_some_and(|m| m.contains_key("first-model")));
     }
 }

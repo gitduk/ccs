@@ -366,7 +366,7 @@ impl App {
     /// An empty list means the fetch came back with nothing — keep the last
     /// known catalog rather than blanking the provider's model list.
     /// Returns whether anything was written.
-    fn store_provider_models(
+    pub(crate) fn store_provider_models(
         &mut self,
         provider_id: &str,
         name: &str,
@@ -584,7 +584,17 @@ impl App {
                         .get(&name)
                         .map(|p| p.id.clone())
                         .unwrap_or_else(|| name.clone());
-                    if let Some(models) = result.model_names.clone() {
+                    if let Some(mut models) = result.model_names.clone() {
+                        // The refreshed catalog may omit the just-tested model
+                        // (e.g. a search-box name): keep it so the row and its
+                        // result stay visible instead of vanishing on completion.
+                        if !result.used_model.is_empty()
+                            && !models
+                                .iter()
+                                .any(|m| m.eq_ignore_ascii_case(&result.used_model))
+                        {
+                            models.push(result.used_model.clone());
+                        }
                         self.store_provider_models(&provider_id, &name, models);
                     }
                     // Record the test request in provider stats so it appears in By Provider.
