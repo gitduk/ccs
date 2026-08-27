@@ -288,7 +288,7 @@ impl App {
         config::save_config(&self.config)?;
         if self.config.providers.contains_key(&fields.name) {
             let idx = super::navigation::display_rank_of(&self.config, &fields.name);
-            self.providers.table_state.select(Some(idx));
+            self.select_row(idx);
         }
 
         if close {
@@ -334,7 +334,7 @@ impl App {
         }
         if self.config.providers.contains_key(&name) {
             let idx = super::navigation::display_rank_of(&self.config, &name);
-            self.providers.table_state.select(Some(idx));
+            self.select_row(idx);
         }
         self.set_message(format!("Added '{name}'"), MessageKind::Success);
         self.form = None;
@@ -472,8 +472,9 @@ impl App {
             if count == 0 {
                 self.providers.table_state.select(None);
             } else if selected >= count {
-                self.providers.table_state.select(Some(count - 1));
+                self.select_row(count - 1);
             }
+            self.providers.expanded = false;
         }
         self.set_message(format!("Deleted '{name}'"), MessageKind::Success);
         Ok(())
@@ -565,16 +566,13 @@ impl App {
             // Cursor follows the (re-enabled) provider at the end of the enabled block.
             if self.config.providers.contains_key(&name) {
                 let idx = super::navigation::display_rank_of(&self.config, &name);
-                self.providers.table_state.select(Some(idx));
+                self.select_row(idx);
             }
         } else {
             // Cursor lands where the disabled provider was: the next enabled row,
             // or the last enabled row, which folds the disabled block back up.
-            self.providers
-                .table_state
-                .select(Some(idx_before.min(enabled_count.saturating_sub(1))));
+            self.select_row(idx_before.min(enabled_count.saturating_sub(1)));
         }
-
         config::save_config(&self.config)?;
         if no_enabled_left {
             self.set_message(
@@ -753,7 +751,7 @@ impl App {
                                 Ok(()) => {
                                     if self.config.providers.contains_key(&name) {
                                         let idx = super::navigation::display_rank_of(&self.config, &name);
-                                        self.providers.table_state.select(Some(idx));
+                                        self.select_row(idx);
                                     }
                                     self.set_message(
                                         format!("Added '{name}'"),

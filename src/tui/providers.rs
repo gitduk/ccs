@@ -371,16 +371,16 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         }
         rows.push(Row::new(cells));
     }
-    if collapsed && enabled_count < total {
+    if collapsed {
         let n_disabled = total - enabled_count;
         let mut fold_cells = vec![
             Cell::from(Span::styled(
-                "...",
+                "…",
                 Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD),
             )),
             Cell::from(""),
             Cell::from(Span::styled(
-                format!("{n_disabled} disabled"),
+                format!("{n_disabled} more"),
                 Style::default().fg(t::MUTED),
             )),
             Cell::from(""),
@@ -518,7 +518,10 @@ mod tests {
             },
             mode: crate::tui::state::Mode::Normal,
             terminal_focused: true,
-            providers: ProviderList { table_state },
+            providers: ProviderList {
+                table_state,
+                expanded: false,
+            },
             form: None,
             message: None,
             confirm_action: None,
@@ -586,7 +589,13 @@ mod tests {
         assert_eq!(app.provider_name_at(0), Some("first"));
         assert_eq!(app.provider_name_at(1), None); // the fold row isn't a provider
 
-        // Cursor onto the fold row expands the disabled providers.
+        // Cursor onto the fold row keeps the fold — it's a stop of its own.
+        app.select_next();
+        assert!(app.is_providers_collapsed());
+        assert_eq!(app.table_row_count(), 2);
+        assert_eq!(app.selected_name(), None); // the fold row isn't a provider
+
+        // One more move down expands into the disabled block.
         app.select_next();
         assert!(!app.is_providers_collapsed());
         assert_eq!(app.table_row_count(), 2);
@@ -614,7 +623,11 @@ mod tests {
         assert_eq!(app.provider_name_at(0), Some("second"));
         assert_eq!(app.provider_name_at(1), None); // the fold row
 
-        // Cursor onto the fold row expands straight onto the disabled provider.
+        // Cursor onto the fold row keeps the fold; one more move down expands
+        // straight onto the disabled provider.
+        app.select_next();
+        assert!(app.is_providers_collapsed());
+        assert_eq!(app.selected_name(), None);
         app.select_next();
         assert!(!app.is_providers_collapsed());
         assert_eq!(app.selected_name(), Some("first"));
@@ -639,7 +652,10 @@ mod tests {
         assert_eq!(app.selected_name(), Some("first"));
         assert!(app.is_providers_collapsed());
 
-        // Cursor down onto the fold row expands; the disabled row is selectable.
+        // Cursor down onto the fold row keeps the fold, then expands; the
+        // disabled row becomes selectable.
+        app.select_next();
+        assert!(app.is_providers_collapsed());
         app.select_next();
         assert!(!app.is_providers_collapsed());
         assert_eq!(app.selected_name(), Some("second"));
@@ -648,6 +664,7 @@ mod tests {
         app.toggle_provider_enabled().unwrap();
         assert!(app.config.providers["second"].enabled);
         assert_eq!(app.selected_name(), Some("second"));
-        assert!(app.is_providers_collapsed());
+        // Everything is enabled again, so there is nothing left to fold.
+        assert_eq!(app.enabled_count(), app.provider_count());
     }
 }

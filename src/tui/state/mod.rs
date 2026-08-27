@@ -91,6 +91,8 @@ pub enum ConfirmAction {
 /// Provider list navigation state (main table).
 pub struct ProviderList {
     pub table_state: TableState,
+    /// Whether the trailing disabled block is expanded (fold row → Down).
+    pub expanded: bool,
 }
 
 /// Background test state: channels, results, and the shared HTTP client.
@@ -734,6 +736,7 @@ mod tests {
                     s.select(Some(0));
                     s
                 },
+                expanded: false,
             },
             form: None,
             message: None,

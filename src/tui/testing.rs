@@ -155,7 +155,10 @@ pub(crate) mod tests {
             },
             mode: Mode::Normal,
             terminal_focused: true,
-            providers: ProviderList { table_state },
+            providers: ProviderList {
+                table_state,
+                expanded: false,
+            },
             form: None,
             message: None,
             confirm_action: None,

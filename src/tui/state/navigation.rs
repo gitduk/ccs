@@ -48,7 +48,10 @@ impl App {
             config,
             mode: super::Mode::Normal,
             terminal_focused: true,
-            providers: ProviderList { table_state },
+            providers: ProviderList {
+                table_state,
+                expanded: false,
+            },
             form: None,
             message: None,
             confirm_action: None,
@@ -125,14 +128,19 @@ impl App {
     }
 
     /// The providers table folds the trailing disabled block into a single
-    /// "…" row unless the cursor is on or past it. Derived from the selection
-    /// so no separate sync is needed: cursor on "…" expands, leaving folds.
+    /// "…" row until the user moves past it: the fold row itself keeps the
+    /// fold, and one more Down expands it. The fold only closes while the
+    /// cursor sits at or before the fold row, so a selection placed past it
+    /// (e.g. a disabled current provider) stays visible.
     pub fn is_providers_collapsed(&self) -> bool {
-        self.providers
-            .table_state
-            .selected()
-            .map(|sel| sel < self.enabled_count())
-            .unwrap_or(false)
+        let enabled = self.enabled_count();
+        !self.providers.expanded
+            && enabled < self.config.providers.len()
+            && self
+                .providers
+                .table_state
+                .selected()
+                .is_none_or(|s| s <= enabled)
     }
 
     /// Number of rows actually shown in the providers table (fold-aware).
@@ -163,13 +171,23 @@ impl App {
         if self.config.providers.is_empty() {
             return;
         }
-        let i = self
-            .providers
-            .table_state
-            .selected()
-            .map(|i| (i + 1) % self.table_row_count())
-            .unwrap_or(0);
-        self.providers.table_state.select(Some(i));
+        let Some(i) = self.providers.table_state.selected() else {
+            self.providers.table_state.select(Some(0));
+            return;
+        };
+        let enabled = self.enabled_count();
+        // Down on the fold row expands into the disabled block instead of
+        // wrapping; the cursor lands on the first disabled row.
+        if self.is_providers_collapsed() && i == enabled {
+            self.providers.expanded = true;
+            return;
+        }
+        let next = (i + 1) % self.table_row_count();
+        self.providers.table_state.select(Some(next));
+        // Wrapping back onto the enabled block folds the disabled block again.
+        if next < enabled {
+            self.providers.expanded = false;
+        }
     }
 
     pub fn select_prev(&mut self) {
@@ -184,7 +202,18 @@ impl App {
             .map(|i| if i == 0 { count - 1 } else { i - 1 })
             .unwrap_or(0);
         self.providers.table_state.select(Some(i));
+        // Moving back up onto the enabled block folds the disabled block again.
+        if i < self.enabled_count() {
+            self.providers.expanded = false;
+        }
     }
+    /// Select a row directly (not via Up/Down) and fold the disabled block;
+    /// the fold reopens on its own if the cursor is past it.
+    pub(super) fn select_row(&mut self, idx: usize) {
+        self.providers.expanded = false;
+        self.providers.table_state.select(Some(idx));
+    }
+
 
     pub fn move_provider_up(&mut self) -> Result<()> {
         let Some(idx) = self.providers.table_state.selected() else {
@@ -262,11 +291,12 @@ impl App {
 
                 if self.config.providers.contains_key(&self.config.current) {
                     let idx = display_rank_of(&self.config, &self.config.current);
-                    self.providers.table_state.select(Some(idx));
+                    self.select_row(idx);
                 } else if !self.config.providers.is_empty() {
-                    self.providers.table_state.select(Some(0));
+                    self.select_row(0);
                 } else {
                     self.providers.table_state.select(None);
+                    self.providers.expanded = false;
                 }
 
                 self.models.provider_models = self.db.load_provider_models();
@@ -340,6 +370,25 @@ mod tests {
         assert!(app.is_providers_collapsed());
         assert_eq!(app.selected_name(), Some("b"));
         assert_eq!(app.table_row_count(), 2);
+    }
+
+    #[test]
+    fn disabled_current_past_fold_row_keeps_selection_visible() {
+        let _guard = ConfigDirGuard::new();
+        // Hand-edited config where the current provider is disabled and is not
+        // the first in the disabled block, so its row sits past the fold row.
+        let mut cfg = unsorted_config();
+        cfg.providers.insert("c".to_string(), provider("id-c"));
+        cfg.providers.get_mut("c").unwrap().enabled = false;
+        cfg.current = "c".into();
+        crate::config::save_config(&cfg).unwrap();
+
+        let app = super::super::App::new().unwrap();
+        // The fold must not close over the cursor: it would point past the
+        // last rendered row and leave the selection invisible.
+        assert!(!app.is_providers_collapsed());
+        assert_eq!(app.table_row_count(), 3);
+        assert_eq!(app.selected_name(), Some("c"));
     }
 
     #[test]
