@@ -11,11 +11,13 @@ impl App {
     pub fn new() -> Result<Self> {
         use ratatui::widgets::TableState;
 
+        // The stored order is the user's own; the fold renders enabled-first
+        // regardless, so loading must not rewrite it — or the file, on save.
         let config = config::load_config()?;
 
         let mut table_state = TableState::default();
         if !config.providers.is_empty() {
-            let idx = config.providers.get_index_of(&config.current).unwrap_or(0);
+            let idx = display_rank_of(&config, &config.current);
             table_state.select(Some(idx));
         }
 
@@ -84,14 +86,68 @@ impl App {
         })
     }
 
-    /// Provider name at the given table row (config order).
+    /// Provider name at the given table row (fold-aware).
     pub fn provider_name_at(&self, idx: usize) -> Option<&str> {
-        self.config
-            .providers
-            .get_index(idx)
-            .map(|(name, _)| name.as_str())
+        if self.is_providers_collapsed() && idx >= self.enabled_count() {
+            return None; // the fold row ("…") — not a provider
+        }
+        // Rows are always the enabled block first, then disabled — whether or
+        // not the stored order already lines up with that.
+        let enabled = self.enabled_names();
+        if idx < enabled.len() {
+            return enabled.get(idx).copied();
+        }
+        self.disabled_names().get(idx - enabled.len()).copied()
     }
 
+    /// Enabled provider names, in stored order (the leading fold block).
+    fn enabled_names(&self) -> Vec<&str> {
+        self.config
+            .providers
+            .iter()
+            .filter(|(_, p)| p.enabled)
+            .map(|(n, _)| n.as_str())
+            .collect()
+    }
+
+    /// Disabled provider names, in stored order (the trailing fold block).
+    fn disabled_names(&self) -> Vec<&str> {
+        self.config
+            .providers
+            .iter()
+            .filter(|(_, p)| !p.enabled)
+            .map(|(n, _)| n.as_str())
+            .collect()
+    }
+    /// Number of enabled providers (the leading block of the folded table).
+    pub fn enabled_count(&self) -> usize {
+        self.config.providers.values().filter(|p| p.enabled).count()
+    }
+
+    /// The providers table folds the trailing disabled block into a single
+    /// "…" row unless the cursor is on or past it. Derived from the selection
+    /// so no separate sync is needed: cursor on "…" expands, leaving folds.
+    pub fn is_providers_collapsed(&self) -> bool {
+        self.providers
+            .table_state
+            .selected()
+            .map(|sel| sel < self.enabled_count())
+            .unwrap_or(false)
+    }
+
+    /// Number of rows actually shown in the providers table (fold-aware).
+    pub fn table_row_count(&self) -> usize {
+        let enabled = self.enabled_count();
+        let total = self.config.providers.len();
+        if self.is_providers_collapsed() {
+            enabled + usize::from(enabled < total)
+        } else {
+            total
+        }
+    }
+
+    /// Total providers in config (including hidden disabled rows). Use
+    /// [`App::table_row_count`] for the number of rows actually shown.
     pub fn provider_count(&self) -> usize {
         self.config.providers.len()
     }
@@ -111,7 +167,7 @@ impl App {
             .providers
             .table_state
             .selected()
-            .map(|i| (i + 1) % self.provider_count())
+            .map(|i| (i + 1) % self.table_row_count())
             .unwrap_or(0);
         self.providers.table_state.select(Some(i));
     }
@@ -120,17 +176,12 @@ impl App {
         if self.config.providers.is_empty() {
             return;
         }
+        let count = self.table_row_count();
         let i = self
             .providers
             .table_state
             .selected()
-            .map(|i| {
-                if i == 0 {
-                    self.provider_count() - 1
-                } else {
-                    i - 1
-                }
-            })
+            .map(|i| if i == 0 { count - 1 } else { i - 1 })
             .unwrap_or(0);
         self.providers.table_state.select(Some(i));
     }
@@ -139,8 +190,11 @@ impl App {
         let Some(idx) = self.providers.table_state.selected() else {
             return Ok(());
         };
-        if idx == 0 {
-            return Ok(());
+        // Line the stored order up with the display (enabled-first) before
+        // reordering, so the row index is also the provider's index.
+        self.config.sort_providers_by_enabled();
+        if idx == 0 || idx == self.enabled_count() {
+            return Ok(()); // top of list, or first disabled row — can't cross the fold boundary
         }
         self.config.providers.move_index(idx, idx - 1);
         self.providers.table_state.select(Some(idx - 1));
@@ -149,11 +203,14 @@ impl App {
     }
 
     pub fn move_provider_down(&mut self) -> Result<()> {
+        // Line the stored order up with the display (enabled-first) before
+        // reordering, so the row index is also the provider's index.
+        self.config.sort_providers_by_enabled();
         let Some(idx) = self.providers.table_state.selected() else {
             return Ok(());
         };
-        if idx + 1 >= self.provider_count() {
-            return Ok(());
+        if idx + 1 >= self.provider_count() || idx + 1 == self.enabled_count() {
+            return Ok(()); // bottom of list, or last enabled row — can't cross the fold boundary
         }
         self.config.providers.move_index(idx, idx + 1);
         self.providers.table_state.select(Some(idx + 1));
@@ -199,9 +256,12 @@ impl App {
     pub fn reload_config(&mut self) -> Result<()> {
         match config::load_config() {
             Ok(fresh_config) => {
+                // Reload means "take the file as it is" — no reordering, so a
+                // hand-edit to the provider order is not undone on refresh.
                 self.config = fresh_config;
 
-                if let Some(idx) = self.config.providers.get_index_of(&self.config.current) {
+                if self.config.providers.contains_key(&self.config.current) {
+                    let idx = display_rank_of(&self.config, &self.config.current);
                     self.providers.table_state.select(Some(idx));
                 } else if !self.config.providers.is_empty() {
                     self.providers.table_state.select(Some(0));
@@ -219,5 +279,73 @@ impl App {
                 Err(e)
             }
         }
+    }
+}
+
+/// Display rank of a provider in the fold layout — the row it occupies in the
+/// rendered table: enabled providers first (in stored order), disabled ones
+/// after. Differs from the stored index only while the stored order is not
+/// already enabled-first; the fold renders enabled-first regardless.
+pub(super) fn display_rank_of(config: &crate::config::AppConfig, name: &str) -> usize {
+    let enabled = config
+        .providers
+        .iter()
+        .filter(|(_, p)| p.enabled)
+        .map(|(n, _)| n.as_str())
+        .collect::<Vec<_>>();
+    if let Some(r) = enabled.iter().position(|n| *n == name) {
+        return r;
+    }
+    config
+        .providers
+        .iter()
+        .filter(|(_, p)| !p.enabled)
+        .position(|(n, _)| n == name)
+        .map_or(0, |r| enabled.len() + r)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::display_rank_of;
+    use crate::config::test_support::ConfigDirGuard;
+    use crate::tui::testing::tests::provider;
+    use indexmap::IndexMap;
+
+    fn unsorted_config() -> crate::config::AppConfig {
+        // Disabled provider first — as if the file was hand-ordered.
+        let mut a = provider("id-a");
+        a.enabled = false;
+        let mut providers = IndexMap::new();
+        providers.insert("a".to_string(), a);
+        providers.insert("b".to_string(), provider("id-b"));
+        crate::config::AppConfig {
+            current: "b".into(),
+            listen: "127.0.0.1:7896".into(),
+            providers,
+            fallback: false,
+            db_path: None,
+            request_log_limit: 100,
+        }
+    }
+
+    #[test]
+    fn new_preserves_stored_order_and_selects_enabled_current() {
+        let _guard = ConfigDirGuard::new();
+        let cfg = unsorted_config();
+        crate::config::save_config(&cfg).unwrap();
+
+        let app = super::super::App::new().unwrap();
+        let order: Vec<&str> = app.config.providers.keys().map(|k| k.as_str()).collect();
+        assert_eq!(order, vec!["a", "b"]); // stored order untouched on load
+        assert!(app.is_providers_collapsed());
+        assert_eq!(app.selected_name(), Some("b"));
+        assert_eq!(app.table_row_count(), 2);
+    }
+
+    #[test]
+    fn display_rank_places_enabled_first() {
+        let cfg = unsorted_config();
+        assert_eq!(display_rank_of(&cfg, "b"), 0);
+        assert_eq!(display_rank_of(&cfg, "a"), 1);
     }
 }

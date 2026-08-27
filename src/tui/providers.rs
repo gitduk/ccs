@@ -118,7 +118,7 @@ pub(super) fn handle_key(
         KeyCode::Down | KeyCode::Char('j') => app.select_next(),
         KeyCode::Char('G') => {
             if !app.config.providers.is_empty() {
-                let last = app.provider_count() - 1;
+                let last = app.table_row_count() - 1;
                 app.providers.table_state.select(Some(last));
             }
         }
@@ -308,64 +308,91 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
 
     let quota_status = &app.quota_status;
 
-    let rows: Vec<Row> = app
-        .config
-        .providers
-        .keys()
-        .map(|name| {
-            let provider = &app.config.providers[name];
-            let is_current = name == &app.config.current;
-            let disabled = !provider.enabled;
-            let name_style = if disabled {
-                Style::default().fg(t::MUTED)
-            } else if is_current {
-                Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(t::TEXT)
-            };
-            let name_style = if has_fallback_col && provider.fallback && !is_current {
-                name_style.add_modifier(Modifier::UNDERLINED)
-            } else {
-                name_style
-            };
-            let detail_style = if disabled || !is_current {
-                Style::default().fg(t::MUTED)
-            } else {
-                Style::default().fg(t::PRIMARY)
-            };
-            let name_display_width = name.width();
-            let padding = max_name_len.saturating_sub(name_display_width);
-            let pad_style = name_style.remove_modifier(Modifier::UNDERLINED);
-            let name_cell = Cell::from(Line::from(vec![
-                Span::styled(name.as_str().to_string(), name_style),
-                Span::styled(" ".repeat(padding), pad_style),
-            ]));
+    let enabled_count = app.enabled_count();
+    let collapsed = app.is_providers_collapsed();
+    let total = app.config.providers.len();
 
-            let mut cells = vec![
-                name_cell,
-                Cell::from(Span::styled(provider.api_format.to_string(), detail_style)),
-                Cell::from(Span::styled(provider.base_url.as_str(), detail_style)),
-                masked_api_key(&provider.api_key),
-            ];
-            if has_quota {
-                cells.push(render_quota_cell(
-                    quota_status,
-                    &provider.id,
-                    terminal_width,
-                ));
-            }
-            if has_port {
-                let port_text = provider.port.map(|p| p.to_string()).unwrap_or_default();
-                let port_style = if app.bg_proxy_pid.is_some() && provider.port.is_some() {
-                    Style::default().fg(t::SUCCESS)
-                } else {
-                    Style::default().fg(t::MUTED)
-                };
-                cells.push(Cell::from(Span::styled(port_text, port_style)));
-            }
-            Row::new(cells)
-        })
-        .collect();
+    let mut rows: Vec<Row> = Vec::new();
+    let enabled = app.config.providers.iter().filter(|(_, p)| p.enabled);
+    let visible: Box<dyn Iterator<Item = (&String, &Provider)>> = if collapsed {
+        Box::new(enabled) // disabled rows are folded behind the "…" row
+    } else {
+        Box::new(enabled.chain(app.config.providers.iter().filter(|(_, p)| !p.enabled)))
+    };
+    for (name, provider) in visible {
+        let is_current = name == &app.config.current;
+        let disabled = !provider.enabled;
+        let name_style = if disabled {
+            Style::default().fg(t::MUTED)
+        } else if is_current {
+            Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(t::TEXT)
+        };
+        let name_style = if has_fallback_col && provider.fallback && !is_current {
+            name_style.add_modifier(Modifier::UNDERLINED)
+        } else {
+            name_style
+        };
+        let detail_style = if disabled || !is_current {
+            Style::default().fg(t::MUTED)
+        } else {
+            Style::default().fg(t::PRIMARY)
+        };
+        let name_display_width = name.width();
+        let padding = max_name_len.saturating_sub(name_display_width);
+        let pad_style = name_style.remove_modifier(Modifier::UNDERLINED);
+        let name_cell = Cell::from(Line::from(vec![
+            Span::styled(name.as_str().to_string(), name_style),
+            Span::styled(" ".repeat(padding), pad_style),
+        ]));
+
+        let mut cells = vec![
+            name_cell,
+            Cell::from(Span::styled(provider.api_format.to_string(), detail_style)),
+            Cell::from(Span::styled(provider.base_url.as_str(), detail_style)),
+            masked_api_key(&provider.api_key),
+        ];
+        if has_quota {
+            cells.push(render_quota_cell(
+                quota_status,
+                &provider.id,
+                terminal_width,
+            ));
+        }
+        if has_port {
+            let port_text = provider.port.map(|p| p.to_string()).unwrap_or_default();
+            let port_style = if app.bg_proxy_pid.is_some() && provider.port.is_some() {
+                Style::default().fg(t::SUCCESS)
+            } else {
+                Style::default().fg(t::MUTED)
+            };
+            cells.push(Cell::from(Span::styled(port_text, port_style)));
+        }
+        rows.push(Row::new(cells));
+    }
+    if collapsed && enabled_count < total {
+        let n_disabled = total - enabled_count;
+        let mut fold_cells = vec![
+            Cell::from(Span::styled(
+                "...",
+                Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD),
+            )),
+            Cell::from(""),
+            Cell::from(Span::styled(
+                format!("{n_disabled} disabled"),
+                Style::default().fg(t::MUTED),
+            )),
+            Cell::from(""),
+        ];
+        if has_quota {
+            fold_cells.push(Cell::from(""));
+        }
+        if has_port {
+            fold_cells.push(Cell::from(""));
+        }
+        rows.push(Row::new(fold_cells));
+    }
 
     let mut col_constraints = vec![
         Constraint::Length(name_col),
@@ -387,9 +414,7 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
 
     f.render_stateful_widget(table, area, &mut app.providers.table_state);
 }
-
 const COL_GAP: u16 = 4;
-
 fn build_test_curl(provider: &Provider, model: &str) -> Result<String, String> {
     let api_key = provider.resolve_api_key().map_err(|e| e.to_string())?;
     let (url, body) = provider.chat_url_and_body(model);
@@ -450,8 +475,10 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend, layout::Rect, widgets::TableState};
 
     use super::draw_table;
+    use crate::config::test_support::ConfigDirGuard;
     use crate::config::{ApiFormat, AppConfig, Provider};
     use crate::tui::state::{App, LogsState, ModelsState, ProviderList, TestState};
+    use crate::tui::testing::tests::app_with_current;
 
     #[test]
     fn port_cell_is_success_color_when_bg_proxy_is_running() {
@@ -544,5 +571,83 @@ mod tests {
             .unwrap();
 
         assert_eq!(port_cell.fg, super::t::SUCCESS);
+    }
+
+    #[test]
+    fn disabled_providers_fold_and_expand_with_cursor() {
+        let mut app = app_with_current("first");
+        app.config.providers.get_mut("second").unwrap().enabled = false;
+        app.config.sort_providers_by_enabled();
+        app.providers.table_state.select(Some(0));
+
+        assert_eq!(app.enabled_count(), 1);
+        assert!(app.is_providers_collapsed());
+        assert_eq!(app.table_row_count(), 2); // "first" + the fold row
+        assert_eq!(app.provider_name_at(0), Some("first"));
+        assert_eq!(app.provider_name_at(1), None); // the fold row isn't a provider
+
+        // Cursor onto the fold row expands the disabled providers.
+        app.select_next();
+        assert!(!app.is_providers_collapsed());
+        assert_eq!(app.table_row_count(), 2);
+        assert_eq!(app.selected_name(), Some("second"));
+
+        // Cursor back onto an enabled row folds them away again.
+        app.select_prev();
+        assert!(app.is_providers_collapsed());
+        assert_eq!(app.provider_name_at(1), None);
+    }
+
+    #[test]
+    fn unsorted_config_folds_by_status_not_stored_position() {
+        // A config whose stored order is not enabled-first (e.g. hand-edited,
+        // never through the fold) must still render enabled-first.
+        let mut app = app_with_current("second");
+        app.config.providers.get_mut("first").unwrap().enabled = false;
+        // Deliberately no sort_providers_by_enabled: "first" stays at index 0.
+        app.providers.table_state.select(Some(0));
+
+        assert_eq!(app.enabled_count(), 1);
+        assert!(app.is_providers_collapsed());
+        assert_eq!(app.table_row_count(), 2);
+        // Row 0 is the enabled provider, even though it sits at stored index 1.
+        assert_eq!(app.provider_name_at(0), Some("second"));
+        assert_eq!(app.provider_name_at(1), None); // the fold row
+
+        // Cursor onto the fold row expands straight onto the disabled provider.
+        app.select_next();
+        assert!(!app.is_providers_collapsed());
+        assert_eq!(app.selected_name(), Some("first"));
+        assert_eq!(app.provider_name_at(1), Some("first"));
+
+        app.select_prev();
+        assert!(app.is_providers_collapsed());
+        assert_eq!(app.provider_name_at(0), Some("second"));
+    }
+
+    #[test]
+    fn toggle_provider_enabled_folds_disabled_providers_to_the_end() {
+        let _guard = ConfigDirGuard::new();
+        let mut app = app_with_current("first");
+        app.providers.table_state.select(Some(1)); // "second"
+
+        app.toggle_provider_enabled().unwrap();
+        let order: Vec<&str> = app.config.providers.keys().map(|k| k.as_str()).collect();
+        assert_eq!(order, vec!["first", "second"]);
+        assert!(!app.config.providers["second"].enabled);
+        // Cursor lands on the next enabled row and the disabled block folds.
+        assert_eq!(app.selected_name(), Some("first"));
+        assert!(app.is_providers_collapsed());
+
+        // Cursor down onto the fold row expands; the disabled row is selectable.
+        app.select_next();
+        assert!(!app.is_providers_collapsed());
+        assert_eq!(app.selected_name(), Some("second"));
+
+        // Re-enabling moves the provider back into the enabled block.
+        app.toggle_provider_enabled().unwrap();
+        assert!(app.config.providers["second"].enabled);
+        assert_eq!(app.selected_name(), Some("second"));
+        assert!(app.is_providers_collapsed());
     }
 }

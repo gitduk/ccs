@@ -284,8 +284,10 @@ impl App {
             self.spawn_model_fetch(&fields.name);
         }
 
+        self.config.sort_providers_by_enabled();
         config::save_config(&self.config)?;
-        if let Some(idx) = self.config.providers.get_index_of(&fields.name) {
+        if self.config.providers.contains_key(&fields.name) {
+            let idx = super::navigation::display_rank_of(&self.config, &fields.name);
             self.providers.table_state.select(Some(idx));
         }
 
@@ -320,6 +322,7 @@ impl App {
             self.config.current = name.clone();
         }
         self.spawn_model_fetch(&name);
+        self.config.sort_providers_by_enabled();
         if let Err(e) = config::save_config(&self.config) {
             // Roll back so the table never shows a provider that didn't hit
             // disk; keep the form open with the error so the user can retry.
@@ -329,7 +332,8 @@ impl App {
             }
             return Ok(());
         }
-        if let Some(idx) = self.config.providers.get_index_of(&name) {
+        if self.config.providers.contains_key(&name) {
+            let idx = super::navigation::display_rank_of(&self.config, &name);
             self.providers.table_state.select(Some(idx));
         }
         self.set_message(format!("Added '{name}'"), MessageKind::Success);
@@ -464,7 +468,7 @@ impl App {
         }
         config::save_config(&self.config)?;
         if let Some(selected) = self.providers.table_state.selected() {
-            let count = self.provider_count();
+            let count = self.table_row_count();
             if count == 0 {
                 self.providers.table_state.select(None);
             } else if selected >= count {
@@ -523,35 +527,62 @@ impl App {
     }
 
     pub fn toggle_provider_enabled(&mut self) -> Result<()> {
-        if let Some(name) = self.selected_name().map(|s| s.to_string())
-            && let Some(provider) = self.config.providers.get_mut(&name)
-        {
-            provider.enabled = !provider.enabled;
-            let now_enabled = provider.enabled;
-            let state = if now_enabled { "enabled" } else { "disabled" };
+        let Some(name) = self.selected_name().map(|s| s.to_string()) else {
+            return Ok(());
+        };
+        if !self.config.providers.contains_key(&name) {
+            return Ok(());
+        }
+        let idx_before = super::navigation::display_rank_of(&self.config, &name);
+        let Some(provider) = self.config.providers.get_mut(&name) else {
+            return Ok(());
+        };
+        provider.enabled = !provider.enabled;
+        let now_enabled = provider.enabled;
 
-            // If we just disabled the current provider, advance to the next enabled one.
-            if !now_enabled && self.config.current == name {
-                let next = self
-                    .config
-                    .providers
-                    .iter()
-                    .find(|(k, v)| *k != &name && v.enabled)
-                    .map(|(k, _)| k.clone());
-                match next {
-                    Some(next_name) => self.config.current = next_name,
-                    None => {
-                        config::save_config(&self.config)?;
-                        self.set_message(
-                            format!("'{name}' disabled — no enabled providers remain"),
-                            MessageKind::Error,
-                        );
-                        return Ok(());
-                    }
+        // If we just disabled the current provider, advance to the next enabled one.
+        let no_enabled_left = if !now_enabled && self.config.current == name {
+            match self
+                .config
+                .providers
+                .iter()
+                .find(|(k, v)| *k != &name && v.enabled)
+            {
+                Some((k, _)) => {
+                    self.config.current = k.clone();
+                    false
                 }
+                None => true,
             }
+        } else {
+            false
+        };
 
-            config::save_config(&self.config)?;
+        // Keep the table in the fold layout: enabled first, disabled folded at the end.
+        self.config.sort_providers_by_enabled();
+        let enabled_count = self.enabled_count();
+        if now_enabled {
+            // Cursor follows the (re-enabled) provider at the end of the enabled block.
+            if self.config.providers.contains_key(&name) {
+                let idx = super::navigation::display_rank_of(&self.config, &name);
+                self.providers.table_state.select(Some(idx));
+            }
+        } else {
+            // Cursor lands where the disabled provider was: the next enabled row,
+            // or the last enabled row, which folds the disabled block back up.
+            self.providers
+                .table_state
+                .select(Some(idx_before.min(enabled_count.saturating_sub(1))));
+        }
+
+        config::save_config(&self.config)?;
+        if no_enabled_left {
+            self.set_message(
+                format!("'{name}' disabled — no enabled providers remain"),
+                MessageKind::Error,
+            );
+        } else {
+            let state = if now_enabled { "enabled" } else { "disabled" };
             self.set_message(format!("'{name}' {state}"), MessageKind::Info);
         }
         Ok(())
@@ -715,11 +746,13 @@ impl App {
                             if is_first {
                                 self.config.current = name.clone();
                             }
+                            self.config.sort_providers_by_enabled();
                             let wrote_models =
                                 self.store_provider_models(&provider_id, &name, d.models);
                             match config::save_config(&self.config) {
                                 Ok(()) => {
-                                    if let Some(idx) = self.config.providers.get_index_of(&name) {
+                                    if self.config.providers.contains_key(&name) {
+                                        let idx = super::navigation::display_rank_of(&self.config, &name);
                                         self.providers.table_state.select(Some(idx));
                                     }
                                     self.set_message(

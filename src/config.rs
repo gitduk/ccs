@@ -369,6 +369,24 @@ impl AppConfig {
         Ok(())
     }
 
+    /// Stable-partition providers so enabled ones come first and disabled ones
+    /// last, preserving relative order within each group. Keeps the TUI's
+    /// enabled/disabled fold in sync with row order.
+    pub fn sort_providers_by_enabled(&mut self) {
+        let mut enabled: Vec<(String, Provider)> = Vec::new();
+        let mut disabled: Vec<(String, Provider)> = Vec::new();
+        for (name, provider) in std::mem::take(&mut self.providers) {
+            if provider.enabled {
+                enabled.push((name, provider));
+            } else {
+                disabled.push((name, provider));
+            }
+        }
+        for (name, provider) in enabled.into_iter().chain(disabled) {
+            self.providers.insert(name, provider);
+        }
+    }
+
     pub fn resolve_db_path(&self) -> String {
         self.db_path.clone().unwrap_or_else(|| {
             if let Ok(dir) = std::env::var("CCS_CONFIG_DIR") {
@@ -834,5 +852,32 @@ mod tests {
         let map = cfg.name_to_id_map();
         assert_eq!(map.get("prov-a").unwrap(), "id-prov-a");
         assert_eq!(map.get("prov-b").unwrap(), "id-prov-b");
+    }
+
+    #[test]
+    fn sort_providers_by_enabled_partitions_stably() {
+        let mut cfg = make_config(
+            "prov-a",
+            &[
+                ("prov-a", true),
+                ("prov-b", false),
+                ("prov-c", true),
+                ("prov-d", false),
+            ],
+        );
+        cfg.sort_providers_by_enabled();
+        let order: Vec<&str> = cfg.providers.keys().map(|k| k.as_str()).collect();
+        assert_eq!(order, vec!["prov-a", "prov-c", "prov-b", "prov-d"]);
+    }
+
+    #[test]
+    fn sort_providers_by_enabled_is_stable_within_groups() {
+        let mut cfg = make_config(
+            "prov-a",
+            &[("prov-a", false), ("prov-b", false), ("prov-c", true)],
+        );
+        cfg.sort_providers_by_enabled();
+        let order: Vec<&str> = cfg.providers.keys().map(|k| k.as_str()).collect();
+        assert_eq!(order, vec!["prov-c", "prov-a", "prov-b"]);
     }
 }

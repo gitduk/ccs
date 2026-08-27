@@ -66,9 +66,11 @@ const MIN_WIDTH_FOR_SPLIT: u16 = 120;
 
 /// Minimum / ideal height for the Providers table content (no borders;
 /// the outer chrome owns top/bottom). One row of top padding + one
-/// header row + one row per provider.
+/// header row + one row per visible row. The fold row counts as one, so
+/// the panel shrinks when disabled providers are collapsed instead of
+/// reserving space for hidden rows.
 fn providers_spec(app: &App) -> HeightSpec {
-    let ideal = (app.provider_count() as u16 + 2).max(3);
+    let ideal = (app.table_row_count() as u16 + 2).max(3);
     HeightSpec { min: 3, ideal }
 }
 
