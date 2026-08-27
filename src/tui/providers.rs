@@ -470,6 +470,7 @@ mod tests {
                 fallback: false,
                 api_version: None,
                 inject_thinking_history: true,
+                strict_thinking_history: false,
                 quota_command: None,
                 port: Some(8003),
                 test_model: None,

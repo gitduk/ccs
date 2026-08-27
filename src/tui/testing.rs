@@ -126,6 +126,7 @@ pub(crate) mod tests {
             fallback: true,
             api_version: None,
             inject_thinking_history: true,
+            strict_thinking_history: false,
             quota_command: None,
             port: None,
             test_model: None,

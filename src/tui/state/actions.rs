@@ -164,6 +164,10 @@ impl App {
         let quota_command = existing.and_then(|p| p.quota_command.clone());
         // Not editable in the form; inherit from the existing provider.
         let inject_thinking_history = existing.map(|p| p.inject_thinking_history).unwrap_or(true);
+        // Not editable in the form; inherit from the existing provider.
+        let strict_thinking_history = existing
+            .map(|p| p.strict_thinking_history)
+            .unwrap_or(false);
         // A new provider has no format yet (resolved below by auto-detection),
         // so this placeholder is only ever seen if fields.is_new() — editing
         // an existing provider always carries its real, already-known format.
@@ -180,6 +184,7 @@ impl App {
             fallback,
             api_version: existing_version,
             inject_thinking_history,
+            strict_thinking_history,
             quota_command,
             port,
             test_model: existing.and_then(|p| p.test_model.clone()),
@@ -690,6 +695,7 @@ impl App {
                                 fallback,
                                 api_version: d.api_version,
                                 inject_thinking_history: true,
+                                strict_thinking_history: false,
                                 quota_command: None,
                                 port,
                                 test_model: None,

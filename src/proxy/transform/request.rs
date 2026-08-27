@@ -1145,7 +1145,14 @@ fn strip_duplicate_signatures(msg: &mut Value) {
 /// session violates the latter. This function injects an empty thinking block
 /// into turns missing one and drops `signature` from all but the first signed
 /// block of each turn. Returns `None` if no patching is needed.
-pub fn patch_thinking_history(req: &Value) -> Option<Value> {
+///
+/// The trigger is not only an explicit `thinking` param: DeepSeek's Anthropic
+/// endpoint enforces the same consistency from the history alone — once any
+/// assistant turn carries a thinking block, every earlier turn must too. When
+/// `strict_history` is set (a provider that enforces this), a mixed history is
+/// patched even without an explicit `thinking` param; tolerant providers keep
+/// the history-trigger off by passing `false`.
+pub fn patch_thinking_history(req: &Value, strict_history: bool) -> Option<Value> {
     // Anthropic-native encoding only — ingress normalizes the OpenAI
     // reasoning_effort form to {"type": "enabled", ...} (see
     // copy_openai_reasoning_to_thinking).
@@ -1156,11 +1163,16 @@ pub fn patch_thinking_history(req: &Value) -> Option<Value> {
         Some("enabled") | Some("adaptive")
     );
 
-    if !thinking_enabled {
+    let messages = req.get("messages")?.as_array()?;
+    if !thinking_enabled
+        && (!strict_history
+            || !messages.iter().any(|m| {
+                m.get("role").and_then(|r| r.as_str()) == Some("assistant")
+                    && message_has_thinking_block(m)
+            }))
+    {
         return None;
     }
-
-    let messages = req.get("messages")?.as_array()?;
 
     // The last message may be an assistant prefill for the current turn — the
     // prefill exemption only covers injecting missing thinking blocks;
@@ -1248,6 +1260,7 @@ mod tests {
             fallback: true,
             api_version,
             inject_thinking_history: true,
+            strict_thinking_history: false,
             quota_command: None,
             port: None,
             test_model: None,
@@ -2076,7 +2089,7 @@ mod tests {
                 {"role": "user", "content": "follow up"}
             ]
         });
-        let patched = patch_thinking_history(&req).unwrap();
+        let patched = patch_thinking_history(&req, true).unwrap();
         let assistant = &patched["messages"][1];
         let content = assistant["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "thinking");
@@ -2097,7 +2110,7 @@ mod tests {
                 {"role": "user", "content": "follow up"}
             ]
         });
-        let patched = patch_thinking_history(&req).unwrap();
+        let patched = patch_thinking_history(&req, true).unwrap();
         let content = patched["messages"][1]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "thinking");
     }
@@ -2111,7 +2124,60 @@ mod tests {
                 {"role": "assistant", "content": "hi"}
             ]
         });
-        assert!(patch_thinking_history(&req).is_none());
+        assert!(patch_thinking_history(&req, false).is_none());
+    }
+
+    #[test]
+    fn patch_thinking_history_ignores_mixed_history_without_strict_flag() {
+        // Tolerant providers (ark, genuine Anthropic) keep the history-trigger
+        // off: a mixed history with no `thinking` param must stay untouched.
+        let req = json!({
+            "model": "m",
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "plan"},
+                    {"type": "text", "text": "first"}
+                ]},
+                {"role": "user", "content": "tool result"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "bash", "input": {"command": "ls"}}
+                ]},
+                {"role": "user", "content": "next"}
+            ]
+        });
+        assert!(patch_thinking_history(&req, false).is_none());
+    }
+
+    #[test]
+    fn patch_thinking_history_patches_mixed_history_without_thinking_param() {
+        // DeepSeek's Anthropic endpoint enforces the every-turn-thinking rule
+        // from the history alone: once one assistant turn carries a thinking
+        // block, an earlier turn missing one is rejected even when the request
+        // does not enable thinking. The missing turn must get an empty block.
+        let req = json!({
+            "model": "m",
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "plan"},
+                    {"type": "text", "text": "first"}
+                ]},
+                {"role": "user", "content": "tool result"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "bash", "input": {"command": "ls"}}
+                ]},
+                {"role": "user", "content": "next"}
+            ]
+        });
+        let patched = patch_thinking_history(&req, true).unwrap();
+        let missing = &patched["messages"][3]["content"].as_array().unwrap();
+        assert_eq!(missing[0]["type"], "thinking");
+        assert_eq!(missing[0]["thinking"], "");
+        assert_eq!(missing[1]["type"], "tool_use");
+        // The turn that already carried thinking is untouched.
+        let first = &patched["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(first[0]["thinking"], "plan");
     }
 
     #[test]
@@ -2125,7 +2191,7 @@ mod tests {
                 {"role": "assistant", "content": "Here is"}
             ]
         });
-        assert!(patch_thinking_history(&req).is_none());
+        assert!(patch_thinking_history(&req, true).is_none());
     }
 
     #[test]
@@ -2140,7 +2206,7 @@ mod tests {
                 {"role": "assistant", "content": "prefill"}
             ]
         });
-        let patched = patch_thinking_history(&req).unwrap();
+        let patched = patch_thinking_history(&req, true).unwrap();
         // Intermediate assistant (index 1) gets thinking block.
         let intermediate = &patched["messages"][1]["content"].as_array().unwrap();
         assert_eq!(intermediate[0]["type"], "thinking");
@@ -2161,7 +2227,7 @@ mod tests {
                 ]}
             ]
         });
-        assert!(patch_thinking_history(&req).is_none());
+        assert!(patch_thinking_history(&req, true).is_none());
     }
 
     #[test]
@@ -2179,7 +2245,7 @@ mod tests {
                 {"role": "user", "content": "follow up"}
             ]
         });
-        assert!(patch_thinking_history(&req).is_none());
+        assert!(patch_thinking_history(&req, true).is_none());
     }
 
     #[test]
@@ -2204,7 +2270,7 @@ mod tests {
                 ]}
             ]
         });
-        let patched = patch_thinking_history(&req).unwrap();
+        let patched = patch_thinking_history(&req, true).unwrap();
         let content = patched["messages"][1]["content"].as_array().unwrap();
         assert_eq!(content[0]["signature"], "sig-a");
         assert!(content[2].get("signature").is_none());
@@ -2227,7 +2293,7 @@ mod tests {
                 ]}
             ]
         });
-        let patched = patch_thinking_history(&req).unwrap();
+        let patched = patch_thinking_history(&req, true).unwrap();
         let content = patched["messages"][1]["content"].as_array().unwrap();
         assert_eq!(content[0]["signature"], "sig-a");
         assert!(content[1].get("signature").is_none());

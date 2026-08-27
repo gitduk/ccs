@@ -163,6 +163,13 @@ pub struct Provider {
     /// Defaults to true to preserve existing behavior.
     #[serde(default = "default_true")]
     pub inject_thinking_history: bool,
+    /// When true (DeepSeek Anthropic endpoint), assistant history must stay
+    /// thinking-consistent even without an explicit `thinking` param: once any
+    /// turn carries a thinking block, every earlier turn must too. Lets
+    /// `patch_thinking_history` fire on a mixed history; defaults to false so
+    /// tolerant providers (ark, genuine Anthropic) keep the old behavior.
+    #[serde(default)]
+    pub strict_thinking_history: bool,
     /// Shell command used by the Quota panel and main-table Quota column.
     #[serde(default, alias = "quota_curl", skip_serializing_if = "Option::is_none")]
     pub quota_command: Option<String>,
@@ -663,6 +670,7 @@ mod tests {
             fallback: true,
             api_version: None,
             inject_thinking_history: true,
+            strict_thinking_history: false,
             quota_command: None,
             port: None,
             test_model: None,
