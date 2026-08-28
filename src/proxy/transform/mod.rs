@@ -5,8 +5,8 @@ mod stream;
 
 pub use models::{anthropic_to_openai_models, openai_to_anthropic_models};
 pub use request::{
-    anthropic_to_openai_request, map_anthropic_model, openai_to_anthropic_request,
-    patch_thinking_history, to_openai,
+    anthropic_to_openai_request, clamp_max_tokens, map_anthropic_model,
+    openai_to_anthropic_request, patch_thinking_history, to_openai,
 };
 pub use response::{anthropic_to_openai_response, openai_to_anthropic_response};
 pub use stream::{anthropic_stream_to_openai, openai_stream_to_anthropic, rewrite_model_in_stream};

@@ -949,6 +949,7 @@ mod tests {
             quota_command: None,
             port: None,
             test_model: None,
+            max_tokens_cap: None,
         }
     }
 

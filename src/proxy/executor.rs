@@ -117,13 +117,18 @@ pub(crate) async fn execute_provider_request(
         None => {
             let patched = req_json.and_then(|req| {
                 let after_model_map = transform::map_anthropic_model(req, provider);
-                if provider.inject_thinking_history {
+                let patched = if provider.inject_thinking_history {
                     let base = after_model_map.as_ref().unwrap_or(req);
                     transform::patch_thinking_history(base, provider.strict_thinking_history)
                         .or(after_model_map)
                 } else {
                     after_model_map
-                }
+                };
+                transform::clamp_max_tokens(
+                    patched.as_ref().unwrap_or(req),
+                    provider.max_tokens_cap,
+                )
+                .or(patched)
             });
             match patched {
                 Some(v) => Bytes::from(serde_json::to_vec(&v)?),

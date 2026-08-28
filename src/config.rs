@@ -183,6 +183,11 @@ pub struct Provider {
     /// instead of auto-picking one from the fetched model list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_model: Option<String>,
+    /// Cap the outgoing token limit (`max_tokens` on Anthropic /
+    /// `max_output_tokens` / `max_completion_tokens` on OpenAI) at this value.
+    /// `None` = pass the client's limit through untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens_cap: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -692,6 +697,7 @@ mod tests {
             quota_command: None,
             port: None,
             test_model: None,
+            max_tokens_cap: None,
         }
     }
 

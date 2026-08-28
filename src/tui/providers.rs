@@ -501,6 +501,7 @@ mod tests {
                 quota_command: None,
                 port: Some(8003),
                 test_model: None,
+                max_tokens_cap: None,
             },
         );
 

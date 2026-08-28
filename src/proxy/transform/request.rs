@@ -50,6 +50,29 @@ pub fn map_anthropic_model(req: &Value, provider: &Provider) -> Option<Value> {
     out["model"] = json!(mapped);
     Some(out)
 }
+/// Clamp the request's token limit to `cap`. Applies to whichever limit field
+/// is present (`max_tokens` for Anthropic/Chat, `max_output_tokens` for
+/// Responses, `max_completion_tokens` for Chat reasoning). Returns `None` when
+/// no cap is set, no limit field exists, or the value already fits.
+pub fn clamp_max_tokens(req: &Value, cap: Option<u64>) -> Option<Value> {
+    let cap = cap?;
+    let field = if req.get("max_output_tokens").is_some() {
+        "max_output_tokens"
+    } else if req.get("max_completion_tokens").is_some() {
+        "max_completion_tokens"
+    } else {
+        "max_tokens"
+    };
+    let Some(num) = req.get(field).and_then(|v| v.as_u64()) else {
+        return None;
+    };
+    if num <= cap {
+        return None;
+    }
+    let mut out = req.clone();
+    out[field] = json!(cap);
+    Some(out)
+}
 
 /// Convert an Anthropic Messages API request to OpenAI format using an explicit
 /// OpenAI API version for this attempt.
@@ -96,6 +119,9 @@ pub fn to_openai(req: &Value, provider: &Provider, api_version: OpenAiApiVersion
     }
 
     copy_common_parameters(req, &mut result, is_responses);
+    if let Some(clamped) = clamp_max_tokens(&result, provider.max_tokens_cap) {
+        result = clamped;
+    }
 
     // Tools
     if let Some(tools) = req.get("tools").and_then(|t| t.as_array()) {
@@ -1264,6 +1290,7 @@ mod tests {
             quota_command: None,
             port: None,
             test_model: None,
+            max_tokens_cap: None,
         }
     }
 
@@ -1366,6 +1393,55 @@ mod tests {
         assert_eq!(out["messages"][0]["role"], "user");
         assert_eq!(out["messages"][0]["content"], "Hello");
         assert_eq!(out["max_tokens"], 100);
+    }
+
+    // ─── clamp_max_tokens ────────────────────────────────────────────────────
+
+    #[test]
+    fn clamp_max_tokens_caps_anthropic_max_tokens() {
+        let req = json!({"max_tokens": 384000, "model": "m"});
+        let out = clamp_max_tokens(&req, Some(131072)).unwrap();
+        assert_eq!(out["max_tokens"], 131072);
+        assert_eq!(out["model"], "m");
+    }
+
+    #[test]
+    fn clamp_max_tokens_keeps_value_within_cap() {
+        let req = json!({"max_tokens": 32000});
+        assert!(clamp_max_tokens(&req, Some(131072)).is_none());
+    }
+
+    #[test]
+    fn clamp_max_tokens_noop_without_cap() {
+        let req = json!({"max_tokens": 384000});
+        assert!(clamp_max_tokens(&req, None).is_none());
+    }
+
+    #[test]
+    fn clamp_max_tokens_handles_responses_field() {
+        let req = json!({"max_output_tokens": 384000});
+        assert_eq!(
+            clamp_max_tokens(&req, Some(131072)).unwrap()["max_output_tokens"],
+            131072
+        );
+    }
+
+    #[test]
+    fn clamp_max_tokens_handles_completion_tokens_field() {
+        let req = json!({"max_completion_tokens": 500000});
+        assert_eq!(
+            clamp_max_tokens(&req, Some(131072)).unwrap()["max_completion_tokens"],
+            131072
+        );
+    }
+
+    #[test]
+    fn clamp_max_tokens_leaves_other_fields_intact() {
+        let req = json!({"max_tokens": 384000, "temperature": 0.5, "stream": true});
+        let out = clamp_max_tokens(&req, Some(131072)).unwrap();
+        assert_eq!(out["max_tokens"], 131072);
+        assert_eq!(out["temperature"], 0.5);
+        assert_eq!(out["stream"], true);
     }
 
     #[test]

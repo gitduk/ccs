@@ -188,6 +188,7 @@ impl App {
             quota_command,
             port,
             test_model: existing.and_then(|p| p.test_model.clone()),
+            max_tokens_cap: existing.and_then(|p| p.max_tokens_cap),
         };
 
         if fields.is_new() {
@@ -738,6 +739,7 @@ impl App {
                                 quota_command: None,
                                 port,
                                 test_model: None,
+                                max_tokens_cap: None,
                             };
                             let is_first = self.config.providers.is_empty();
                             self.config.providers.insert(name.clone(), provider);

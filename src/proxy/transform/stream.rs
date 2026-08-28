@@ -2048,6 +2048,7 @@ mod tests {
             quota_command: None,
             port: None,
             test_model: None,
+            max_tokens_cap: None,
         };
 
         // Round 1: Claude Code request (thinking on) -> upstream OpenAI request
@@ -2156,6 +2157,7 @@ mod tests {
             quota_command: None,
             port: None,
             test_model: None,
+            max_tokens_cap: None,
         };
 
         let ids = ["call_00_AAAA", "call_00_BBBB"];
@@ -2248,6 +2250,7 @@ mod tests {
             quota_command: None,
             port: None,
             test_model: None,
+            max_tokens_cap: None,
         };
         let upstream_call_id = "call_00_5d8FPybV7Lq0m3CfOW2O9183";
 

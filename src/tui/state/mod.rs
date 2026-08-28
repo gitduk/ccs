@@ -715,6 +715,7 @@ mod tests {
                 quota_command: None,
                 port: None,
                 test_model: None,
+                max_tokens_cap: None,
             },
         );
 
@@ -868,6 +869,7 @@ mod tests {
                 quota_command: None,
                 port: None,
                 test_model: None,
+                max_tokens_cap: None,
             },
         );
         crate::config::save_config(&cfg).unwrap();
@@ -927,6 +929,7 @@ mod tests {
                 quota_command: None,
                 port: None,
                 test_model: None,
+                max_tokens_cap: None,
             },
         );
         crate::config::save_config(&cfg).unwrap();
@@ -997,6 +1000,7 @@ mod tests {
                 quota_command: None,
                 port: None,
                 test_model: None,
+                max_tokens_cap: None,
             },
         );
         crate::config::save_config(&cfg).unwrap();

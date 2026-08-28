@@ -38,6 +38,7 @@ fn probe_provider(base_url: &str, api_key: &str, api_format: ApiFormat) -> Provi
         quota_command: None,
         port: None,
         test_model: None,
+        max_tokens_cap: None,
     }
 }
 
@@ -471,6 +472,7 @@ pub(crate) mod tests {
             quota_command: None,
             port: None,
             test_model: None,
+            max_tokens_cap: None,
         }
     }
 
@@ -588,6 +590,7 @@ pub(crate) mod tests {
             quota_command: None,
             port: None,
             test_model: None,
+            max_tokens_cap: None,
         };
 
         let started = tokio::time::Instant::now();
