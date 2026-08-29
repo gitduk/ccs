@@ -44,7 +44,8 @@ fn init_schema(conn: &Connection) -> Result<()> {
             output            INTEGER NOT NULL DEFAULT 0,
             requests          INTEGER NOT NULL DEFAULT 0,
             failures          INTEGER NOT NULL DEFAULT 0,
-            latency_total  INTEGER NOT NULL DEFAULT 0
+            latency_total  INTEGER NOT NULL DEFAULT 0,
+            quota_output      TEXT
         );
         CREATE TABLE IF NOT EXISTS model_stats (
             provider_id   TEXT NOT NULL,
@@ -85,6 +86,9 @@ fn init_schema(conn: &Connection) -> Result<()> {
         .ok();
     conn.execute_batch("ALTER TABLE request_log ADD COLUMN response_body TEXT")
         .ok();
+    // Add last-quota snapshot column to existing DBs that predate it.
+    conn.execute_batch("ALTER TABLE provider_stats ADD COLUMN quota_output TEXT")
+        .ok(); // Ignore error — column already exists on fresh DBs.
     Ok(())
 }
 
@@ -317,6 +321,33 @@ pub fn upsert_provider(conn: &Connection, d: &ProviderDelta<'_>) -> Result<()> {
         params![d.id, d.name, d.input, d.output, d.requests, d.failures, d.latency],
     )?;
     Ok(())
+}
+
+/// Persist the latest quota command output for a provider.
+/// No-op provider_name is fine: the first real request overwrites it.
+pub fn upsert_quota(conn: &Connection, provider_id: &str, output: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO provider_stats (provider_id, provider_name, quota_output)
+         VALUES (?1, '', ?2)
+         ON CONFLICT(provider_id) DO UPDATE SET
+             quota_output = excluded.quota_output",
+        params![provider_id, output],
+    )?;
+    Ok(())
+}
+
+/// Load the latest quota output per provider (provider_id -> output).
+pub fn load_quota_snapshots(conn: &Connection) -> HashMap<String, String> {
+    conn.prepare(
+        "SELECT provider_id, quota_output FROM provider_stats WHERE quota_output IS NOT NULL",
+    )
+    .and_then(|mut stmt| {
+        stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// Accumulate token delta for a specific (provider, model) pair.
@@ -840,5 +871,43 @@ mod tests {
             fail, 5,
             "failures should be 5 after clear + 5 failure writes"
         );
+    }
+    #[test]
+    fn quota_snapshot_roundtrip_and_update() {
+        let path = format!("/tmp/ccs-quota-test-{}.db", uuid::Uuid::new_v4());
+        let conn = Connection::open(&path).unwrap();
+        init_schema(&conn).unwrap();
+
+        assert!(load_quota_snapshots(&conn).is_empty());
+
+        upsert_quota(&conn, "p1", "42 credits").unwrap();
+        upsert_quota(&conn, "p2", "0 credits").unwrap();
+
+        let snap = load_quota_snapshots(&conn);
+        assert_eq!(snap.get("p1").map(String::as_str), Some("42 credits"));
+        assert_eq!(snap.get("p2").map(String::as_str), Some("0 credits"));
+
+        // Update overwrites in place; no duplicate rows.
+        upsert_quota(&conn, "p1", "37 credits").unwrap();
+        let snap = load_quota_snapshots(&conn);
+        assert_eq!(snap.get("p1").map(String::as_str), Some("37 credits"));
+        assert_eq!(snap.len(), 2);
+
+        // A real request's delta must not clobber the snapshot.
+        upsert_provider(
+            &conn,
+            &ProviderDelta {
+                id: "p1",
+                name: "Provider One",
+                input: 10,
+                output: 20,
+                requests: 1,
+                failures: 0,
+                latency: 5,
+            },
+        )
+        .unwrap();
+        let snap = load_quota_snapshots(&conn);
+        assert_eq!(snap.get("p1").map(String::as_str), Some("37 credits"));
     }
 }

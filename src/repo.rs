@@ -103,6 +103,30 @@ impl Repository {
         });
     }
 
+    /// Fire-and-forget: persist the latest quota command output for a provider.
+    pub(crate) fn save_quota_async(&self, provider_id: &str, output: String) {
+        let repo = self.clone();
+        let pid = provider_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            if let Ok(conn) = repo.0.lock()
+                && let Err(e) = db::upsert_quota(&conn, &pid, &output)
+            {
+                tracing::warn!("Failed to persist quota for {pid}: {e}");
+            }
+        });
+    }
+
+    /// Load the latest quota output per provider (provider_id -> output).
+    pub fn load_quota_snapshots(&self) -> HashMap<String, String> {
+        match self.0.lock() {
+            Ok(conn) => db::load_quota_snapshots(&conn),
+            Err(_) => {
+                tracing::warn!("DB mutex poisoned in load_quota_snapshots; returning empty map");
+                HashMap::new()
+            }
+        }
+    }
+
     pub fn load_metrics(&self) -> TokenMetrics {
         match self.0.lock() {
             Ok(conn) => db::load_metrics(&conn),

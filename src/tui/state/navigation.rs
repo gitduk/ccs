@@ -36,6 +36,21 @@ impl App {
 
         let bg_proxy_pid = super::bg_proxy::load_bg_proxy_pid();
 
+        // Restore the last quota snapshot per provider from the DB; drop
+        // rows whose provider no longer exists in config. Kept in memory
+        // only; the next manual check (`u`) refreshes and rewrites it.
+        let quota_status = db
+            .load_quota_snapshots()
+            .into_iter()
+            .filter(|(id, _)| config.providers.values().any(|p| p.id == *id))
+            .map(|(id, output)| {
+                (
+                    id,
+                    super::QuotaStatus::Success(super::QuotaResult { output }),
+                )
+            })
+            .collect();
+
         // Restore the last test results; drop entries whose provider no longer
         // exists in config (deleted externally while ccs wasn't running).
         let mut tests = super::TestState::new();
@@ -80,7 +95,7 @@ impl App {
             message_log: std::collections::VecDeque::new(),
             seen_provider_errors: std::collections::HashMap::new(),
             pending_key: None,
-            quota_status: std::collections::HashMap::new(),
+            quota_status,
             quota_form: None,
             quick_form: None,
             help_scroll: 0,

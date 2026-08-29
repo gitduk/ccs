@@ -458,6 +458,7 @@ impl App {
         crate::test_store::save(&self.tests.results);
         self.tests.pending.remove(name);
         self.tests.testing_model.remove(name);
+        self.quota_status.remove(id);
         if self.config.current == name {
             self.config.current = self
                 .config
@@ -675,6 +676,10 @@ impl App {
                     result,
                 } => {
                     use super::QuotaStatus;
+                    // Provider may have been deleted while the check was in
+                    // flight: drop the result so neither a stale row is
+                    // persisted nor a ghost status is shown.
+                    let alive = self.config.providers.values().any(|p| p.id == provider_id);
                     let is_form_provider = self
                         .quota_form
                         .as_ref()
@@ -682,10 +687,18 @@ impl App {
                         .map(|p| p.id == provider_id)
                         .unwrap_or(false);
                     let status = match &result {
-                        Ok(quota_result) => QuotaStatus::Success(quota_result.clone()),
+                        Ok(quota_result) => {
+                            if alive {
+                                self.db
+                                    .save_quota_async(&provider_id, quota_result.output.clone());
+                            }
+                            QuotaStatus::Success(quota_result.clone())
+                        }
                         Err(e) => QuotaStatus::Error(e.clone()),
                     };
-                    self.quota_status.insert(provider_id, status);
+                    if alive {
+                        self.quota_status.insert(provider_id, status);
+                    }
                     if let Some(form) = self.quota_form.as_mut()
                         && is_form_provider
                     {

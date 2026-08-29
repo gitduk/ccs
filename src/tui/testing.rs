@@ -46,21 +46,6 @@ pub(super) fn test_specific_model(app: &mut App, provider_name: &str, model: &st
     });
 }
 
-/// Run quota commands for all providers that have one configured.
-pub(super) fn start_quota_queries(app: &mut App) {
-    let names: Vec<String> = app
-        .config
-        .providers
-        .iter()
-        .filter(|(_, provider)| provider.quota_command.is_some())
-        .map(|(name, _)| name.clone())
-        .collect();
-
-    for name in names {
-        run_quota_for_name(app, &name);
-    }
-}
-
 pub(super) fn run_quota_for_name(app: &mut App, name: &str) {
     let Some(provider) = app.config.providers.get(name) else {
         return;
