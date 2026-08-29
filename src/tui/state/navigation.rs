@@ -128,10 +128,11 @@ impl App {
     }
 
     /// The providers table folds the trailing disabled block into a single
-    /// "…" row until the user moves past it: the fold row itself keeps the
-    /// fold, and one more Down expands it. The fold only closes while the
-    /// cursor sits at or before the fold row, so a selection placed past it
-    /// (e.g. a disabled current provider) stays visible.
+    /// "…" row until the user expands it with `l` on the fold row: the fold
+    /// row itself keeps the fold (Down there wraps back to the top). The fold
+    /// only closes while the cursor sits at or before the fold row, so a
+    /// selection placed past it (e.g. a disabled current provider) stays
+    /// visible.
     pub fn is_providers_collapsed(&self) -> bool {
         let enabled = self.enabled_count();
         !self.providers.expanded
@@ -141,6 +142,19 @@ impl App {
                 .table_state
                 .selected()
                 .is_none_or(|s| s <= enabled)
+    }
+
+    /// Whether the cursor sits on the fold row of the collapsed disabled
+    /// block (where `l` expands instead of opening the request log).
+    pub fn is_on_fold_row(&self) -> bool {
+        self.is_providers_collapsed()
+            && self.providers.table_state.selected() == Some(self.enabled_count())
+    }
+
+    /// Expand the trailing disabled block (the fold row's `l` action); the
+    /// cursor lands on the first disabled provider.
+    pub fn expand_fold(&mut self) {
+        self.providers.expanded = true;
     }
 
     /// Number of rows actually shown in the providers table (fold-aware).
@@ -176,12 +190,6 @@ impl App {
             return;
         };
         let enabled = self.enabled_count();
-        // Down on the fold row expands into the disabled block instead of
-        // wrapping; the cursor lands on the first disabled row.
-        if self.is_providers_collapsed() && i == enabled {
-            self.providers.expanded = true;
-            return;
-        }
         let next = (i + 1) % self.table_row_count();
         self.providers.table_state.select(Some(next));
         // Wrapping back onto the enabled block folds the disabled block again.

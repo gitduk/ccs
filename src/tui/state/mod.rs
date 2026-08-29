@@ -91,7 +91,7 @@ pub enum ConfirmAction {
 /// Provider list navigation state (main table).
 pub struct ProviderList {
     pub table_state: TableState,
-    /// Whether the trailing disabled block is expanded (fold row → Down).
+    /// Whether the trailing disabled block is expanded (fold row → `l`).
     pub expanded: bool,
 }
 

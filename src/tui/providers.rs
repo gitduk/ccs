@@ -196,9 +196,13 @@ pub(super) fn handle_key(
             app.models.scroll = 0;
         }
         KeyCode::Char('l') if modifiers.is_empty() => {
-            app.mode = Mode::Logs;
-            app.logs.selected = 0;
-            app.logs.scroll = 0;
+            if app.is_on_fold_row() {
+                app.expand_fold();
+            } else {
+                app.mode = Mode::Logs;
+                app.logs.selected = 0;
+                app.logs.scroll = 0;
+            }
         }
         KeyCode::Char('l') if modifiers == KeyModifiers::CONTROL => {
             app.message_log.clear();
@@ -380,7 +384,7 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
             )),
             Cell::from(""),
             Cell::from(Span::styled(
-                format!("{n_disabled} more"),
+                format!("{n_disabled} more [l]"),
                 Style::default().fg(t::MUTED),
             )),
             Cell::from(""),
@@ -586,18 +590,22 @@ mod tests {
 
         assert_eq!(app.enabled_count(), 1);
         assert!(app.is_providers_collapsed());
-        assert_eq!(app.table_row_count(), 2); // "first" + the fold row
-        assert_eq!(app.provider_name_at(0), Some("first"));
-        assert_eq!(app.provider_name_at(1), None); // the fold row isn't a provider
-
         // Cursor onto the fold row keeps the fold — it's a stop of its own.
         app.select_next();
         assert!(app.is_providers_collapsed());
         assert_eq!(app.table_row_count(), 2);
         assert_eq!(app.selected_name(), None); // the fold row isn't a provider
+        assert!(app.is_on_fold_row());
 
-        // One more move down expands into the disabled block.
+        // Down on the fold row wraps back to the top; the fold stays closed.
         app.select_next();
+        assert!(app.is_providers_collapsed());
+        assert_eq!(app.selected_name(), Some("first"));
+
+        // l on the fold row expands into the disabled block.
+        app.select_next(); // back onto the fold row
+        assert!(app.is_on_fold_row());
+        app.expand_fold();
         assert!(!app.is_providers_collapsed());
         assert_eq!(app.table_row_count(), 2);
         assert_eq!(app.selected_name(), Some("second"));
@@ -620,16 +628,13 @@ mod tests {
         assert_eq!(app.enabled_count(), 1);
         assert!(app.is_providers_collapsed());
         assert_eq!(app.table_row_count(), 2);
-        // Row 0 is the enabled provider, even though it sits at stored index 1.
-        assert_eq!(app.provider_name_at(0), Some("second"));
-        assert_eq!(app.provider_name_at(1), None); // the fold row
-
-        // Cursor onto the fold row keeps the fold; one more move down expands
-        // straight onto the disabled provider.
+        // Cursor onto the fold row keeps the fold; l expands straight onto
+        // the disabled provider.
         app.select_next();
         assert!(app.is_providers_collapsed());
         assert_eq!(app.selected_name(), None);
-        app.select_next();
+        assert!(app.is_on_fold_row());
+        app.expand_fold();
         assert!(!app.is_providers_collapsed());
         assert_eq!(app.selected_name(), Some("first"));
         assert_eq!(app.provider_name_at(1), Some("first"));
@@ -649,15 +654,11 @@ mod tests {
         let order: Vec<&str> = app.config.providers.keys().map(|k| k.as_str()).collect();
         assert_eq!(order, vec!["first", "second"]);
         assert!(!app.config.providers["second"].enabled);
-        // Cursor lands on the next enabled row and the disabled block folds.
-        assert_eq!(app.selected_name(), Some("first"));
-        assert!(app.is_providers_collapsed());
-
-        // Cursor down onto the fold row keeps the fold, then expands; the
+        // Cursor down onto the fold row keeps the fold; l expands; the
         // disabled row becomes selectable.
         app.select_next();
         assert!(app.is_providers_collapsed());
-        app.select_next();
+        app.expand_fold();
         assert!(!app.is_providers_collapsed());
         assert_eq!(app.selected_name(), Some("second"));
 

@@ -35,7 +35,7 @@ pub(super) fn draw_help(f: &mut Frame, scroll: &mut u16) {
                 ("r", "Reload config from disk"),
                 ("c", "Clear current provider usage data"),
                 ("C", "Clear all providers' usage data"),
-                ("l", "Open request log"),
+                ("l", "Open request log / expand disabled block"),
                 ("m", "Browse models"),
                 ("Ctrl-L", "Clear message log"),
                 ("h / ?", "Show this help"),
