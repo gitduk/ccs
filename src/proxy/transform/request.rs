@@ -50,28 +50,34 @@ pub fn map_anthropic_model(req: &Value, provider: &Provider) -> Option<Value> {
     out["model"] = json!(mapped);
     Some(out)
 }
-/// Clamp the request's token limit to `cap`. Applies to whichever limit field
-/// is present (`max_tokens` for Anthropic/Chat, `max_output_tokens` for
-/// Responses, `max_completion_tokens` for Chat reasoning). Returns `None` when
-/// no cap is set, no limit field exists, or the value already fits.
+/// Clamp the request's token limits to `cap`. Applies to whichever limit
+/// fields are present (`max_tokens` for Anthropic/Chat, `max_output_tokens`
+/// for Responses, `max_completion_tokens` for Chat reasoning), so a request
+/// carrying both `max_tokens` and a thinking budget is fully capped. Returns
+/// `None` when no cap is set, no limit field exists, or nothing exceeds it.
 pub fn clamp_max_tokens(req: &Value, cap: Option<u64>) -> Option<Value> {
     let cap = cap?;
-    let field = if req.get("max_output_tokens").is_some() {
-        "max_output_tokens"
-    } else if req.get("max_completion_tokens").is_some() {
-        "max_completion_tokens"
-    } else {
-        "max_tokens"
-    };
-    let Some(num) = req.get(field).and_then(|v| v.as_u64()) else {
-        return None;
-    };
-    if num <= cap {
+    let fields = token_limits_to_clamp(req, cap);
+    if fields.is_empty() {
         return None;
     }
     let mut out = req.clone();
-    out[field] = json!(cap);
+    for field in fields {
+        out[field] = json!(cap);
+    }
     Some(out)
+}
+
+/// Token-limit fields present in `req` whose value exceeds `cap`.
+fn token_limits_to_clamp(req: &Value, cap: u64) -> Vec<&'static str> {
+    ["max_output_tokens", "max_completion_tokens", "max_tokens"]
+        .into_iter()
+        .filter(|field| {
+            req.get(field)
+                .and_then(|v| v.as_u64())
+                .is_some_and(|n| n > cap)
+        })
+        .collect()
 }
 
 /// Convert an Anthropic Messages API request to OpenAI format using an explicit
@@ -119,9 +125,6 @@ pub fn to_openai(req: &Value, provider: &Provider, api_version: OpenAiApiVersion
     }
 
     copy_common_parameters(req, &mut result, is_responses);
-    if let Some(clamped) = clamp_max_tokens(&result, provider.max_tokens_cap) {
-        result = clamped;
-    }
 
     // Tools
     if let Some(tools) = req.get("tools").and_then(|t| t.as_array()) {
@@ -167,6 +170,14 @@ pub fn to_openai(req: &Value, provider: &Provider, api_version: OpenAiApiVersion
             // No budget (e.g. {"type": "adaptive"}): still signal reasoning
             // on the Chat Completions path instead of silently dropping it.
             result["reasoning_effort"] = json!("high");
+        }
+    }
+
+    // Clamp last so a budget-derived limit the thinking block just wrote
+    // (max_completion_tokens / max_output_tokens) is capped too.
+    if let Some(cap) = provider.max_tokens_cap {
+        for field in token_limits_to_clamp(&result, cap) {
+            result[field] = json!(cap);
         }
     }
 
@@ -1442,6 +1453,49 @@ mod tests {
         assert_eq!(out["max_tokens"], 131072);
         assert_eq!(out["temperature"], 0.5);
         assert_eq!(out["stream"], true);
+    }
+
+    #[test]
+    fn clamp_caps_budget_derived_max_completion_tokens() {
+        let mut provider = provider_chat_completions();
+        provider.max_tokens_cap = Some(131072);
+        let req = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "Think"}],
+            "max_tokens": 384000,
+            "thinking": {"type": "enabled", "budget_tokens": 200000}
+        });
+        let out = anthropic_to_openai_request(&req, &provider).unwrap();
+        assert_eq!(out["max_completion_tokens"], 131072);
+        assert_eq!(out["max_tokens"], 131072);
+    }
+
+    #[test]
+    fn clamp_caps_max_tokens_when_budget_already_fits() {
+        let mut provider = provider_chat_completions();
+        provider.max_tokens_cap = Some(131072);
+        let req = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "Think"}],
+            "max_tokens": 384000,
+            "thinking": {"type": "enabled", "budget_tokens": 32000}
+        });
+        let out = anthropic_to_openai_request(&req, &provider).unwrap();
+        assert_eq!(out["max_completion_tokens"], 32000);
+        assert_eq!(out["max_tokens"], 131072);
+    }
+
+    #[test]
+    fn clamp_caps_budget_derived_max_output_tokens() {
+        let mut provider = provider_responses();
+        provider.max_tokens_cap = Some(131072);
+        let req = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "Think"}],
+            "thinking": {"type": "enabled", "budget_tokens": 200000}
+        });
+        let out = anthropic_to_openai_request(&req, &provider).unwrap();
+        assert_eq!(out["max_output_tokens"], 131072);
     }
 
     #[test]
