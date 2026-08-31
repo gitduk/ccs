@@ -270,11 +270,17 @@ impl App {
         Ok(())
     }
 
-    pub fn toggle_fallback(&mut self) -> Result<()> {
-        self.config.fallback = !self.config.fallback;
+    pub fn toggle_balance_mode(&mut self) -> Result<()> {
+        use crate::config::BalanceMode;
+        self.config.mode = match self.config.mode {
+            BalanceMode::Fallback => BalanceMode::LoadBalance,
+            BalanceMode::LoadBalance => BalanceMode::Fallback,
+        };
         config::save_config(&self.config)?;
-        let state = if self.config.fallback { "on" } else { "off" };
-        self.set_message(format!("Fallback mode {state}"), super::MessageKind::Info);
+        self.set_message(
+            format!("Balance mode: {}", self.config.mode.description()),
+            super::MessageKind::Info,
+        );
         Ok(())
     }
 
@@ -375,7 +381,7 @@ mod tests {
             current: "b".into(),
             listen: "127.0.0.1:7896".into(),
             providers,
-            fallback: false,
+            mode: crate::config::BalanceMode::default(),
             db_path: None,
             request_log_limit: 100,
         }

@@ -1294,7 +1294,7 @@ mod tests {
             model_map: HashMap::new(),
             routes: Vec::new(),
             enabled: true,
-            fallback: true,
+            join: true,
             api_version,
             inject_thinking_history: true,
             strict_thinking_history: false,

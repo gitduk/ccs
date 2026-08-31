@@ -9,7 +9,7 @@ use super::{
 /// Parsed and validated fields extracted from a [`ProviderForm`].
 /// Produced by [`parse_provider_form`]; consumed by [`App::do_save_form`].
 ///
-/// Omits `api_format`/`api_version`/`fallback`/`port` — those live outside this form.
+/// Omits `api_format`/`api_version`/`join`/`port` — those live outside this form.
 struct ParsedProviderFields {
     name: String,
     base_url: String,
@@ -159,7 +159,7 @@ impl App {
         let model_map = existing.map(|p| p.model_map.clone()).unwrap_or_default();
         let enabled = existing.map(|p| p.enabled).unwrap_or(true);
         // Not editable in the form (see `f`/`F`/`o` shortcuts); inherit unchanged.
-        let fallback = existing.map(|p| p.fallback).unwrap_or(false);
+        let join = existing.map(|p| p.join).unwrap_or(false);
         let port = existing.and_then(|p| p.port);
         let quota_command = existing.and_then(|p| p.quota_command.clone());
         // Not editable in the form; inherit from the existing provider.
@@ -181,7 +181,7 @@ impl App {
             model_map,
             routes: fields.routes.clone(),
             enabled,
-            fallback,
+            join,
             api_version: existing_version,
             inject_thinking_history,
             strict_thinking_history,
@@ -232,7 +232,7 @@ impl App {
                     name,
                     base_url,
                     api_key,
-                    fallback,
+                    join,
                     port,
                     routes,
                     detected,
@@ -503,26 +503,22 @@ impl App {
         Ok(())
     }
 
-    pub fn toggle_provider_fallback(&mut self) -> Result<()> {
+    pub fn toggle_provider_join(&mut self) -> Result<()> {
         let Some(name) = self.selected_name().map(|s| s.to_string()) else {
             return Ok(());
         };
         if name == self.config.current {
             self.set_message(
-                format!("'{name}' is current provider — it always participates in fallback"),
+                format!("'{name}' is current provider — it always participates"),
                 MessageKind::Info,
             );
             return Ok(());
         }
         if let Some(provider) = self.config.providers.get_mut(&name) {
-            // No guard against "last fallback provider": an empty fallback pool is fine —
+            // No guard against "last joining provider": an empty pool is fine —
             // the current provider still handles requests as primary.
-            provider.fallback = !provider.fallback;
-            let state = if provider.fallback {
-                "in fallback"
-            } else {
-                "out of fallback"
-            };
+            provider.join = !provider.join;
+            let state = if provider.join { "joined" } else { "left" };
             config::save_config(&self.config)?;
             self.set_message(format!("'{name}' {state}"), MessageKind::Info);
         }
@@ -721,7 +717,7 @@ impl App {
                     name,
                     base_url,
                     api_key,
-                    fallback,
+                    join,
                     port,
                     routes,
                     detected,
@@ -745,7 +741,7 @@ impl App {
                                 model_map: Default::default(),
                                 routes,
                                 enabled: true,
-                                fallback,
+                                join,
                                 api_version: d.api_version,
                                 inject_thinking_history: true,
                                 strict_thinking_history: false,

@@ -16,7 +16,7 @@ A lightweight API proxy for routing Claude Code traffic between multiple provide
 - **Model Mapping**: Custom exact-name model mapping per provider
 - **Tool Calling**: Full support for function/tool calling in both formats
 - **Extended Thinking**: Support for Claude's thinking/reasoning blocks
-- **Per-Provider Fallback**: Each provider independently opts in/out of the fallback rotation
+- **Failover / Load Balancing**: Each provider opts in/out of the shared pool; `F` toggles between Fallback (failover) and LoadBalance (round-robin) modes
 - **Per-Project Routing**: Give a provider its own pinned port so different projects can use different providers at the same time
 - **Format Auto-Detection**: Adding a provider probes the endpoint to determine `api_format` / `api_version` and fetches its model list
 - **Connectivity Tester**: Test any model from the Models panel (`t`); the result — latency, auth status, or error — shows right after the model name
@@ -95,7 +95,7 @@ Configuration is stored in `~/.ccs/config.json`. Set `CCS_CONFIG_DIR` to use a d
 {
   "current": "anthropic-official",
   "listen": "127.0.0.1:7896",
-  "fallback": false,
+  "mode": "fallback",
   "request_log_limit": 100,
   "providers": {
     "anthropic-official": {
@@ -104,7 +104,7 @@ Configuration is stored in `~/.ccs/config.json`. Set `CCS_CONFIG_DIR` to use a d
       "api_key": "$ANTHROPIC_API_KEY",
       "api_format": "anthropic",
       "enabled": true,
-      "fallback": true,
+      "join": true,
       "model_map": {},
       "routes": []
     },
@@ -115,7 +115,7 @@ Configuration is stored in `~/.ccs/config.json`. Set `CCS_CONFIG_DIR` to use a d
       "api_format": "openai",
       "api_version": "responses",
       "enabled": true,
-      "fallback": false,
+      "join": false,
       "model_map": {
         "claude-sonnet-4-20250514": "anthropic/claude-sonnet-4-20250514"
       },
@@ -139,7 +139,7 @@ Configuration is stored in `~/.ccs/config.json`. Set `CCS_CONFIG_DIR` to use a d
 | `current` | — | Name of the active provider |
 | `listen` | `127.0.0.1:7896` | Global listen address |
 | `providers` | — | Ordered map of provider name → provider |
-| `fallback` | `false` | Global switch for the fallback rotation |
+| `mode` | `fallback` | How the shared provider pool is used: `fallback` (failover) or `load_balance` (round-robin) |
 | `db_path` | `~/.ccs/ccs.db` | SQLite file holding stats, request log and model lists |
 | `request_log_limit` | `100` | How many recent requests the TUI keeps |
 
@@ -153,7 +153,7 @@ Configuration is stored in `~/.ccs/config.json`. Set `CCS_CONFIG_DIR` to use a d
 | `api_format` | detected | `anthropic` or `openai` |
 | `api_version` | `responses` | OpenAI-only: `responses` or `chat_completions` |
 | `enabled` | `true` | Disabled providers are skipped when forwarding |
-| `fallback` | `true` | Participate in the fallback rotation (TUI adds set it to `false`) |
+| `join` | `true` | Participate in the shared provider pool (fallback rotation or load-balanced round-robin; TUI adds set it to `false`) |
 | `model_map` | `{}` | Exact model-name mapping |
 | `routes` | `[]` | Glob routing rules (see below) |
 | `inject_thinking_history` | `true` | Inject empty thinking blocks into assistant history turns; needed by DeepSeek-compatible upstreams |
@@ -177,7 +177,7 @@ Configuration is stored in `~/.ccs/config.json`. Set `CCS_CONFIG_DIR` to use a d
 ]
 ```
 
-Routes are applied before `model_map`, and they are per-provider: when a request falls back to a different provider, *that* provider's routes are applied. Routes never select the provider — provider choice comes from `current`, the fallback rotation, or a pinned port.
+Routes are applied before `model_map`, and they are per-provider: when a request moves to a different provider, *that* provider's routes are applied. Routes never select the provider — provider choice comes from `current`, the shared pool (fallback / load_balance), or a pinned port.
 
 Edit them in the TUI editor's **Routes** section (`e` on a provider, then Tab down to Routes).
 
@@ -203,12 +203,22 @@ For OpenAI-format providers, set `api_version` to control which upstream endpoin
 "api_version": "chat_completions"
 ```
 
-### Per-Provider Fallback
+### Failover and Load Balancing (shared provider pool)
 
-Set `"fallback": true` to include a provider in the fallback rotation when the active provider fails; the global `fallback` switch (`F` in the TUI) has to be on as well. Providers added through the TUI start at `false`; a provider hand-written into the config without the field defaults to `true`.
+`mode` decides how requests are distributed across the shared pool — every `enabled` provider with `join: true`, plus `current`, which always participates:
+
+- **`fallback` (failover)**: every request goes to `current` first; on failure the pool is tried in stored order.
+- **`load_balance` (round-robin)**: each request rotates its starting provider across the pool, spreading load; a failed provider is still skipped onward.
+
+`join` controls whether a provider enters the shared pool (toggle with `f` in the TUI); the current provider always participates. Providers added through the TUI start at `false`; a provider hand-written into the config without the field defaults to `true`.
+
 
 ```json
-"fallback": true
+"mode": "fallback",
+"providers": {
+  "anthropic-official": { "join": true },
+  "openrouter": { "join": true }
+}
 ```
 
 ### Per-Project Routing (Pinned Port Listeners)
@@ -230,7 +240,7 @@ When you need different projects to use different providers simultaneously (e.g.
 }
 ```
 
-ccs will listen on `:7901` and `:7902` in addition to the global port. Requests to a pinned port are **routed exclusively** to that provider — no fallback.
+ccs will listen on `:7901` and `:7902` in addition to the global port. Requests to a pinned port are **routed exclusively** to that provider — outside the shared pool (fallback / load_balance).
 
 **Project-side config (using direnv):**
 
@@ -269,8 +279,8 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
 | `e` / `Enter` | Edit selected provider |
 | `dd` | Delete selected provider |
 | `p` | Toggle provider enabled/disabled |
-| `f` | Toggle this provider's fallback participation |
-| `F` | Toggle global fallback mode |
+| `f` | Toggle this provider's shared-pool join |
+| `F` | Switch mode: Fallback (failover) / LoadBalance (round-robin) |
 | `o` | Set/clear the provider's pinned port |
 | `u` | Run the provider's quota command immediately and refresh Quota |
 | `U` | Configure the provider's quota command (opens the Quota Command Preview panel) |

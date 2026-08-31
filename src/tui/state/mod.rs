@@ -6,7 +6,7 @@ use std::time::Duration;
 pub(super) const NAME_FIELD_IDX: usize = 0;
 pub(super) const BASE_URL_FIELD_IDX: usize = 1;
 pub(super) const API_KEY_FIELD_IDX: usize = 2;
-// Fallback, port, and Test Model are set via shortcuts outside this form;
+// Join, port, and Test Model are set via shortcuts outside this form;
 // `do_save_form` inherits them from `existing` (or defaults for a new provider).
 
 use ratatui::widgets::TableState;
@@ -122,7 +122,7 @@ pub(super) enum TestEvent {
         name: String,
         base_url: String,
         api_key: String,
-        fallback: bool,
+        join: bool,
         port: Option<u16>,
         routes: Vec<RouteRule>,
         detected: Result<crate::tester::DetectedFormat, String>,
@@ -691,7 +691,7 @@ mod tests {
 
     use super::{App, TestEvent};
     use crate::config::test_support::ConfigDirGuard;
-    use crate::config::{ApiFormat, AppConfig, Provider};
+    use crate::config::{ApiFormat, AppConfig, BalanceMode, Provider};
     use crate::tester::{TestResult, TestStatus};
 
     #[tokio::test]
@@ -708,7 +708,7 @@ mod tests {
                 model_map: Default::default(),
                 routes: vec![],
                 enabled: true,
-                fallback: true,
+                join: true,
                 api_version: None,
                 inject_thinking_history: true,
                 strict_thinking_history: false,
@@ -725,7 +725,7 @@ mod tests {
                 current: "vllm".into(),
                 listen: "127.0.0.1:0".into(),
                 providers,
-                fallback: false,
+                mode: BalanceMode::default(),
                 db_path: Some(path),
                 request_log_limit: 100,
             },
@@ -862,7 +862,7 @@ mod tests {
                 model_map: Default::default(),
                 routes: vec![],
                 enabled: true,
-                fallback: true,
+                join: true,
                 api_version: None,
                 inject_thinking_history: true,
                 strict_thinking_history: false,
@@ -922,7 +922,7 @@ mod tests {
                 model_map: Default::default(),
                 routes: vec![],
                 enabled: true,
-                fallback: true,
+                join: true,
                 api_version: None,
                 inject_thinking_history: true,
                 strict_thinking_history: false,
@@ -993,7 +993,7 @@ mod tests {
                 model_map: Default::default(),
                 routes: vec![],
                 enabled: true,
-                fallback: true,
+                join: true,
                 api_version: None,
                 inject_thinking_history: true,
                 strict_thinking_history: false,

@@ -61,12 +61,7 @@ fn mem_label(mem_mb: u32) -> String {
     }
 }
 
-fn app_info_spans(listen: &str, has_proxy: bool, fallback: bool) -> Vec<Span<'static>> {
-    let fallback_label = if fallback {
-        "Fallback on"
-    } else {
-        "Fallback off"
-    };
+fn app_info_spans(listen: &str, has_proxy: bool, mode: &str) -> Vec<Span<'static>> {
     vec![
         Span::styled(
             listen.to_owned(),
@@ -78,12 +73,8 @@ fn app_info_spans(listen: &str, has_proxy: bool, fallback: bool) -> Vec<Span<'st
         ),
         Span::styled(" ", Style::default()),
         Span::styled(
-            fallback_label,
-            if fallback {
-                Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(t::MUTED)
-            },
+            mode.to_owned(),
+            Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD),
         ),
     ]
 }
@@ -128,7 +119,7 @@ fn make_app_title_with_sysinfo(
         app_info_spans(
             &app.config.listen,
             app.bg_proxy_pid.is_some(),
-            app.config.fallback,
+            app.config.mode.label(),
         ),
     );
     let right = Line::from(right_spans).right_aligned();
@@ -196,7 +187,7 @@ mod tests {
     #[test]
     fn full_right_title_keeps_module_spacing() {
         let left = [logo_spans(), version_spans()].concat();
-        let app_info = app_info_spans("0.0.0.0:7896", true, true);
+        let app_info = app_info_spans("0.0.0.0:7896", true, "Fallback");
         let sys_info = sys_info_spans(6.5, 154);
         let width = full_right_width(&left, 154, &app_info);
 
@@ -204,14 +195,14 @@ mod tests {
 
         assert_eq!(
             text(&right),
-            "╌╌ cpu 6.5% mem 154MB │ 0.0.0.0:7896 Fallback on ╌╌ "
+            "╌╌ cpu 6.5% mem 154MB │ 0.0.0.0:7896 Fallback ╌╌ "
         );
     }
 
     #[test]
     fn app_info_visibility_does_not_follow_current_cpu_width() {
         let left = [logo_spans(), version_spans()].concat();
-        let app_info = app_info_spans("0.0.0.0:7896", true, true);
+        let app_info = app_info_spans("0.0.0.0:7896", true, "Fallback");
         let width = full_right_width(&left, 49, &app_info);
 
         let one_digit =
@@ -221,17 +212,17 @@ mod tests {
         assert_eq!(
             one_digit
                 .iter()
-                .any(|span| span.content.contains("Fallback on")),
+                .any(|span| span.content.contains("Fallback")),
             two_digit
                 .iter()
-                .any(|span| span.content.contains("Fallback on"))
+                .any(|span| span.content.contains("Fallback"))
         );
     }
 
     #[test]
     fn sys_info_only_keeps_right_padding() {
         let left = [logo_spans(), version_spans()].concat();
-        let app_info = app_info_spans("0.0.0.0:7896", true, true);
+        let app_info = app_info_spans("0.0.0.0:7896", true, "Fallback");
         let sys_info = sys_info_spans(6.5, 154);
         let width = (spans_width(&left) + spans_width(&sys_info) + 4) as u16;
 
@@ -243,7 +234,7 @@ mod tests {
     #[test]
     fn hidden_right_title_has_no_partial_spacing() {
         let left = [logo_spans(), version_spans()].concat();
-        let app_info = app_info_spans("0.0.0.0:7896", true, true);
+        let app_info = app_info_spans("0.0.0.0:7896", true, "Fallback");
         let sys_info = sys_info_spans(6.5, 154);
         let width = (spans_width(&left) + spans_width(&sys_info)) as u16;
 
