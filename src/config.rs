@@ -259,6 +259,28 @@ impl Provider {
             .unwrap_or_else(|| (model.to_string(), None));
         (self.map_model(&after_routes), pattern)
     }
+    /// True when nothing configured forces a rewrite of this request: no
+    /// routes, no model map, no token cap. A transparent OpenAI provider can
+    /// be proxied byte-for-byte (same wire format on both sides) instead of
+    /// normalising to Anthropic and back.
+    pub fn transparent(&self) -> bool {
+        self.routes.is_empty() && self.model_map.is_empty() && self.max_tokens_cap.is_none()
+    }
+
+    /// True when an OpenAI-speaking client request can be forwarded to this
+    /// provider byte-for-byte: the provider speaks OpenAI, its configured API
+    /// variant matches the client's, and nothing configured forces a rewrite.
+    ///
+    /// Only the Chat Completions variant is eligible. Raw Responses bytes
+    /// can't fall back to `/v1/chat/completions` on a 404 (they speak the
+    /// Responses format), so passthrough there would surface upstream 404s
+    /// instead of the existing auto-retry.
+    pub fn passthrough_for(&self, client: OpenAiApiVersion) -> bool {
+        self.api_format == ApiFormat::OpenAI
+            && client == OpenAiApiVersion::ChatCompletions
+            && self.openai_api_version_enum() == client
+            && self.transparent()
+    }
 
     /// Get the actual OpenAI API version (defaults to Responses API)
     pub fn openai_api_version(&self) -> &str {
@@ -754,6 +776,60 @@ mod tests {
     fn map_model_passthrough_when_no_mapping() {
         let p = make_provider("key", ApiFormat::OpenAI);
         assert_eq!(p.map_model("claude-opus-4"), "claude-opus-4");
+    }
+
+    #[test]
+    fn passthrough_for_matching_openai_chat_provider() {
+        let mut p = make_provider("key", ApiFormat::OpenAI);
+        p.api_version = Some(OpenAiApiVersion::ChatCompletions);
+        assert!(p.passthrough_for(OpenAiApiVersion::ChatCompletions));
+    }
+
+    #[test]
+    fn passthrough_for_requires_same_api_variant() {
+        let mut p = make_provider("key", ApiFormat::OpenAI);
+        p.api_version = Some(OpenAiApiVersion::ChatCompletions);
+        // Client asks for Responses but provider is Chat Completions.
+        assert!(!p.passthrough_for(OpenAiApiVersion::Responses));
+    }
+
+    #[test]
+    fn passthrough_for_never_activates_for_responses() {
+        // Raw Responses bytes can't fall back to /v1/chat/completions on a
+        // 404, so even a same-variant Responses provider must not passthrough
+        // — the transform path owns the 404 auto-retry.
+        let mut p = make_provider("key", ApiFormat::OpenAI);
+        p.api_version = Some(OpenAiApiVersion::Responses);
+        assert!(!p.passthrough_for(OpenAiApiVersion::Responses));
+    }
+
+    #[test]
+    fn passthrough_for_requires_openai_format() {
+        let p = make_provider("key", ApiFormat::Anthropic);
+        assert!(!p.passthrough_for(OpenAiApiVersion::ChatCompletions));
+    }
+
+    #[test]
+    fn passthrough_for_disabled_by_rewrite_config() {
+        let mut p = make_provider("key", ApiFormat::OpenAI);
+        p.api_version = Some(OpenAiApiVersion::ChatCompletions);
+        p.model_map.insert("a".into(), "b".into());
+        assert!(!p.passthrough_for(OpenAiApiVersion::ChatCompletions));
+
+        let mut p = make_provider("key", ApiFormat::OpenAI);
+        p.api_version = Some(OpenAiApiVersion::ChatCompletions);
+        let mut rule = RouteRule::new("gpt-*");
+        rule.target = "claude".into();
+        p.routes = vec![rule];
+        assert!(!p.passthrough_for(OpenAiApiVersion::ChatCompletions));
+    }
+
+    #[test]
+    fn passthrough_for_disabled_by_token_cap() {
+        let mut p = make_provider("key", ApiFormat::OpenAI);
+        p.api_version = Some(OpenAiApiVersion::ChatCompletions);
+        p.max_tokens_cap = Some(8192);
+        assert!(!p.passthrough_for(OpenAiApiVersion::ChatCompletions));
     }
 
     #[test]

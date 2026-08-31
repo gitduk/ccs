@@ -78,6 +78,37 @@ impl ProviderRequestOutcome {
     }
 }
 
+/// In passthrough mode the raw client request is forwarded untouched, except
+/// that a chat-completions stream lacking `stream_options.include_usage` gets
+/// it injected so ccs can still record token usage (the same field the
+/// transform path forces). Responses-API streams carry usage in their
+/// `response.completed` event, so they need no injection.
+///
+/// Non-streaming requests (the common case) skip the JSON parse entirely: the
+/// `stream` key only appears in a streaming request body.
+fn patch_stream_usage(body: &Bytes) -> Bytes {
+    if !body.windows("stream".len()).any(|w| w == b"stream") {
+        return body.clone();
+    }
+    let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return body.clone();
+    };
+    let is_stream = v.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
+    let has_usage = v
+        .get("stream_options")
+        .and_then(|so| so.get("include_usage"))
+        .and_then(|u| u.as_bool())
+        .unwrap_or(false);
+    if v.get("messages").is_some() && is_stream && !has_usage {
+        v["stream_options"] = serde_json::json!({"include_usage": true});
+        if let Ok(bytes) = serde_json::to_vec(&v) {
+            return Bytes::from(bytes);
+        }
+    }
+    body.clone()
+}
+
+
 pub(crate) async fn execute_provider_request(
     client: &reqwest::Client,
     provider: &Provider,
@@ -85,9 +116,15 @@ pub(crate) async fn execute_provider_request(
     body: &Bytes,
     req_json: Option<&serde_json::Value>,
     headers: &HeaderMap,
+    passthrough: Option<&Bytes>,
 ) -> Result<ProviderRequestOutcome, AppError> {
     let t0 = std::time::Instant::now();
-    let initial_api_version = if provider.api_format == ApiFormat::OpenAI {
+    let passthrough_active = passthrough.is_some();
+    let initial_api_version = if passthrough_active {
+        // Passthrough forwards raw bytes to the provider's configured variant
+        // (already guaranteed to match the client's and not be known-unsupported).
+        Some(provider.openai_api_version_enum())
+    } else if provider.api_format == ApiFormat::OpenAI {
         match provider.openai_api_version_enum() {
             // A previous request proved /v1/responses is missing upstream.
             OpenAiApiVersion::Responses if responses_known_unsupported(provider) => {
@@ -112,27 +149,31 @@ pub(crate) async fn execute_provider_request(
         Ok(Bytes::from(serde_json::to_vec(&transformed)?))
     };
 
-    let upstream_body = match initial_api_version.as_ref() {
-        Some(api_version) => make_openai_body(api_version.clone())?,
-        None => {
-            let patched = req_json.and_then(|req| {
-                let after_model_map = transform::map_anthropic_model(req, provider);
-                let after_thinking = if provider.inject_thinking_history {
-                    let base = after_model_map.as_ref().unwrap_or(req);
-                    transform::patch_thinking_history(base, provider.strict_thinking_history)
-                        .or(after_model_map)
-                } else {
-                    after_model_map
-                };
-                transform::clamp_max_tokens(
-                    after_thinking.as_ref().unwrap_or(req),
-                    provider.max_tokens_cap,
-                )
-                .or(after_thinking)
-            });
-            match patched {
-                Some(v) => Bytes::from(serde_json::to_vec(&v)?),
-                None => body.clone(),
+    let upstream_body = if passthrough_active {
+        patch_stream_usage(passthrough.unwrap_or(body))
+    } else {
+        match initial_api_version.as_ref() {
+            Some(api_version) => make_openai_body(api_version.clone())?,
+            None => {
+                let patched = req_json.and_then(|req| {
+                    let after_model_map = transform::map_anthropic_model(req, provider);
+                    let after_thinking = if provider.inject_thinking_history {
+                        let base = after_model_map.as_ref().unwrap_or(req);
+                        transform::patch_thinking_history(base, provider.strict_thinking_history)
+                            .or(after_model_map)
+                    } else {
+                        after_model_map
+                    };
+                    transform::clamp_max_tokens(
+                        after_thinking.as_ref().unwrap_or(req),
+                        provider.max_tokens_cap,
+                    )
+                    .or(after_thinking)
+                });
+                match patched {
+                    Some(v) => Bytes::from(serde_json::to_vec(&v)?),
+                    None => body.clone(),
+                }
             }
         }
     };
@@ -162,7 +203,8 @@ pub(crate) async fn execute_provider_request(
         }
     };
 
-    if matches!(initial_api_version, Some(OpenAiApiVersion::Responses))
+    if !passthrough_active
+        && matches!(initial_api_version, Some(OpenAiApiVersion::Responses))
         && response.status() == StatusCode::NOT_FOUND
     {
         let not_found_body = response.bytes().await?;
@@ -208,9 +250,16 @@ pub(crate) async fn probe_provider_message(
 ) -> Result<(StatusCode, u64), AppError> {
     let body = Bytes::from(serde_json::to_vec(req_json)?);
     let headers = HeaderMap::new();
-    let outcome =
-        execute_provider_request(client, provider, api_key, &body, Some(req_json), &headers)
-            .await?;
+    let outcome = execute_provider_request(
+        client,
+        provider,
+        api_key,
+        &body,
+        Some(req_json),
+        &headers,
+        None,
+    )
+    .await?;
     Ok((outcome.status(), outcome.latency_ms()))
 }
 
@@ -225,9 +274,16 @@ pub(crate) async fn probe_provider_message_with_body(
 ) -> Result<(StatusCode, u64, Bytes), AppError> {
     let body = Bytes::from(serde_json::to_vec(req_json)?);
     let headers = HeaderMap::new();
-    let outcome =
-        execute_provider_request(client, provider, api_key, &body, Some(req_json), &headers)
-            .await?;
+    let outcome = execute_provider_request(
+        client,
+        provider,
+        api_key,
+        &body,
+        Some(req_json),
+        &headers,
+        None,
+    )
+    .await?;
     let status = outcome.status();
     let latency_ms = outcome.latency_ms();
     let resp_body = match outcome {
@@ -286,4 +342,50 @@ pub(crate) fn extract_error_message(body: &[u8]) -> String {
     String::from_utf8_lossy(&body[..body.len().min(120)])
         .trim()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn patch_stream_usage_injects_include_usage_for_chat_stream() {
+        let body = Bytes::from(r#"{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}"#);
+        let patched = patch_stream_usage(&body);
+        let v: serde_json::Value = serde_json::from_slice(&patched).unwrap();
+        assert_eq!(v["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn patch_stream_usage_leaves_non_stream_untouched() {
+        let body = Bytes::from(r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#);
+        let patched = patch_stream_usage(&body);
+        assert_eq!(patched, body);
+    }
+
+    #[test]
+    fn patch_stream_usage_preserves_existing_stream_options() {
+        let body = Bytes::from(
+            r#"{"model":"m","stream":true,"stream_options":{"include_usage":false},"messages":[]}"#,
+        );
+        let patched = patch_stream_usage(&body);
+        let v: serde_json::Value = serde_json::from_slice(&patched).unwrap();
+        assert_eq!(v["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn patch_stream_usage_skips_responses_stream() {
+        // Responses API stream: no "messages" field, usage comes in the
+        // response.completed event, so nothing to inject.
+        let body = Bytes::from(r#"{"model":"m","stream":true,"input":"hi"}"#);
+        let patched = patch_stream_usage(&body);
+        assert_eq!(patched, body);
+    }
+
+    #[test]
+    fn patch_stream_usage_returns_invalid_json_untouched() {
+        let body = Bytes::from(r#"not json"#);
+        let patched = patch_stream_usage(&body);
+        assert_eq!(patched, body);
+    }
 }

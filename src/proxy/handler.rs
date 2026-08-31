@@ -236,8 +236,12 @@ async fn resolve_provider_pool(
 }
 
 /// Request context bundled to keep [`try_providers`] argument count in check.
+/// `body`/`req_json` are the Anthropic-canonical form used by the transform
+/// pipeline; `raw_body` is the untouched client bytes, used only for the
+/// byte-for-byte passthrough path (OpenAI client → transparent OpenAI provider).
 struct RequestCtx<'a> {
     body: &'a Bytes,
+    raw_body: Option<&'a Bytes>,
     req_json: Option<&'a serde_json::Value>,
     headers: &'a HeaderMap,
     is_stream: bool,
@@ -310,6 +314,23 @@ async fn try_providers(
             }
         };
 
+        // Byte-for-byte passthrough when the provider and client both speak
+        // the same OpenAI wire format, nothing configured forces a rewrite,
+        // and no transform would be needed. In particular a request whose
+        // assistant tool-call history needs `reasoning_content` injection
+        // must go through the transform path (see `needs_reasoning_injection`).
+        let passthrough = ctx.raw_body.and_then(|raw| {
+            let client = ctx.client_format.openai_variant()?;
+            provider.passthrough_for(client).then_some(raw)
+        });
+        let passthrough = if passthrough.is_some()
+            && provider.inject_thinking_history
+            && needs_reasoning_injection(ctx.raw_body.unwrap())
+        {
+            None
+        } else {
+            passthrough
+        };
         let outcome = match execute_provider_request(
             &state.http_client,
             provider,
@@ -317,6 +338,7 @@ async fn try_providers(
             ctx.body,
             ctx.req_json,
             ctx.headers,
+            passthrough,
         )
         .await
         {
@@ -456,6 +478,7 @@ async fn try_providers(
                 response,
                 provider.api_format == ApiFormat::OpenAI,
                 ctx.client_format,
+                passthrough.is_some(),
                 StreamTrackingCtx {
                     db: state.db.clone(),
                     provider_id: pkey.id,
@@ -474,6 +497,7 @@ async fn try_providers(
                 response,
                 provider.api_format == ApiFormat::OpenAI,
                 ctx.client_format,
+                passthrough.is_some(),
                 BufferedTrackingCtx {
                     db: state.db.clone(),
                     pkey,
@@ -514,17 +538,21 @@ async fn dispatch_completion(
     body: Bytes,
     client_format: ClientFormat,
 ) -> Result<Response, AppError> {
-    let (canonical_body, canonical_json) = if let Some(api_version) = client_format.openai_variant()
-    {
-        let incoming = serde_json::from_slice::<serde_json::Value>(&body)
-            .map_err(|e| AppError::Transform(format!("Invalid JSON body: {e}")))?;
-        let anthropic = transform::openai_to_anthropic_request(&incoming, api_version)?;
-        let bytes = Bytes::from(serde_json::to_vec(&anthropic)?);
-        (bytes, Some(anthropic))
-    } else {
-        let json = serde_json::from_slice::<serde_json::Value>(&body).ok();
-        (body, json)
-    };
+    // The untouched client bytes survive for the byte-for-byte passthrough
+    // path (OpenAI client → transparent OpenAI provider). Borrowed here (no
+    // clone): only OpenAI clients keep `body` alive for the passthrough,
+    // Anthropic clients move it into the canonical form and get `None`.
+    let (canonical_body, canonical_json, raw_body) =
+        if let Some(api_version) = client_format.openai_variant() {
+            let incoming = serde_json::from_slice::<serde_json::Value>(&body)
+                .map_err(|e| AppError::Transform(format!("Invalid JSON body: {e}")))?;
+            let anthropic = transform::openai_to_anthropic_request(&incoming, api_version)?;
+            let bytes = Bytes::from(serde_json::to_vec(&anthropic)?);
+            (bytes, Some(anthropic), Some(&body))
+        } else {
+            let json = serde_json::from_slice::<serde_json::Value>(&body).ok();
+            (body, json, None)
+        };
 
     let is_stream = canonical_json
         .as_ref()
@@ -535,6 +563,7 @@ async fn dispatch_completion(
 
     let ctx = RequestCtx {
         body: &canonical_body,
+        raw_body,
         req_json: canonical_json.as_ref(),
         headers: &headers,
         is_stream,
@@ -575,6 +604,7 @@ async fn handle_buffered_response(
     response: reqwest::Response,
     is_openai: bool,
     client_format: ClientFormat,
+    passthrough: bool,
     bctx: BufferedTrackingCtx,
 ) -> Result<Response, AppError> {
     let BufferedTrackingCtx {
@@ -629,16 +659,23 @@ async fn handle_buffered_response(
         json["model"] = serde_json::Value::String(m.clone());
     }
 
-    // Serialize once, directly to the client's expected wire format.
-    let response_body = match (client_format.openai_variant(), &usage_json) {
-        (Some(api_version), Some(anthropic_json)) => {
-            let out = transform::anthropic_to_openai_response(anthropic_json, api_version)?;
-            Bytes::from(serde_json::to_vec(&out)?)
+    // Passthrough: the upstream already speaks the exact wire format the
+    // client asked for, so return its bytes untouched. Token extraction above
+    // still parsed the body for stats, so nothing is lost.
+    let response_body = if passthrough {
+        body
+    } else {
+        // Serialize once, directly to the client's expected wire format.
+        match (client_format.openai_variant(), &usage_json) {
+            (Some(api_version), Some(anthropic_json)) => {
+                let out = transform::anthropic_to_openai_response(anthropic_json, api_version)?;
+                Bytes::from(serde_json::to_vec(&out)?)
+            }
+            (None, Some(anthropic_json)) if is_openai => {
+                Bytes::from(serde_json::to_vec(anthropic_json)?)
+            }
+            _ => body,
         }
-        (None, Some(anthropic_json)) if is_openai => {
-            Bytes::from(serde_json::to_vec(anthropic_json)?)
-        }
-        _ => body,
     };
 
     let (input, output) = if let Some(ref json) = usage_json {
@@ -689,9 +726,33 @@ async fn handle_streaming_response(
     response: reqwest::Response,
     is_openai: bool,
     client_format: ClientFormat,
+    passthrough: bool,
     ctx: StreamTrackingCtx,
 ) -> Result<Response, AppError> {
     let model_override = ctx.model_override.clone();
+
+    // Passthrough: upstream already speaks the client's wire format, so relay
+    // the raw SSE untouched. Usage is still tracked by parsing the OpenAI
+    // usage events (final chunk for chat, response.completed for Responses).
+    if passthrough {
+        let raw: std::pin::Pin<
+            Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>,
+        > = Box::pin(response.bytes_stream().map(|r| {
+            r.map_err(|e| {
+                tracing::error!("Stream error: {e}");
+                std::io::Error::other(e)
+            })
+        }));
+        let tracked = track_tokens_in_stream(raw, ctx, extract_openai_usage);
+        let body = Body::from_stream(tracked);
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/event-stream")
+            .header("cache-control", "no-cache")
+            .body(body)
+            .map_err(|e| AppError::Transform(e.to_string()));
+    }
+
     // Canonical Anthropic SSE, still carrying the upstream's own model name.
     let raw_stream: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>> =
         if !is_openai {
@@ -707,7 +768,7 @@ async fn handle_streaming_response(
 
     // Track first, rewrite second: stats must see what actually served the
     // request, the client sees the alias it asked for.
-    let tracked = track_tokens_in_stream(raw_stream, ctx);
+    let tracked = track_tokens_in_stream(raw_stream, ctx, extract_anthropic_usage);
 
     let renamed: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>> =
         match model_override {
@@ -836,9 +897,37 @@ fn served_model(reported: Option<&str>, upstream: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// True when the transform path would inject an empty `reasoning_content`
+/// into the request (assistant `tool_calls` missing it, with
+/// `inject_thinking_history` on — see `inject_missing_reasoning_content`).
+/// DeepSeek-family upstreams reject such history, so passthrough must back
+/// off and let the normalise-then-inject path run.
+fn needs_reasoning_injection(body: &Bytes) -> bool {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    let Some(msgs) = v.get("messages").and_then(|m| m.as_array()) else {
+        return false;
+    };
+    msgs.iter().any(|msg| {
+        msg.get("role").and_then(|r| r.as_str()) == Some("assistant")
+            && msg.get("reasoning_content").is_none()
+            && msg.get("tool_calls")
+                .and_then(|t| t.as_array())
+                .is_some_and(|calls| !calls.is_empty())
+    })
+}
+
+
+/// Shared SSE passthrough loop: hands each `data:` payload to `extract`
+/// (which records usage/model onto `finalizer`), then yields the raw bytes
+/// untouched. `extract` decides for itself whether a line is worth parsing —
+/// the Anthropic extractor cheaply skips the hundreds of content_block_delta
+/// lines, the OpenAI one parses only chunks that look like usage.
 fn track_tokens_in_stream(
     mut inner: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>>,
     ctx: StreamTrackingCtx,
+    extract: fn(&mut StreamFinalizer, &str),
 ) -> impl futures::Stream<Item = std::io::Result<Bytes>> + Send {
     async_stream::stream! {
         const LINE_BUF_MAX: usize = 1024 * 1024; // 1 MB safety cap
@@ -873,34 +962,11 @@ fn track_tokens_in_stream(
                 while let Some(rel) = line_buf[start..].find('\n') {
                     let pos = start + rel;
                     let line = line_buf[start..pos].trim_end_matches('\r');
-                    // Only message_start / message_delta carry usage (2 events per
-                    // response); a cheap substring check skips the JSON parse for
-                    // the hundreds of content_block_delta events in between.
                     if let Some(data) = line.strip_prefix("data: ")
-                        && (data.contains("\"message_start\"") || data.contains("\"message_delta\""))
-                        && let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                            match json["type"].as_str() {
-                                Some("message_start") => {
-                                    finalizer.input_tokens = json["message"]["usage"]["input_tokens"]
-                                        .as_u64()
-                                        .unwrap_or(0);
-                                    if let Some(m) =
-                                        non_empty_model(json["message"]["model"].as_str())
-                                    {
-                                        finalizer.model = Some(m.to_string());
-                                    }
-                                }
-                                Some("message_delta") => {
-                                    if let Some(it) = json["usage"]["input_tokens"].as_u64() {
-                                        finalizer.input_tokens = it;
-                                    }
-                                    finalizer.output_tokens = json["usage"]["output_tokens"]
-                                        .as_u64()
-                                        .unwrap_or(0);
-                                }
-                                _ => {}
-                            }
-                        }
+                        && data.trim() != "[DONE]"
+                    {
+                        extract(&mut finalizer, data);
+                    }
                     start = pos + 1;
                 }
                 if start > 0 {
@@ -914,9 +980,74 @@ fn track_tokens_in_stream(
     }
 }
 
+/// Extract usage from Anthropic `message_start` / `message_delta` events.
+/// A cheap substring check skips the JSON parse for the many
+/// `content_block_delta` lines in between (which never carry usage).
+fn extract_anthropic_usage(finalizer: &mut StreamFinalizer, data: &str) {
+    if !(data.contains("\"message_start\"") || data.contains("\"message_delta\"")) {
+        return;
+    }
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(data) else {
+        return;
+    };
+    match json["type"].as_str() {
+        Some("message_start") => {
+            finalizer.input_tokens = json["message"]["usage"]["input_tokens"]
+                .as_u64()
+                .unwrap_or(0);
+            if let Some(m) = non_empty_model(json["message"]["model"].as_str()) {
+                finalizer.model = Some(m.to_string());
+            }
+        }
+        Some("message_delta") => {
+            if let Some(it) = json["usage"]["input_tokens"].as_u64() {
+                finalizer.input_tokens = it;
+            }
+            finalizer.output_tokens = json["usage"]["output_tokens"].as_u64().unwrap_or(0);
+        }
+        _ => {}
+    }
+}
+
+/// Extract usage from an OpenAI stream. Chat Completions reports usage in a
+/// final chunk (`usage` on `choices`-less data); Responses reports it in the
+/// `response.completed` event. Any chunk carrying `model` or `usage` is worth
+/// parsing; the rest are skipped.
+fn extract_openai_usage(finalizer: &mut StreamFinalizer, data: &str) {
+    if !(data.contains("\"usage\"") || data.contains("\"response.completed\"")) {
+        return;
+    }
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(data) else {
+        return;
+    };
+    if json["type"].as_str() == Some("response.completed")
+        && let Some(u) = json.get("usage")
+    {
+        finalizer.input_tokens = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        finalizer.output_tokens = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        return;
+    }
+    if let Some(model) = json.get("model").and_then(|m| m.as_str())
+        && !model.is_empty()
+    {
+        if finalizer.model.is_none() {
+            finalizer.model = Some(model.to_string());
+        }
+        if let Some(u) = json.get("usage") {
+            finalizer.input_tokens = u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            finalizer.output_tokens = u
+                .get("completion_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+        }
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::Router;
     use crate::config::{ApiFormat, AppConfig, OpenAiApiVersion, Provider};
     use crate::proxy::metrics::RequestLog;
     use indexmap::IndexMap;
@@ -956,6 +1087,41 @@ mod tests {
         })
     }
 
+    /// Spin up a transparent OpenAI (Chat Completions) proxy wired to a
+    /// fake upstream, returning the proxy address. Both e2e passthrough tests
+    /// share this scaffold so the transform-vs-raw assertions stay in one place.
+    async fn spawn_passthrough_proxy(upstream: Router) -> std::net::SocketAddr {
+        use tokio::net::TcpListener;
+
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(upstream_listener, upstream).await;
+        });
+
+        let mut providers = IndexMap::new();
+        let mut p = make_provider(true, true);
+        p.api_format = ApiFormat::OpenAI;
+        p.api_version = Some(OpenAiApiVersion::ChatCompletions);
+        p.base_url = format!("http://{upstream_addr}");
+        providers.insert("prov-a".into(), p);
+        let state = make_state(AppConfig {
+            current: "prov-a".into(),
+            listen: "127.0.0.1:7896".into(),
+            providers,
+            db_path: None,
+            request_log_limit: 100,
+        });
+
+        let router = crate::proxy::build_router(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        proxy_addr
+    }
+
     /// Stats must record what served the request. An upstream that reports no
     /// model name must not overwrite the routed fallback with an empty string.
     #[test]
@@ -988,5 +1154,194 @@ mod tests {
         });
 
         assert!(resolve_provider_pool(&state).await.is_err());
+    }
+    #[tokio::test]
+    async fn buffered_openai_passthrough_returns_upstream_bytes_untouched() {
+        use axum::http::StatusCode as AxumStatus;
+        use axum::routing::post;
+        use axum::Json;
+
+        // Fake upstream that reflects the request's model back, echoing the
+        // exact request body as a marker so the test can detect rewrites.
+        async fn chat(body: axum::body::Bytes) -> impl axum::response::IntoResponse {
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            (
+                AxumStatus::OK,
+                Json(serde_json::json!({
+                    "id": "chatcmpl-test",
+                    "object": "chat.completion",
+                    "created": 12345,
+                    "model": v["model"],
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "pong"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                    "x_upstream_marker": "raw-passthrough"
+                })),
+            )
+        }
+
+        let proxy_addr = spawn_passthrough_proxy(
+            Router::new().route("/v1/chat/completions", post(chat)),
+        )
+        .await;
+
+        let body = r#"{"model":"deepseek-v4-flash","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}"#;
+        let resp = reqwest::Client::new()
+            .post(format!("http://{proxy_addr}/v1/chat/completions"))
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer sk-test")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), AxumStatus::OK);
+        let json: serde_json::Value = resp.json().await.unwrap();
+        // Passthrough: the model is echoed back exactly as sent, not rewritten
+        assert_eq!(json["model"], "deepseek-v4-flash");
+        assert_eq!(json["choices"][0]["message"]["content"], "pong");
+        assert_eq!(json["usage"]["prompt_tokens"], 10);
+        // The transform path rebuilds the response object and would drop an
+        // unknown field; its survival proves the raw bytes were relayed.
+        assert_eq!(json["x_upstream_marker"], "raw-passthrough");
+    }
+
+    #[tokio::test]
+    async fn streaming_openai_passthrough_relays_raw_sse() {
+        use axum::body::Body as AxumBody;
+        use axum::http::StatusCode as AxumStatus;
+        use axum::response::Response as AxumResponse;
+        use axum::routing::post;
+
+        async fn chat() -> AxumResponse {
+            // Raw OpenAI SSE with an unknown field and a non-standard chunk
+            // order, so any re-encode would be visible.
+            let sse = concat!(
+                "data: {\"id\":\"x\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",",
+                "\"x_marker\":\"keep\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"p\"}}]}\n\n",
+                "data: {\"id\":\"x\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            );
+            AxumResponse::builder()
+                .header("content-type", "text/event-stream")
+                .body(AxumBody::from(sse))
+                .unwrap()
+        }
+
+        let proxy_addr = spawn_passthrough_proxy(
+            Router::new().route("/v1/chat/completions", post(chat)),
+        )
+        .await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://{proxy_addr}/v1/chat/completions"))
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer sk-test")
+            .body(r#"{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}"#)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), AxumStatus::OK);
+        let text = resp.text().await.unwrap();
+        // Raw upstream SSE relayed byte-for-byte: the unknown marker survives
+        // (a re-encode would drop it) and the finish_reason chunk order is kept.
+        assert!(text.contains("\"x_marker\":\"keep\""), "raw chunk was re-encoded: {text}");
+        assert!(text.contains("data: [DONE]"));
+    }
+
+    #[test]
+    fn needs_reasoning_injection_detects_assistant_tool_calls_without_reasoning() {
+        let body = Bytes::from(
+            r#"{"model":"m","messages":[
+                {"role":"user","content":"hi"},
+                {"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]},
+                {"role":"tool","tool_call_id":"c1","content":"ok"}
+            ]}"#,
+        );
+        assert!(needs_reasoning_injection(&body));
+    }
+
+    #[test]
+    fn needs_reasoning_injection_false_when_reasoning_present_or_no_tools() {
+        // Assistant already carries reasoning_content → no injection needed.
+        let body = Bytes::from(
+            r#"{"model":"m","messages":[
+                {"role":"assistant","reasoning_content":"","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]}
+            ]}"#,
+        );
+        assert!(!needs_reasoning_injection(&body));
+
+        // Plain text assistant, no tool_calls → no injection needed.
+        let body = Bytes::from(r#"{"model":"m","messages":[{"role":"assistant","content":"ok"}]}"#);
+        assert!(!needs_reasoning_injection(&body));
+    }
+
+    #[test]
+    fn needs_reasoning_injection_false_on_invalid_or_absent_messages() {
+        assert!(!needs_reasoning_injection(&Bytes::from("not json")));
+        assert!(!needs_reasoning_injection(&Bytes::from(r#"{"model":"m"}"#)));
+    }
+
+    #[tokio::test]
+    async fn tool_call_history_disables_passthrough_and_keeps_injection() {
+        use axum::http::StatusCode as AxumStatus;
+        use axum::routing::post;
+        use axum::Json;
+
+        // Echo the request's model + an unknown marker back. If passthrough
+        // were active, the marker would survive byte-for-byte; the transform
+        // path rebuilds the response and drops it.
+        async fn chat(body: axum::body::Bytes) -> impl axum::response::IntoResponse {
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            (
+                AxumStatus::OK,
+                Json(serde_json::json!({
+                    "id": "chatcmpl-tool",
+                    "object": "chat.completion",
+                    "created": 12345,
+                    "model": v["model"],
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "done"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10},
+                    "x_upstream_marker": "raw-passthrough"
+                })),
+            )
+        }
+
+        let proxy_addr = spawn_passthrough_proxy(
+            Router::new().route("/v1/chat/completions", post(chat)),
+        )
+        .await;
+
+        // Assistant tool-call history without reasoning_content: the transform
+        // path must run to inject it, so passthrough is disabled and the
+        // response is rebuilt (marker dropped).
+        let body = r#"{"model":"deepseek-v4-flash","max_tokens":1,"messages":[
+            {"role":"user","content":"hi"},
+            {"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]},
+            {"role":"tool","tool_call_id":"c1","content":"ok"}
+        ]}"#;
+        let resp = reqwest::Client::new()
+            .post(format!("http://{proxy_addr}/v1/chat/completions"))
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer sk-test")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), AxumStatus::OK);
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(json["choices"][0]["message"]["content"], "done");
+        // Transform path rebuilt the response — the upstream marker must not
+        // survive (it would if passthrough had forwarded raw bytes).
+        assert!(json.get("x_upstream_marker").is_none());
     }
 }
