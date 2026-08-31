@@ -110,43 +110,6 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
     true
 }
 
-/// How the provider pool is used at request time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum BalanceMode {
-    /// Try the current provider first; on retryable failures cycle through
-    /// the joined providers in order.
-    #[default]
-    #[serde(rename = "fallback")]
-    Fallback,
-    /// Distribute every request across the joined providers round-robin.
-    #[serde(rename = "load_balance")]
-    LoadBalance,
-}
-
-impl BalanceMode {
-    /// Stable short label for UI chrome (allocation-free).
-    pub const fn label(self) -> &'static str {
-        match self {
-            BalanceMode::Fallback => "Fallback",
-            BalanceMode::LoadBalance => "LoadBalance",
-        }
-    }
-
-    /// Human-readable description for status messages.
-    pub const fn description(self) -> &'static str {
-        match self {
-            BalanceMode::Fallback => "Fallback (failover)",
-            BalanceMode::LoadBalance => "Load Balance (round-robin)",
-        }
-    }
-}
-
-impl std::fmt::Display for BalanceMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub current: String,
@@ -154,7 +117,7 @@ pub struct AppConfig {
     pub listen: String,
     pub providers: IndexMap<String, Provider>,
     #[serde(default)]
-    pub mode: BalanceMode,
+    pub fallback: bool,
     #[serde(default)]
     pub db_path: Option<String>,
     /// Maximum number of recent requests shown in the TUI. Default: 100.
@@ -188,11 +151,9 @@ pub struct Provider {
     /// When false, this provider is skipped during request forwarding.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// When true, this provider participates in the shared provider pool
-    /// (fallback rotation or load-balanced round-robin).
+    /// When true, this provider participates in the fallback rotation.
     #[serde(default = "default_true")]
-    pub join: bool,
-
+    pub fallback: bool,
     /// Only effective when api_format = OpenAI. See [`OpenAiApiVersion`] for variants.
     #[serde(default)]
     pub api_version: Option<OpenAiApiVersion>,
@@ -522,7 +483,7 @@ fn default_config() -> AppConfig {
         current: String::new(),
         listen: default_listen(),
         providers: IndexMap::new(),
-        mode: BalanceMode::default(),
+        fallback: false,
         db_path: None,
         request_log_limit: default_request_log_limit(),
     }
@@ -729,7 +690,7 @@ mod tests {
             model_map: HashMap::new(),
             routes: Vec::new(),
             enabled: true,
-            join: true,
+            fallback: true,
             api_version: None,
             inject_thinking_history: true,
             strict_thinking_history: false,
@@ -799,7 +760,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_join_defaults_true_for_legacy_configs() {
+    fn provider_fallback_defaults_true_for_legacy_configs() {
         let provider: Provider = serde_json::from_value(serde_json::json!({
             "id": "legacy-id",
             "base_url": "https://api.example.com",
@@ -811,7 +772,7 @@ mod tests {
             "model_map": {}
         }))
         .unwrap();
-        assert!(provider.join);
+        assert!(provider.fallback);
     }
 
     #[test]
@@ -860,7 +821,7 @@ mod tests {
             current: current.to_string(),
             listen: "127.0.0.1:7896".into(),
             providers: map,
-            mode: BalanceMode::default(),
+            fallback: false,
             db_path: None,
             request_log_limit: 100,
         }

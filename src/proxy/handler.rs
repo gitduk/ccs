@@ -1,4 +1,3 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -196,12 +195,6 @@ pub async fn handle_models(
         .into_response())
 }
 
-/// Round-robin cursor for LoadBalance mode. A plain counter suffices: each
-/// request derives its rotation start from the current value, so the cursor
-/// just needs to keep advancing — contention on a single cache line is the
-/// cost, which is far below the upstream round-trip it gates.
-static ROUND_ROBIN: AtomicUsize = AtomicUsize::new(0);
-
 /// Build the candidate provider list. Routes are per-provider and are applied
 /// at request execution time (see [`try_providers`]) so that a fallback to a
 /// different-format provider uses *its own* routes, not the current provider's.
@@ -220,40 +213,35 @@ async fn resolve_provider_pool(
     }
 
     let config = state.config.read().await;
-    // Validates current exists and is enabled; guarantees it lands in the
-    // pool below, so `joined` is never empty.
-    config.current_enabled_provider()?;
 
-    // The shared pool: every enabled provider that joined, plus the current
-    // one, which always participates.
-    let mut joined: Vec<(String, crate::config::Provider)> = config
-        .providers
-        .iter()
-        .filter(|(k, v)| v.enabled && (v.join || k.as_str() == config.current))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-
-    let start = match config.mode {
-        crate::config::BalanceMode::Fallback => {
-            // Start at current, then the remaining joined providers in stored
-            // order — current is tried first, and failures cycle onward.
-            joined
-                .iter()
-                .position(|(k, _)| k.as_str() == config.current)
-                .unwrap_or(0)
+    if config.fallback {
+        let (_, current_provider) = config.current_enabled_provider()?;
+        let start_idx = config
+            .providers
+            .get_index_of(&config.current)
+            .ok_or_else(|| AppError::ProviderNotFound(config.current.clone()))?;
+        let len = config.providers.len();
+        let list: Vec<(String, crate::config::Provider)> = (0..len)
+            .map(|i| (start_idx + i) % len)
+            .filter_map(|i| {
+                config
+                    .providers
+                    .get_index(i)
+                    .filter(|(k, v)| v.enabled && (v.fallback || k.as_str() == config.current))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+            })
+            .collect();
+        if !current_provider.enabled || list.is_empty() {
+            return Err(AppError::ProviderNotFound(config.current.clone()));
         }
-        crate::config::BalanceMode::LoadBalance => {
-            // Round-robin start across the joined providers: requests are
-            // distributed; cycling on failure still covers a downed provider.
-            ROUND_ROBIN.fetch_add(1, Ordering::Relaxed) % joined.len()
-        }
-    };
-    joined.rotate_left(start);
-    // Only cycle (and therefore retry transient failures) when there is more
-    // than one provider to fall back to; a lone provider must not multiply
-    // the request against a 5xx/429.
-    let has_fallback = joined.len() > 1;
-    Ok((joined, has_fallback))
+        Ok((list, true))
+    } else {
+        let (_, current_provider) = config.current_enabled_provider()?;
+        Ok((
+            vec![(config.current.clone(), current_provider.clone())],
+            false,
+        ))
+    }
 }
 
 /// Request context bundled to keep [`try_providers`] argument count in check.
@@ -945,7 +933,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::sync::RwLock;
 
-    fn make_provider(enabled: bool, join: bool) -> Provider {
+    fn make_provider(enabled: bool, fallback: bool) -> Provider {
         Provider {
             id: uuid::Uuid::new_v4().to_string(),
             base_url: "https://api.example.com".into(),
@@ -954,7 +942,7 @@ mod tests {
             model_map: HashMap::new(),
             routes: Vec::new(),
             enabled,
-            join,
+            fallback,
             api_version: Some(OpenAiApiVersion::Responses),
             inject_thinking_history: true,
             strict_thinking_history: false,
@@ -1004,7 +992,7 @@ mod tests {
             current: "missing".into(),
             listen: "127.0.0.1:7896".into(),
             providers,
-            mode: crate::config::BalanceMode::Fallback,
+            fallback: true,
             db_path: None,
             request_log_limit: 100,
         });

@@ -108,7 +108,7 @@ pub(crate) mod tests {
             model_map: Default::default(),
             routes: vec![],
             enabled: true,
-            join: true,
+            fallback: true,
             api_version: None,
             inject_thinking_history: true,
             strict_thinking_history: false,
@@ -135,7 +135,7 @@ pub(crate) mod tests {
                 current: current.to_string(),
                 listen: "127.0.0.1:0".to_string(),
                 providers,
-                mode: crate::config::BalanceMode::default(),
+                fallback: false,
                 db_path: Some(path),
                 request_log_limit: 100,
             },
@@ -256,8 +256,8 @@ pub(crate) mod tests {
         let saved = &app.config.providers["brand-new"];
         assert_eq!(saved.api_format, ApiFormat::Anthropic);
         assert_eq!(saved.api_version, None);
-        // Join isn't in the form (toggled via f/F on the main table instead).
-        assert!(!saved.join);
+        // Fallback isn't in the form (toggled via f/F on the main table instead).
+        assert!(!saved.fallback);
     }
 
     /// If the user cancels the add (form closed) before detection resolves,

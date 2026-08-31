@@ -16,7 +16,7 @@
 - **模型映射**：每个提供商可自定义精确的模型名称映射
 - **工具调用**：两种格式均完整支持 function/tool calling
 - **扩展思考**：支持 Claude 的 thinking/reasoning 块
-- **故障转移 / 负载均衡**：按提供商开关参与共享池，`F` 切换 Fallback（故障转移）与 LoadBalance（轮询均衡）两种模式
+- **按提供商控制 Fallback**：每个提供商独立控制是否参与 fallback 轮询
 - **按项目路由**：为提供商分配独立监听端口，让不同项目同时使用不同提供商
 - **格式自动探测**：添加提供商时自动探测 `api_format` / `api_version`，并拉取模型列表
 - **连通性测试**：在模型面板中对任一模型按 `t` 测试，结果（延迟、认证状态或错误）直接显示在模型名后面
@@ -95,7 +95,7 @@ export OPENAI_API_KEY=any-value
 {
   "current": "anthropic-official",
   "listen": "127.0.0.1:7896",
-  "mode": "fallback",
+  "fallback": false,
   "request_log_limit": 100,
   "providers": {
     "anthropic-official": {
@@ -104,7 +104,7 @@ export OPENAI_API_KEY=any-value
       "api_key": "$ANTHROPIC_API_KEY",
       "api_format": "anthropic",
       "enabled": true,
-      "join": true,
+      "fallback": true,
       "model_map": {},
       "routes": []
     },
@@ -115,7 +115,7 @@ export OPENAI_API_KEY=any-value
       "api_format": "openai",
       "api_version": "responses",
       "enabled": true,
-      "join": false,
+      "fallback": false,
       "model_map": {
         "claude-sonnet-4-20250514": "anthropic/claude-sonnet-4-20250514"
       },
@@ -133,12 +133,13 @@ export OPENAI_API_KEY=any-value
 ```
 
 ### 顶层字段
+
 | 字段 | 默认值 | 含义 |
 | --- | --- | --- |
 | `current` | — | 当前提供商名称 |
 | `listen` | `127.0.0.1:7896` | 全局监听地址 |
 | `providers` | — | 有序的「提供商名 → 提供商」映射 |
-| `mode` | `fallback` | 提供商池的使用模式：`fallback`（故障转移）或 `load_balance`（轮询均衡） |
+| `fallback` | `false` | fallback 轮询的全局开关 |
 | `db_path` | `~/.ccs/ccs.db` | 保存统计、请求日志、模型列表的 SQLite 文件 |
 | `request_log_limit` | `100` | TUI 保留的最近请求条数 |
 
@@ -152,7 +153,8 @@ export OPENAI_API_KEY=any-value
 | `api_format` | 自动探测 | `anthropic` 或 `openai` |
 | `api_version` | `responses` | 仅 OpenAI 格式生效：`responses` 或 `chat_completions` |
 | `enabled` | `true` | 禁用后转发时跳过该提供商 |
-| `join` | `true` | 是否参与共享提供商池（fallback 轮询或负载均衡轮询；TUI 新建时写入 `false`） |
+| `fallback` | `true` | 是否参与 fallback 轮询（TUI 新建时写入 `false`） |
+| `model_map` | `{}` | 精确模型名映射 |
 | `routes` | `[]` | glob 路由规则（见下文） |
 | `inject_thinking_history` | `true` | 向历史 assistant 轮注入空 thinking 块，DeepSeek 兼容上游需要 |
 | `port` | 未设置 | 该提供商独占的 pinned 监听端口（见下文） |
@@ -175,7 +177,7 @@ export OPENAI_API_KEY=any-value
 ]
 ```
 
-routes 在 `model_map` 之前应用，且按提供商各自生效：请求转移到另一个提供商时，应用的是 **那个** 提供商的 routes。routes 不参与提供商选择——提供商由 `current`、共享池（fallback / load_balance）或 pinned 端口决定。
+routes 在 `model_map` 之前应用，且按提供商各自生效：请求 fallback 到另一个提供商时，应用的是 **那个** 提供商的 routes。routes 不参与提供商选择——提供商由 `current`、fallback 轮询或 pinned 端口决定。
 
 在 TUI 编辑器的 **Routes** 区域编辑（选中提供商按 `e`，再用 Tab 移到 Routes）。
 
@@ -203,23 +205,13 @@ routes 在 `model_map` 之前应用，且按提供商各自生效：请求转移
 
 ### 按提供商控制 Fallback
 
-### 故障转移与负载均衡（共享提供商池）
-
-`mode` 决定请求在共享池（所有 `enabled` 且 `join=true` 的提供商，外加 `current`）上的分发方式：
-
-- **`fallback`（故障转移）**：请求始终先打到 `current`，失败时按存储顺序依次尝试池中其他提供商。
-- **`load_balance`（负载均衡）**：每个请求在池内轮询（round-robin）选起点，请求被均匀分发到各提供商；单个提供商失败时仍会继续尝试池内下一个。
-
-`join` 字段控制提供商是否进入共享池（TUI 中选中按 `f` 切换），当前提供商始终参与。TUI 新建的提供商初始为 `false`；手写进配置文件而省略该字段时默认为 `true`。
-
+将 `"fallback": true` 设为参与 fallback 轮询，当前提供商失败时会依次尝试；同时需要打开全局 `fallback` 开关（TUI 中的 `F`）。TUI 新建的提供商初始为 `false`；手写进配置文件而省略该字段时默认为 `true`。
 
 ```json
-"mode": "fallback",
-"providers": {
-  "anthropic-official": { "join": true },
-  "openrouter": { "join": true }
-}
+"fallback": true
 ```
+
+### 按项目路由（多端口 Pinned Listener）
 
 需要同时使用多个提供商（例如项目 A 用 OpenRouter，项目 B 用 Anthropic 直连）时，可以给每个提供商指定独立监听端口——在 TUI 中选中提供商按 `o`（留空即清除），或直接编辑配置文件：
 
@@ -238,7 +230,7 @@ routes 在 `model_map` 之前应用，且按提供商各自生效：请求转移
 }
 ```
 
-ccs 启动后会额外监听 `:7901` 和 `:7902`，每个端口的请求 **固定路由** 到对应提供商，不参与共享池（fallback / load_balance）。
+ccs 启动后会额外监听 `:7901` 和 `:7902`，每个端口的请求 **固定路由** 到对应提供商，不参与 fallback。
 
 **项目侧配置（推荐配合 direnv）：**
 
@@ -277,8 +269,8 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
 | `e` / `Enter` | 编辑选中提供商 |
 | `dd` | 删除选中提供商 |
 | `p` | 切换提供商启用 / 禁用 |
-| `f` | 切换该提供商的共享池参与状态（join） |
-| `F` | 切换模式：Fallback（故障转移）/ LoadBalance（负载均衡） |
+| `f` | 切换该提供商的 fallback 参与状态 |
+| `F` | 切换全局 fallback 模式 |
 | `o` | 设置 / 清除该提供商的 pinned 端口 |
 | `u` | 立即执行该提供商的额度命令并刷新 Quota |
 | `U` | 配置该提供商的额度命令（打开 Quota Command Preview 面板） |
