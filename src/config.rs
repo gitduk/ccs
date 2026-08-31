@@ -117,8 +117,6 @@ pub struct AppConfig {
     pub listen: String,
     pub providers: IndexMap<String, Provider>,
     #[serde(default)]
-    pub fallback: bool,
-    #[serde(default)]
     pub db_path: Option<String>,
     /// Maximum number of recent requests shown in the TUI. Default: 100.
     #[serde(default = "default_request_log_limit")]
@@ -152,7 +150,7 @@ pub struct Provider {
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// When true, this provider participates in the fallback rotation.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub fallback: bool,
     /// Only effective when api_format = OpenAI. See [`OpenAiApiVersion`] for variants.
     #[serde(default)]
@@ -483,7 +481,6 @@ fn default_config() -> AppConfig {
         current: String::new(),
         listen: default_listen(),
         providers: IndexMap::new(),
-        fallback: false,
         db_path: None,
         request_log_limit: default_request_log_limit(),
     }
@@ -760,7 +757,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_fallback_defaults_true_for_legacy_configs() {
+    fn provider_fallback_defaults_false_when_field_omitted() {
         let provider: Provider = serde_json::from_value(serde_json::json!({
             "id": "legacy-id",
             "base_url": "https://api.example.com",
@@ -772,7 +769,7 @@ mod tests {
             "model_map": {}
         }))
         .unwrap();
-        assert!(provider.fallback);
+        assert!(!provider.fallback);
     }
 
     #[test]
@@ -821,7 +818,6 @@ mod tests {
             current: current.to_string(),
             listen: "127.0.0.1:7896".into(),
             providers: map,
-            fallback: false,
             db_path: None,
             request_log_limit: 100,
         }

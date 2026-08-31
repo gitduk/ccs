@@ -172,10 +172,6 @@ pub(super) fn handle_key(
             let _ = app.toggle_provider_fallback();
             server::sync_proxy_config(app, server_handle);
         }
-        KeyCode::Char('F') => {
-            let _ = app.toggle_fallback();
-            server::sync_proxy_config(app, server_handle);
-        }
         KeyCode::Char('r') => {
             let _ = app.reload_config();
             server::sync_proxy_config(app, server_handle);
@@ -265,7 +261,6 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
             .filter_map(|p| p.port)
             .map(|p| p.to_string().len()),
     );
-    let has_fallback_col = app.config.fallback;
     let has_quota = app
         .config
         .providers
@@ -333,7 +328,7 @@ pub(super) fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         } else {
             Style::default().fg(t::TEXT)
         };
-        let name_style = if has_fallback_col && provider.fallback && !is_current {
+        let name_style = if provider.fallback && !is_current {
             name_style.add_modifier(Modifier::UNDERLINED)
         } else {
             name_style
@@ -517,7 +512,6 @@ mod tests {
                 current: "ds".into(),
                 listen: "127.0.0.1:0".into(),
                 providers,
-                fallback: false,
                 db_path: Some(path),
                 request_log_limit: 100,
             },

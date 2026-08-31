@@ -95,7 +95,6 @@ Configuration is stored in `~/.ccs/config.json`. Set `CCS_CONFIG_DIR` to use a d
 {
   "current": "anthropic-official",
   "listen": "127.0.0.1:7896",
-  "fallback": false,
   "request_log_limit": 100,
   "providers": {
     "anthropic-official": {
@@ -139,7 +138,6 @@ Configuration is stored in `~/.ccs/config.json`. Set `CCS_CONFIG_DIR` to use a d
 | `current` | — | Name of the active provider |
 | `listen` | `127.0.0.1:7896` | Global listen address |
 | `providers` | — | Ordered map of provider name → provider |
-| `fallback` | `false` | Global switch for the fallback rotation |
 | `db_path` | `~/.ccs/ccs.db` | SQLite file holding stats, request log and model lists |
 | `request_log_limit` | `100` | How many recent requests the TUI keeps |
 
@@ -204,8 +202,7 @@ For OpenAI-format providers, set `api_version` to control which upstream endpoin
 ```
 
 ### Per-Provider Fallback
-
-Set `"fallback": true` to include a provider in the fallback rotation when the active provider fails; the global `fallback` switch (`F` in the TUI) has to be on as well. Providers added through the TUI start at `false`; a provider hand-written into the config without the field defaults to `true`.
+Set `"fallback": true` to include a provider in the fallback rotation when the active provider fails. Providers added through the TUI start at `false`, and a provider hand-written into the config without the field also defaults to `false`.
 
 ```json
 "fallback": true
@@ -270,7 +267,6 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
 | `dd` | Delete selected provider |
 | `p` | Toggle provider enabled/disabled |
 | `f` | Toggle this provider's fallback participation |
-| `F` | Toggle global fallback mode |
 | `o` | Set/clear the provider's pinned port |
 | `u` | Run the provider's quota command immediately and refresh Quota |
 | `U` | Configure the provider's quota command (opens the Quota Command Preview panel) |

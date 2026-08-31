@@ -270,14 +270,6 @@ impl App {
         Ok(())
     }
 
-    pub fn toggle_fallback(&mut self) -> Result<()> {
-        self.config.fallback = !self.config.fallback;
-        config::save_config(&self.config)?;
-        let state = if self.config.fallback { "on" } else { "off" };
-        self.set_message(format!("Fallback mode {state}"), super::MessageKind::Info);
-        Ok(())
-    }
-
     pub fn push_message_log(&mut self, text: String, kind: MessageKind) {
         const MAX_MESSAGES: usize = 100;
         self.message_log
@@ -375,7 +367,6 @@ mod tests {
             current: "b".into(),
             listen: "127.0.0.1:7896".into(),
             providers,
-            fallback: false,
             db_path: None,
             request_log_limit: 100,
         }

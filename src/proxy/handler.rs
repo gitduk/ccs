@@ -201,7 +201,7 @@ pub async fn handle_models(
 async fn resolve_provider_pool(
     state: &SharedState,
 ) -> Result<(Vec<(String, crate::config::Provider)>, bool), AppError> {
-    // Pinned listeners bypass global current/fallback and go directly to their provider.
+    // Pinned listeners bypass the fallback rotation and go directly to their provider.
     if let Some(name) = &state.pinned_provider {
         let config = state.config.read().await;
         let provider = config
@@ -213,35 +213,26 @@ async fn resolve_provider_pool(
     }
 
     let config = state.config.read().await;
-
-    if config.fallback {
-        let (_, current_provider) = config.current_enabled_provider()?;
-        let start_idx = config
-            .providers
-            .get_index_of(&config.current)
-            .ok_or_else(|| AppError::ProviderNotFound(config.current.clone()))?;
-        let len = config.providers.len();
-        let list: Vec<(String, crate::config::Provider)> = (0..len)
-            .map(|i| (start_idx + i) % len)
-            .filter_map(|i| {
-                config
-                    .providers
-                    .get_index(i)
-                    .filter(|(k, v)| v.enabled && (v.fallback || k.as_str() == config.current))
-                    .map(|(k, v)| (k.clone(), v.clone()))
-            })
-            .collect();
-        if !current_provider.enabled || list.is_empty() {
-            return Err(AppError::ProviderNotFound(config.current.clone()));
-        }
-        Ok((list, true))
-    } else {
-        let (_, current_provider) = config.current_enabled_provider()?;
-        Ok((
-            vec![(config.current.clone(), current_provider.clone())],
-            false,
-        ))
+    let (_, current_provider) = config.current_enabled_provider()?;
+    let start_idx = config
+        .providers
+        .get_index_of(&config.current)
+        .ok_or_else(|| AppError::ProviderNotFound(config.current.clone()))?;
+    let len = config.providers.len();
+    let list: Vec<(String, crate::config::Provider)> = (0..len)
+        .map(|i| (start_idx + i) % len)
+        .filter_map(|i| {
+            config
+                .providers
+                .get_index(i)
+                .filter(|(k, v)| v.enabled && (v.fallback || k.as_str() == config.current))
+                .map(|(k, v)| (k.clone(), v.clone()))
+        })
+        .collect();
+    if !current_provider.enabled || list.is_empty() {
+        return Err(AppError::ProviderNotFound(config.current.clone()));
     }
+    Ok((list, true))
 }
 
 /// Request context bundled to keep [`try_providers`] argument count in check.
@@ -992,7 +983,6 @@ mod tests {
             current: "missing".into(),
             listen: "127.0.0.1:7896".into(),
             providers,
-            fallback: true,
             db_path: None,
             request_log_limit: 100,
         });

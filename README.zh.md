@@ -95,7 +95,6 @@ export OPENAI_API_KEY=any-value
 {
   "current": "anthropic-official",
   "listen": "127.0.0.1:7896",
-  "fallback": false,
   "request_log_limit": 100,
   "providers": {
     "anthropic-official": {
@@ -139,7 +138,6 @@ export OPENAI_API_KEY=any-value
 | `current` | — | 当前提供商名称 |
 | `listen` | `127.0.0.1:7896` | 全局监听地址 |
 | `providers` | — | 有序的「提供商名 → 提供商」映射 |
-| `fallback` | `false` | fallback 轮询的全局开关 |
 | `db_path` | `~/.ccs/ccs.db` | 保存统计、请求日志、模型列表的 SQLite 文件 |
 | `request_log_limit` | `100` | TUI 保留的最近请求条数 |
 
@@ -205,7 +203,7 @@ routes 在 `model_map` 之前应用，且按提供商各自生效：请求 fallb
 
 ### 按提供商控制 Fallback
 
-将 `"fallback": true` 设为参与 fallback 轮询，当前提供商失败时会依次尝试；同时需要打开全局 `fallback` 开关（TUI 中的 `F`）。TUI 新建的提供商初始为 `false`；手写进配置文件而省略该字段时默认为 `true`。
+将 `"fallback": true` 设为参与 fallback 轮询，当前提供商失败时会依次尝试。TUI 新建的提供商初始为 `false`；手写进配置文件而省略该字段时同样默认为 `false`。
 
 ```json
 "fallback": true
@@ -270,7 +268,6 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
 | `dd` | 删除选中提供商 |
 | `p` | 切换提供商启用 / 禁用 |
 | `f` | 切换该提供商的 fallback 参与状态 |
-| `F` | 切换全局 fallback 模式 |
 | `o` | 设置 / 清除该提供商的 pinned 端口 |
 | `u` | 立即执行该提供商的额度命令并刷新 Quota |
 | `U` | 配置该提供商的额度命令（打开 Quota Command Preview 面板） |

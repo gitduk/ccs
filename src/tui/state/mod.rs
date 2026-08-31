@@ -725,7 +725,6 @@ mod tests {
                 current: "vllm".into(),
                 listen: "127.0.0.1:0".into(),
                 providers,
-                fallback: false,
                 db_path: Some(path),
                 request_log_limit: 100,
             },

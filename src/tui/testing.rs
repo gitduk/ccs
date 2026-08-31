@@ -135,7 +135,6 @@ pub(crate) mod tests {
                 current: current.to_string(),
                 listen: "127.0.0.1:0".to_string(),
                 providers,
-                fallback: false,
                 db_path: Some(path),
                 request_log_limit: 100,
             },

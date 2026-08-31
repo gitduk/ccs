@@ -26,7 +26,6 @@ pub(super) fn draw_help(f: &mut Frame, scroll: &mut u16) {
                 ("p", "Toggle provider enabled / disabled"),
                 ("o", "Set/clear selected provider's pinned port"),
                 ("f", "Toggle this provider's fallback"),
-                ("F", "Toggle fallback mode (global)"),
                 ("u", "Run quota command & refresh"),
                 ("U", "Configure / preview quota command"),
                 ("yy", "Copy provider base URL to clipboard"),
