@@ -205,6 +205,41 @@ impl std::fmt::Display for ApiFormat {
     }
 }
 
+/// The Format field's dropdown values (see [`Provider::format_choice`] and
+/// [`Provider::set_format_choice`]). `chat_completions` / `responses` map to
+/// an OpenAI provider with that API version; `anthropic` to the Anthropic format.
+pub const FORMAT_CHOICES: [&str; 3] = ["anthropic", "chat_completions", "responses"];
+
+impl Provider {
+    /// Effective single-valued format choice for this provider: `anthropic`
+    /// or, for OpenAI providers, its configured API version.
+    pub fn format_choice(&self) -> String {
+        if self.api_format == ApiFormat::Anthropic {
+            "anthropic".to_string()
+        } else {
+            self.openai_api_version().to_string()
+        }
+    }
+
+    /// Apply a single format choice from [`FORMAT_CHOICES`] to this provider.
+    pub fn set_format_choice(&mut self, choice: &str) {
+        match choice {
+            "chat_completions" => {
+                self.api_format = ApiFormat::OpenAI;
+                self.api_version = Some(OpenAiApiVersion::ChatCompletions);
+            }
+            "responses" => {
+                self.api_format = ApiFormat::OpenAI;
+                self.api_version = Some(OpenAiApiVersion::Responses);
+            }
+            _ => {
+                self.api_format = ApiFormat::Anthropic;
+                self.api_version = None;
+            }
+        }
+    }
+}
+
 /// Resolve a configured API key: if it starts with '$', read from the
 /// environment variable it names. Free function (not just `Provider::
 /// resolve_api_key`) so callers that only have a raw key string — not a
@@ -878,6 +913,34 @@ mod tests {
         let mut p = make_provider("key", ApiFormat::OpenAI);
         p.api_version = Some(OpenAiApiVersion::ChatCompletions);
         assert!(!p.uses_responses_api());
+    }
+
+    #[test]
+    fn format_choice_round_trips_anthropic() {
+        let mut p = make_provider("key", ApiFormat::Anthropic);
+        assert_eq!(p.format_choice(), "anthropic");
+        p.set_format_choice("responses");
+        assert_eq!(p.api_format, ApiFormat::OpenAI);
+        assert_eq!(p.api_version, Some(OpenAiApiVersion::Responses));
+        assert_eq!(p.format_choice(), "responses");
+    }
+
+    #[test]
+    fn set_format_choice_chat_completions_sets_version() {
+        let mut p = make_provider("key", ApiFormat::Anthropic);
+        p.set_format_choice("chat_completions");
+        assert_eq!(p.api_format, ApiFormat::OpenAI);
+        assert_eq!(p.api_version, Some(OpenAiApiVersion::ChatCompletions));
+        assert_eq!(p.format_choice(), "chat_completions");
+    }
+
+    #[test]
+    fn set_format_choice_back_to_anthropic_clears_version() {
+        let mut p = make_provider("key", ApiFormat::OpenAI);
+        p.api_version = Some(OpenAiApiVersion::Responses);
+        p.set_format_choice("anthropic");
+        assert_eq!(p.api_format, ApiFormat::Anthropic);
+        assert_eq!(p.api_version, None);
     }
 
     // ─── AppConfig helpers ───────────────────────────────────────────────────

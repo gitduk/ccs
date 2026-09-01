@@ -15,8 +15,8 @@ use super::App;
 use super::ServerHandle;
 use super::server::sync_proxy_config;
 use super::state::{
-    FormField, MessageKind, Mode, NAME_FIELD_IDX, ProviderForm, VimMode, filter_suggestions,
-    provider_model_suggestions,
+    FORMAT_FIELD_IDX, FormField, MessageKind, Mode, NAME_FIELD_IDX, ProviderForm, VimMode,
+    filter_suggestions, provider_model_suggestions,
 };
 use super::theme::{self as t};
 use super::ui::format::{SuggestionStyle, mask_api_key_str, render_suggestion_lines};
@@ -87,6 +87,62 @@ pub(super) fn handle_key(
         };
         if let Some(format) = format {
             return app.save_form_manual_format(format);
+        }
+    }
+
+    // ── Format field dropdown ─────────────────────────────────────────────────
+    // When the Format field is focused, show its three choices and let the
+    // user navigate (`↓` / `Ctrl-J`) and select (`Enter`).
+    if !in_routes && form.focused == FORMAT_FIELD_IDX && form.fields[FORMAT_FIELD_IDX].editable {
+        let choices = format_suggest_choices(form);
+        let len = choices.len();
+        match code {
+            // On the Format field, ↓/↑ always navigate the choice list (it is
+            // a select field); j/k in Normal mode still move between fields.
+            KeyCode::Down => {
+                if !nav_suggest_down(&mut form.format_suggest, len) {
+                    form.focus_next();
+                }
+                return Ok(());
+            }
+            KeyCode::Up => {
+                if !form.format_suggest.active {
+                    form.focus_prev();
+                } else {
+                    nav_suggest_up(&mut form.format_suggest);
+                }
+                return Ok(());
+            }
+            KeyCode::Char('j') if ctrl => {
+                if !nav_suggest_down(&mut form.format_suggest, len) {
+                    form.focus_next();
+                }
+                return Ok(());
+            }
+            KeyCode::Char('k') if ctrl => {
+                if !form.format_suggest.active {
+                    form.focus_prev();
+                } else {
+                    nav_suggest_up(&mut form.format_suggest);
+                }
+                return Ok(());
+            }
+            // Select only after the user navigated the list (↓/↑); a plain
+            // Enter without navigation falls through to normal Insert mode.
+            KeyCode::Enter if form.format_suggest.active && len > 0 => {
+                let idx = form.format_suggest.idx.min(len - 1);
+                let choice = choices[idx];
+                form.fields[FORMAT_FIELD_IDX].value = choice.to_string();
+                form.fields[FORMAT_FIELD_IDX].cursor = choice.len();
+                form.format_suggest.reset();
+                form.vim_mode = VimMode::Normal;
+                return Ok(());
+            }
+            KeyCode::Esc if form.format_suggest.active => {
+                form.format_suggest.reset();
+                return Ok(());
+            }
+            _ => {}
         }
     }
 
@@ -253,7 +309,16 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
         vim_tag
     );
 
-    let field_heights: Vec<u16> = vec![2; form.fields.len()];
+    let format_choices: Vec<&'static str> = if form.focused == FORMAT_FIELD_IDX && !in_routes {
+        format_suggest_choices(form)
+    } else {
+        Vec::new()
+    };
+    let format_choices_len = format_choices.len() as u16;
+    let mut field_heights: Vec<u16> = vec![2; form.fields.len()];
+    if format_choices_len > 0 {
+        field_heights[FORMAT_FIELD_IDX] = 2 + 1 + format_choices_len + 1;
+    }
     let fields_total: u16 = field_heights.iter().sum();
     let routes_items = form.routes.len().max(1) as u16;
     let suggest_section = if suggest_items > 0 {
@@ -328,7 +393,26 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
             ])
         };
 
-        f.render_widget(Paragraph::new(vec![value_display]), chunks[ci]);
+        if i == FORMAT_FIELD_IDX && format_choices_len > 0 {
+            // Split the tall chunk: field row on top, dropdown below.
+            let sub = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(2), Constraint::Min(0)])
+                .split(chunks[ci]);
+            f.render_widget(Paragraph::new(vec![value_display]), sub[0]);
+            let render_target = sub[1];
+            if render_target.width > 0 && render_target.height > 0 {
+                let lines = render_suggestion_lines(
+                    &format_choices,
+                    &form.format_suggest,
+                    prov_color,
+                    SuggestionStyle::Classic,
+                );
+                f.render_widget(Paragraph::new(lines), render_target);
+            }
+        } else {
+            f.render_widget(Paragraph::new(vec![value_display]), chunks[ci]);
+        }
     }
 
     let routes_chunk = chunks[form.fields.len()];
@@ -478,6 +562,22 @@ fn prune_current_rule(form: &mut ProviderForm, provider_models: &[String]) {
     }
 }
 
+/// Format choices shown for the Format field. A complete current choice
+/// (exact match in [`crate::config::FORMAT_CHOICES`]) shows all three — it's
+/// a select field, not free text; a partial typed prefix narrows by prefix.
+fn format_suggest_choices(form: &ProviderForm) -> Vec<&'static str> {
+    let raw = form.fields[FORMAT_FIELD_IDX].value.trim().to_lowercase();
+    let filter = if crate::config::FORMAT_CHOICES.contains(&raw.as_str()) {
+        ""
+    } else {
+        raw.as_str()
+    };
+    crate::config::FORMAT_CHOICES
+        .iter()
+        .copied()
+        .filter(|c| filter.is_empty() || c.starts_with(filter))
+        .collect()
+}
 /// False (nothing to suggest) lets callers fall back to plain field nav.
 fn nav_suggest_down(suggest: &mut super::state::SuggestState, len: usize) -> bool {
     if len > 0 {

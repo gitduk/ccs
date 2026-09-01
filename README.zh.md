@@ -287,7 +287,7 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
 
 ### 提供商编辑器（`a` / `e`）
 
-字段依次为 Name、Base URL、API Key，以及 Routes 区域。Vim 风格，默认处于 Normal 模式。
+字段依次为 Name、Base URL、API Key、Format，以及 Routes 区域。Format 是下拉选择：聚焦后按 `↓`/`↑`（或 `Ctrl-J`/`Ctrl-K`）在 `anthropic` / `chat_completions` / `responses` 间选择，`Enter` 确认。选 `chat_completions` / `responses` 表示该提供商为 OpenAI 格式并带上对应 API 版本；选 `anthropic` 则为 Anthropic 格式。Vim 风格，默认处于 Normal 模式。
 
 | 按键 | 操作 |
 | --- | --- |

@@ -286,7 +286,7 @@ Copying uses `wl-copy` (Wayland).
 
 ### Provider editor (`a` / `e`)
 
-Fields: Name, Base URL, API Key, then the Routes section. Vim-style, starts in Normal mode.
+Fields: Name, Base URL, API Key, Format, then the Routes section. The Format field is a dropdown — focus it and press `↓`/`↑` (or `Ctrl-J`/`Ctrl-K`) to choose from `anthropic` / `chat_completions` / `responses`, then `Enter` to select. Choosing a `chat_completions` / `responses` sets the provider to OpenAI with that API version; `anthropic` uses the Anthropic format. Vim-style, starts in Normal mode.
 
 | Key | Action |
 | --- | --- |

@@ -317,8 +317,7 @@ pub(crate) mod tests {
 
         // Everything 404s/400s: the model-list fetch fails, so detection
         // has no model to probe with and reports failure.
-        let base_url =
-            crate::tester::tests::spawn_scenario_server(Default::default()).await;
+        let base_url = crate::tester::tests::spawn_scenario_server(Default::default()).await;
 
         app.add();
         {
@@ -352,4 +351,184 @@ pub(crate) mod tests {
         assert_eq!(saved.api_version, None);
     }
 
+    /// The Format field shows the provider's effective choice and switching
+    /// it to an OpenAI variant persists `api_format` + `api_version`.
+    #[tokio::test]
+    async fn editing_provider_can_change_api_format_and_version() {
+        use crate::tui::state::FORMAT_FIELD_IDX;
+
+        let _guard = ConfigDirGuard::new();
+        let mut app = app_with_current("first");
+        app.start_edit();
+
+        let form = app.form.as_ref().unwrap();
+        assert_eq!(form.fields.len(), 4, "editor has a single Format field");
+        assert_eq!(form.fields[FORMAT_FIELD_IDX].label, "Format");
+        // Anthropic provider pre-fills "anthropic".
+        assert_eq!(form.fields[FORMAT_FIELD_IDX].value, "anthropic");
+
+        let form = app.form.as_mut().unwrap();
+        form.fields[FORMAT_FIELD_IDX].value = "chat_completions".to_string();
+
+        app.save_form_and_close().unwrap();
+        assert!(app.form.is_none());
+
+        let saved = &app.config.providers["first"];
+        assert_eq!(saved.api_format, ApiFormat::OpenAI);
+        assert_eq!(
+            saved.api_version,
+            Some(crate::config::OpenAiApiVersion::ChatCompletions)
+        );
+    }
+
+    /// Editing an OpenAI provider pre-fills its Format field with the
+    /// configured API version, and saving untouched preserves both fields.
+    #[tokio::test]
+    async fn editing_openai_provider_preserves_format() {
+        use crate::tui::state::FORMAT_FIELD_IDX;
+
+        let _guard = ConfigDirGuard::new();
+        let mut app = app_with_current("first");
+        {
+            let p = app.config.providers.get_mut("first").unwrap();
+            p.api_format = ApiFormat::OpenAI;
+            p.api_version = Some(crate::config::OpenAiApiVersion::Responses);
+        }
+
+        app.start_edit();
+        let form = app.form.as_ref().unwrap();
+        assert_eq!(form.fields.len(), 4, "single Format field for OpenAI too");
+        assert_eq!(form.fields[FORMAT_FIELD_IDX].value, "responses");
+
+        app.save_form_and_close().unwrap();
+        let saved = &app.config.providers["first"];
+        assert_eq!(saved.api_format, ApiFormat::OpenAI);
+        assert_eq!(
+            saved.api_version,
+            Some(crate::config::OpenAiApiVersion::Responses)
+        );
+    }
+
+    /// A new provider saved with an explicit Format field skips auto-detection.
+    #[tokio::test]
+    async fn adding_provider_with_explicit_format_skips_detection() {
+        use crate::tui::state::{
+            API_KEY_FIELD_IDX, BASE_URL_FIELD_IDX, FORMAT_FIELD_IDX, NAME_FIELD_IDX,
+        };
+
+        let _guard = ConfigDirGuard::new();
+        let mut app = app_with_current("first");
+
+        app.add();
+        {
+            let form = app.form.as_mut().unwrap();
+            form.fields[NAME_FIELD_IDX].value = "explicit".to_string();
+            form.fields[BASE_URL_FIELD_IDX].value = "http://127.0.0.1:9".to_string();
+            form.fields[API_KEY_FIELD_IDX].value = "sk-test".to_string();
+            form.fields[FORMAT_FIELD_IDX].value = "anthropic".to_string();
+        }
+
+        app.save_form_and_close().unwrap();
+        assert!(app.form.is_none(), "explicit format should close the form");
+        let saved = &app.config.providers["explicit"];
+        assert_eq!(saved.api_format, ApiFormat::Anthropic);
+    }
+
+    /// Focusing the Format field opens the three-choice dropdown; `↓` then
+    /// `Enter` selects `chat_completions` and saving persists it as OpenAI.
+    #[tokio::test]
+    async fn format_dropdown_selects_choice() {
+        use crate::tui::state::FORMAT_FIELD_IDX;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let _guard = ConfigDirGuard::new();
+        let mut app = app_with_current("first");
+        app.start_edit();
+        // Focus the Format field (index 3).
+        {
+            let form = app.form.as_mut().unwrap();
+            form.focused = FORMAT_FIELD_IDX;
+        }
+        assert!(
+            app.form
+                .as_ref()
+                .is_some_and(|f| f.focused == FORMAT_FIELD_IDX),
+            "Format field focused"
+        );
+
+        // `↓` opens the dropdown (highlight on first item); a second `↓`
+        // moves the highlight to the second item (chat_completions).
+        crate::tui::input::handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut None)
+            .unwrap();
+        assert!(
+            app.form.as_ref().is_some_and(|f| f.format_suggest.active),
+            "dropdown active after ↓"
+        );
+        crate::tui::input::handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut None)
+            .unwrap();
+
+        // `Enter` selects the highlighted choice (chat_completions).
+        crate::tui::input::handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut None)
+            .unwrap();
+        assert_eq!(
+            app.form.as_ref().unwrap().fields[FORMAT_FIELD_IDX].value,
+            "chat_completions"
+        );
+
+        app.save_form_and_close().unwrap();
+        let saved = &app.config.providers["first"];
+        assert_eq!(saved.api_format, ApiFormat::OpenAI);
+        assert_eq!(
+            saved.api_version,
+            Some(crate::config::OpenAiApiVersion::ChatCompletions)
+        );
+    }
+    /// After detection fails, pressing `a` saves Anthropic even when the
+    /// Format field now holds a typed OpenAI choice — the keypress wins.
+    #[tokio::test]
+    async fn manual_format_overrides_typed_format_field() {
+        use crate::tui::state::{API_KEY_FIELD_IDX, BASE_URL_FIELD_IDX, FORMAT_FIELD_IDX, NAME_FIELD_IDX};
+
+        let _guard = ConfigDirGuard::new();
+        let mut app = app_with_current("first");
+        app.tests.client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .connect_timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+
+        let base_url = crate::tester::tests::spawn_scenario_server(Default::default()).await;
+
+        app.add();
+        {
+            let form = app.form.as_mut().unwrap();
+            form.fields[NAME_FIELD_IDX].value = "override".to_string();
+            form.fields[BASE_URL_FIELD_IDX].value = base_url;
+            form.fields[API_KEY_FIELD_IDX].value = "sk-test".to_string();
+        }
+        // Empty Format field → triggers auto-detection, which fails here.
+        app.save_form_and_close().unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while app
+            .form
+            .as_ref()
+            .is_some_and(|f| f.detect_token.is_some() || f.error.is_none())
+        {
+            if tokio::time::Instant::now() > deadline {
+                panic!("detection never reported back");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            app.drain_test_results();
+        }
+
+        assert!(app.form.as_ref().is_some_and(|f| f.detect_failed));
+        // User types an OpenAI choice, then presses `a` (Anthropic).
+        app.form.as_mut().unwrap().fields[FORMAT_FIELD_IDX].value = "responses".to_string();
+        app.save_form_manual_format(ApiFormat::Anthropic).unwrap();
+        assert!(app.form.is_none(), "manual save should close the form");
+        let saved = &app.config.providers["override"];
+        assert_eq!(saved.api_format, ApiFormat::Anthropic);
+        assert_eq!(saved.api_version, None);
+    }
 }

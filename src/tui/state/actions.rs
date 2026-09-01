@@ -1,19 +1,22 @@
 use crate::config::{self, RouteRule};
 use crate::error::Result;
+use crate::tui::state::ProviderForm;
 
 use super::{
-    API_KEY_FIELD_IDX, App, BASE_URL_FIELD_IDX, ConfirmAction, MessageKind, Mode, NAME_FIELD_IDX,
-    ProviderForm,
+    API_KEY_FIELD_IDX, App, BASE_URL_FIELD_IDX, ConfirmAction, FORMAT_FIELD_IDX, MessageKind, Mode,
+    NAME_FIELD_IDX,
 };
 
 /// Parsed and validated fields extracted from a [`ProviderForm`].
 /// Produced by [`parse_provider_form`]; consumed by [`App::do_save_form`].
 ///
-/// Omits `api_format`/`api_version`/`fallback`/`port` — those live outside this form.
+/// Omits `fallback`/`port` — those live outside this form.
 struct ParsedProviderFields {
     name: String,
     base_url: String,
     api_key: String,
+    /// One of `crate::config::FORMAT_CHOICES`, or None when left blank.
+    format_choice: Option<String>,
     routes: Vec<RouteRule>,
     original_name: Option<String>,
 }
@@ -40,6 +43,15 @@ fn parse_provider_form(
     let api_key = form.fields[API_KEY_FIELD_IDX].value.trim().to_string();
     let original_name = form.original_name.clone();
 
+    let raw_format = form.fields[FORMAT_FIELD_IDX].value.trim().to_lowercase();
+    let format_choice = if raw_format.is_empty() {
+        None
+    } else if crate::config::FORMAT_CHOICES.contains(&raw_format.as_str()) {
+        Some(raw_format)
+    } else {
+        return Err("Format must be one of: anthropic, chat_completions, responses".to_string());
+    };
+
     let routes: Vec<RouteRule> = form
         .routes
         .iter()
@@ -61,6 +73,7 @@ fn parse_provider_form(
         name,
         base_url,
         api_key,
+        format_choice,
         routes,
         original_name,
     })
@@ -91,10 +104,7 @@ impl App {
     /// Save the pending add without format auto-detection, using the format
     /// the user picked explicitly (`a` Anthropic / `o` OpenAI in the form).
     /// Only reachable after detection failed; field validation is unchanged.
-    pub fn save_form_manual_format(
-        &mut self,
-        format: crate::config::ApiFormat,
-    ) -> Result<()> {
+    pub fn save_form_manual_format(&mut self, format: crate::config::ApiFormat) -> Result<()> {
         if let Some(f) = self.form.as_mut() {
             f.manual_format = Some(format);
         }
@@ -165,24 +175,21 @@ impl App {
         // Not editable in the form; inherit from the existing provider.
         let inject_thinking_history = existing.map(|p| p.inject_thinking_history).unwrap_or(true);
         // Not editable in the form; inherit from the existing provider.
-        let strict_thinking_history = existing
-            .map(|p| p.strict_thinking_history)
-            .unwrap_or(false);
-        // A new provider has no format yet (resolved below by auto-detection),
-        // so this placeholder is only ever seen if fields.is_new() — editing
-        // an existing provider always carries its real, already-known format.
-        let existing_format = existing.map(|p| p.api_format.clone());
-        let existing_version = existing.and_then(|p| p.api_version.clone());
+        let strict_thinking_history = existing.map(|p| p.strict_thinking_history).unwrap_or(false);
         let mut provider = crate::config::Provider {
             id: provider_id.clone(),
             base_url: fields.base_url.clone(),
             api_key: fields.api_key.clone(),
-            api_format: existing_format.unwrap_or(crate::config::ApiFormat::Anthropic),
+            // Placeholder format — overwritten below by the form choice or
+            // by auto-detection for a new provider.
+            api_format: existing
+                .map(|p| p.api_format.clone())
+                .unwrap_or(crate::config::ApiFormat::Anthropic),
             model_map,
             routes: fields.routes.clone(),
             enabled,
             fallback,
-            api_version: existing_version,
+            api_version: existing.and_then(|p| p.api_version.clone()),
             inject_thinking_history,
             strict_thinking_history,
             quota_command,
@@ -190,14 +197,29 @@ impl App {
             test_model: existing.and_then(|p| p.test_model.clone()),
             max_tokens_cap: existing.and_then(|p| p.max_tokens_cap),
         };
-
-        if fields.is_new() {
-            // The user may have picked a format manually after detection
-            // failed — insert immediately instead of re-detecting.
-            if let Some(format) = manual_format {
-                provider.api_format = format;
-                return self.finish_new_provider_save(fields.name.clone(), provider);
+        // An explicit a/o keypress after detection failed wins over whatever
+        // text the user typed into the Format field.
+        let has_manual_format = manual_format.is_some();
+        if let Some(format) = manual_format {
+            match format {
+                crate::config::ApiFormat::Anthropic => provider.set_format_choice("anthropic"),
+                crate::config::ApiFormat::OpenAI => {
+                    // Keep the field's api_version (if typed); None defaults
+                    // to Responses, matching the pre-Format-field manual path.
+                    provider.api_format = crate::config::ApiFormat::OpenAI;
+                }
             }
+        } else if let Some(choice) = &fields.format_choice {
+            provider.set_format_choice(choice);
+        }
+
+        // A new provider with an explicit format (field text or a/o keypress)
+        // skips auto-detection and inserts immediately.
+        if fields.is_new() && (has_manual_format || fields.format_choice.is_some()) {
+            return self.finish_new_provider_save(fields.name.clone(), provider);
+        }
+        if fields.is_new() {
+            // Format unknown yet — detect async, finish the insert in drain_test_results.
 
             // Format unknown yet — detect async, finish the insert in drain_test_results.
             let token = uuid::Uuid::new_v4().to_string();
@@ -765,7 +787,8 @@ impl App {
                             match config::save_config(&self.config) {
                                 Ok(()) => {
                                     if self.config.providers.contains_key(&name) {
-                                        let idx = super::navigation::display_rank_of(&self.config, &name);
+                                        let idx =
+                                            super::navigation::display_rank_of(&self.config, &name);
                                         self.select_row(idx);
                                     }
                                     self.set_message(

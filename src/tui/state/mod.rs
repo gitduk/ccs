@@ -6,6 +6,7 @@ use std::time::Duration;
 pub(super) const NAME_FIELD_IDX: usize = 0;
 pub(super) const BASE_URL_FIELD_IDX: usize = 1;
 pub(super) const API_KEY_FIELD_IDX: usize = 2;
+pub(super) const FORMAT_FIELD_IDX: usize = 3;
 // Fallback, port, and Test Model are set via shortcuts outside this form;
 // `do_save_form` inherits them from `existing` (or defaults for a new provider).
 
@@ -321,6 +322,9 @@ pub struct ProviderForm {
     /// Suggestion dropdown for the route target field.
     pub route_suggest: SuggestState,
 
+    // ── Format field dropdown ──
+    /// Suggestion dropdown for the Format field's three choices.
+    pub format_suggest: SuggestState,
     /// Pending first key of a two-key sequence (`dd`, `gg`, `yy`) inside the form.
     pub pending_key: Option<(char, std::time::Instant)>,
     pub error: Option<String>,
@@ -562,26 +566,29 @@ impl FormField {
 
 impl ProviderForm {
     /// Create a new form for adding or editing a provider.
-    ///
-    /// API format is not user-editable here: for a new provider it's
-    /// resolved by auto-detection on save (see `TestEvent::FormatDetected`);
-    /// for an existing one it's fixed and simply carried over unchanged.
     pub(super) fn new(name: &str, provider: Option<&Provider>) -> Self {
-        let (base_url, api_key, routes) = match provider {
-            Some(p) => (p.base_url.as_str(), p.api_key.as_str(), p.routes.clone()),
-            None => ("", "", vec![]),
+        let (base_url, api_key, format, routes) = match provider {
+            Some(p) => (
+                p.base_url.as_str(),
+                p.api_key.as_str(),
+                p.format_choice(),
+                p.routes.clone(),
+            ),
+            None => ("", "", String::new(), vec![]),
         };
+        let fields = vec![
+            FormField::text("Name", name),
+            FormField::text("Base URL", base_url),
+            FormField::text("API Key", api_key),
+            FormField::text("Format", &format),
+        ];
         Self {
             original_name: if name.is_empty() {
                 None
             } else {
                 Some(name.to_string())
             },
-            fields: vec![
-                FormField::text("Name", name),
-                FormField::text("Base URL", base_url),
-                FormField::text("API Key", api_key),
-            ],
+            fields,
             focused: 0,
             vim_mode: VimMode::Normal,
             routes,
@@ -591,6 +598,7 @@ impl ProviderForm {
             route_edit_target: false,
             route_tgt_field: FormField::text("", ""),
             route_suggest: SuggestState::default(),
+            format_suggest: SuggestState::default(),
             pending_key: None,
             error: None,
             detect_token: None,
@@ -629,14 +637,14 @@ impl ProviderForm {
     }
 
     /// Move focus to the next editable slot.
-    /// Visual order: Name → Base URL → API Key → Routes → (wrap)
+    /// Visual order: Name → Base URL → API Key → Format → Routes → (wrap)
     pub fn focus_next(&mut self) {
         let routes_slot = self.fields.len(); // virtual index for Routes (past last regular field)
 
         let next = if self.focused == routes_slot {
             0 // Routes → Name (wrap)
         } else {
-            self.focused + 1 // sequential: API Key → Routes naturally
+            self.focused + 1 // sequential
         };
 
         self.focused = next;
@@ -647,14 +655,14 @@ impl ProviderForm {
     }
 
     /// Move focus to the previous editable slot.
-    /// Visual order (reverse): Routes → API Key → Base URL → Name → (wrap)
+    /// Visual order (reverse): Routes → Format → API Key → Base URL → Name → (wrap)
     pub fn focus_prev(&mut self) {
         let routes_slot = self.fields.len();
 
         let prev = if self.focused == 0 {
             routes_slot // Name → Routes (wrap)
         } else {
-            self.focused - 1 // sequential: Routes → API Key → ...
+            self.focused - 1 // sequential
         };
 
         self.focused = prev;
