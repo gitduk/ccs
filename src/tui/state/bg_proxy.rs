@@ -37,6 +37,7 @@ impl App {
     /// Called when the background proxy is found to have exited on its own.
     pub fn on_bg_proxy_died(&mut self) {
         self.bg_proxy_pid = None;
+        self.bg_proxy_stale_version = None;
         self.remove_pid_file();
     }
 
@@ -106,4 +107,44 @@ pub fn kill_process(pid: u32) {
 
 pub fn send_sighup(pid: u32) {
     send_signal(pid, "-HUP");
+}
+/// Health-endpoint URL for a background proxy listening at `listen`.
+/// `0.0.0.0` is rewritten to `127.0.0.1` so the probe can connect.
+pub(crate) fn bg_proxy_health_url(listen: &str) -> String {
+    let (host, port) = listen.rsplit_once(':').unwrap_or((listen, ""));
+    let host = if host == "0.0.0.0" { "127.0.0.1" } else { host };
+    format!("http://{host}:{port}/health")
+}
+
+/// GET /health on the background proxy and return its reported version.
+/// `None` when the probe fails or the port serves something other than ccs.
+pub(crate) async fn fetch_bg_proxy_version(health_url: &str) -> Option<String> {
+    let resp = reqwest::Client::new()
+        .get(health_url)
+        .timeout(std::time::Duration::from_millis(1200))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = resp.json().await.ok()?;
+    body.get("version")?.as_str().map(str::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bg_proxy_health_url;
+
+    #[test]
+    fn wildcard_host_is_rewritten_to_loopback() {
+        assert_eq!(
+            bg_proxy_health_url("0.0.0.0:7896"),
+            "http://127.0.0.1:7896/health"
+        );
+        assert_eq!(
+            bg_proxy_health_url("127.0.0.1:7896"),
+            "http://127.0.0.1:7896/health"
+        );
+    }
 }

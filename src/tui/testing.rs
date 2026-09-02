@@ -153,6 +153,7 @@ pub(crate) mod tests {
             tests: TestState::new(),
             db,
             bg_proxy_pid: None,
+            bg_proxy_stale_version: None,
             models: ModelsState {
                 provider_models: std::collections::HashMap::from([
                     ("first".to_string(), vec!["first-model".to_string()]),

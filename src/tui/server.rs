@@ -47,9 +47,15 @@ pub(super) fn start_server_background(app: &mut App, server: &mut Option<ServerH
     app.set_message(format!("Proxy started on {listen}"), MessageKind::Success);
 }
 
-/// Toggle the detached background proxy (Shift+S).
+/// Toggle the detached background proxy (Shift+S). When the running
+/// background proxy is a stale build, restart it with the current binary
+/// (stop + spawn) instead, so the new version takes over the port.
 pub(super) fn toggle_bg_proxy(app: &mut App, server: &mut Option<ServerHandle>) {
     if app.bg_proxy_pid.is_some() {
+        if app.bg_proxy_stale_version.is_some() {
+            restart_bg_proxy(app, server);
+            return;
+        }
         app.stop_bg_proxy();
         app.set_message("Background proxy stopped", MessageKind::Info);
         start_server_background(app, server);
@@ -59,24 +65,26 @@ pub(super) fn toggle_bg_proxy(app: &mut App, server: &mut Option<ServerHandle>) 
         }
         app.server_status = ServerStatus::Stopped;
 
-        tokio::task::block_in_place(|| {
-            let addr = &app.config.listen;
-            for _ in 0..40 {
-                if std::net::TcpListener::bind(addr).is_ok() {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-        });
+        if !wait_until_port_free(&app.config.listen) {
+            app.set_message(
+                "Proxy port is still in use — press S to retry",
+                MessageKind::Error,
+            );
+            return;
+        }
 
         match app.spawn_bg_proxy() {
-            Ok(()) => app.set_message(
-                format!(
-                    "Background proxy running on {}  — safe to quit TUI",
-                    app.config.listen
-                ),
-                MessageKind::Success,
-            ),
+            Ok(()) => {
+                // The new child is our own binary, so it cannot be stale.
+                app.bg_proxy_stale_version = None;
+                app.set_message(
+                    format!(
+                        "Background proxy running on {}  — safe to quit TUI",
+                        app.config.listen
+                    ),
+                    MessageKind::Success,
+                );
+            }
             Err(e) => {
                 app.set_message(
                     format!("Failed to start background proxy: {e}"),
@@ -86,4 +94,59 @@ pub(super) fn toggle_bg_proxy(app: &mut App, server: &mut Option<ServerHandle>) 
             }
         }
     }
+}
+
+/// Stop the stale background proxy and spawn a fresh one from the current
+/// binary (current by construction). The port is only spawned on once it is
+/// free; falls back to the in-process server when the spawn itself fails.
+fn restart_bg_proxy(app: &mut App, server: &mut Option<ServerHandle>) {
+    if let Some(handle) = server.take() {
+        let _ = handle.shutdown_tx.send(true);
+    }
+    app.stop_bg_proxy();
+    // The stale process is gone whatever happens next, so clear the badge.
+    app.bg_proxy_stale_version = None;
+
+    // Spawn only once the port is actually free: a child that fails to bind
+    // would exit right away. The bound keeps a wedged process from freezing
+    // the TUI; in that case the old proxy keeps draining and S retries later.
+    if !wait_until_port_free(&app.config.listen) {
+        app.set_message(
+            "Old proxy is still draining requests — press S to retry",
+            MessageKind::Error,
+        );
+        return;
+    }
+
+    match app.spawn_bg_proxy() {
+        Ok(()) => app.set_message(
+            format!(
+                "Background proxy restarted — running v{}",
+                env!("CARGO_PKG_VERSION")
+            ),
+            MessageKind::Success,
+        ),
+        Err(e) => {
+            app.set_message(
+                format!("Failed to restart background proxy: {e}"),
+                MessageKind::Error,
+            );
+            start_server_background(app, server);
+        }
+    }
+}
+
+/// Wait until nothing binds `addr` anymore, up to a bound; the old proxy
+/// drains its in-flight requests on SIGTERM before closing its listener.
+/// Returns false when the port is still held after ~2 s.
+fn wait_until_port_free(addr: &str) -> bool {
+    tokio::task::block_in_place(|| {
+        for _ in 0..40 {
+            if std::net::TcpListener::bind(addr).is_ok() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        false
+    })
 }

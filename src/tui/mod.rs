@@ -104,6 +104,9 @@ enum BgDbResult {
         /// `None` when the database was unchanged and the reload was skipped.
         logs: Option<Vec<crate::metrics::RequestLogEntry>>,
     },
+    /// Background proxy version reported by its /health endpoint; `None`
+    /// when the probe failed (or the port serves something else).
+    BgProxyVersion(Option<String>),
 }
 
 struct BgDbJobs {
@@ -162,6 +165,18 @@ impl BgDbJobs {
         });
     }
 
+    /// Probe the background proxy's /health endpoint so the UI can show when
+    /// the running proxy is a stale build (compared against this binary's).
+    fn start_bg_proxy_version_check(&mut self, app: &App) {
+        let tx = self.tx.clone();
+        let health_url = state::bg_proxy_health_url(&app.config.listen);
+        tokio::spawn(async move {
+            let _ = tx.send(BgDbResult::BgProxyVersion(
+                state::fetch_bg_proxy_version(&health_url).await,
+            ));
+        });
+    }
+
     fn drain_results(&mut self, app: &mut App) -> bool {
         let mut dirty = false;
         while let Ok(result) = self.rx.try_recv() {
@@ -175,6 +190,13 @@ impl BgDbJobs {
                     self.request_log_data_version = data_version;
                     if let Some(logs) = logs {
                         dirty |= replace_request_logs_if_changed(app, logs);
+                    }
+                }
+                BgDbResult::BgProxyVersion(remote) => {
+                    let stale = remote.filter(|v| v != env!("CARGO_PKG_VERSION"));
+                    if app.bg_proxy_stale_version != stale {
+                        app.bg_proxy_stale_version = stale;
+                        dirty = true;
                     }
                 }
             }
@@ -237,6 +259,9 @@ fn run_loop(
 ) -> Result<()> {
     let mut scheduler = RenderScheduler::new(Instant::now());
     let mut bg_db_jobs = BgDbJobs::new();
+    if app.bg_proxy_pid.is_some() {
+        bg_db_jobs.start_bg_proxy_version_check(app);
+    }
     let mut dirty = true;
     loop {
         let now = Instant::now();

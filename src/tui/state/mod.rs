@@ -27,6 +27,7 @@ mod metrics_sync;
 mod navigation;
 
 pub use bg_proxy::{is_process_alive, send_sighup};
+pub(crate) use bg_proxy::{bg_proxy_health_url, fetch_bg_proxy_version};
 pub use filter::{filter_suggestions, provider_model_suggestions};
 
 /// Snapshot of DB-backed metrics loaded off the hot path for non-blocking TUI redraws.
@@ -223,6 +224,9 @@ pub struct App {
     pub tests: TestState,
     pub db: Repository,
     pub bg_proxy_pid: Option<u32>,
+    /// Version the running background proxy reports when it differs from this
+    /// binary's; shown next to the listen address. `Shift+S` restarts it.
+    pub bg_proxy_stale_version: Option<String>,
     pub models: ModelsState,
     pub request_log: SharedRequestLog,
     pub logs: LogsState,
@@ -755,6 +759,7 @@ mod tests {
             tests: super::TestState::new(),
             db,
             bg_proxy_pid: None,
+            bg_proxy_stale_version: None,
             models: super::ModelsState {
                 provider_models: std::collections::HashMap::new(),
                 search_field: super::FormField::search(),

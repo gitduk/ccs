@@ -76,6 +76,7 @@ impl App {
             tests,
             db,
             bg_proxy_pid,
+            bg_proxy_stale_version: None,
             models: ModelsState {
                 provider_models,
                 search_field: super::FormField::search(),

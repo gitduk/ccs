@@ -30,7 +30,7 @@ pub(super) fn draw_help(f: &mut Frame, scroll: &mut u16) {
                 ("U", "Configure / preview quota command"),
                 ("yy", "Copy provider base URL to clipboard"),
                 ("yc", "Copy test curl command to clipboard"),
-                ("S", "Toggle background proxy"),
+                ("S", "Toggle / restart background proxy"),
                 ("r", "Reload config from disk"),
                 ("c", "Clear current provider usage data"),
                 ("C", "Clear all providers' usage data"),

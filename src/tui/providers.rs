@@ -530,6 +530,7 @@ mod tests {
             tests: TestState::new(),
             db,
             bg_proxy_pid: Some(123),
+            bg_proxy_stale_version: None,
             models: ModelsState {
                 provider_models: std::collections::HashMap::new(),
                 search_field: crate::tui::state::FormField::search(),

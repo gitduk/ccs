@@ -61,15 +61,26 @@ fn mem_label(mem_mb: u32) -> String {
     }
 }
 
-fn app_info_spans(listen: &str, has_proxy: bool) -> Vec<Span<'static>> {
-    vec![Span::styled(
+fn app_info_spans(listen: &str, has_proxy: bool, stale_version: Option<&str>) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::styled(
         listen.to_owned(),
         if has_proxy {
             Style::default().fg(t::SUCCESS).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(t::MUTED)
         },
-    )]
+    )];
+    // The stale badge describes the *running* background proxy; never show it
+    // once the process is gone (or was never there).
+    if has_proxy
+        && let Some(v) = stale_version
+    {
+        spans.push(Span::styled(
+            format!(" v{v}"),
+            Style::default().fg(t::WARNING),
+        ));
+    }
+    spans
 }
 
 fn divider() -> Vec<Span<'static>> {
@@ -109,7 +120,7 @@ fn make_app_title_with_sysinfo(
         width,
         sys_info_spans(cpu_pct, mem_mb),
         mem_mb,
-        app_info_spans(&app.config.listen, app.bg_proxy_pid.is_some()),
+        app_info_spans(&app.config.listen, app.bg_proxy_pid.is_some(), app.bg_proxy_stale_version.as_deref()),
     );
     let right = Line::from(right_spans).right_aligned();
     (Line::from(left_spans), right)
@@ -176,7 +187,7 @@ mod tests {
     #[test]
     fn full_right_title_keeps_module_spacing() {
         let left = [logo_spans(), version_spans()].concat();
-        let app_info = app_info_spans("0.0.0.0:7896", true);
+        let app_info = app_info_spans("0.0.0.0:7896", true, None);
         let sys_info = sys_info_spans(6.5, 154);
         let width = full_right_width(&left, 154, &app_info);
 
@@ -188,7 +199,7 @@ mod tests {
     #[test]
     fn sys_info_only_keeps_right_padding() {
         let left = [logo_spans(), version_spans()].concat();
-        let app_info = app_info_spans("0.0.0.0:7896", true);
+        let app_info = app_info_spans("0.0.0.0:7896", true, None);
         let sys_info = sys_info_spans(6.5, 154);
         let width = (spans_width(&left) + spans_width(&sys_info) + 4) as u16;
 
@@ -200,11 +211,22 @@ mod tests {
     #[test]
     fn hidden_right_title_has_no_partial_spacing() {
         let left = [logo_spans(), version_spans()].concat();
-        let app_info = app_info_spans("0.0.0.0:7896", true);
+        let app_info = app_info_spans("0.0.0.0:7896", true, None);
         let sys_info = sys_info_spans(6.5, 154);
         let width = (spans_width(&left) + spans_width(&sys_info)) as u16;
         let right = topbar_right_spans(&left, width, sys_info, 154, app_info);
 
         assert!(right.is_empty());
+    }
+    #[test]
+    fn stale_background_version_shown_next_to_listen() {
+        let left = [logo_spans(), version_spans()].concat();
+        let app_info = app_info_spans("0.0.0.0:7896", true, Some("0.60.1"));
+        let sys_info = sys_info_spans(6.5, 154);
+        let width = full_right_width(&left, 154, &app_info);
+
+        let right = topbar_right_spans(&left, width, sys_info, 154, app_info);
+
+        assert_eq!(text(&right), "╌╌ cpu 6.5% mem 154MB │ 0.0.0.0:7896 v0.60.1 ╌╌ ");
     }
 }
