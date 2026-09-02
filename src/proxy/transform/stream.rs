@@ -1283,7 +1283,7 @@ where
                         if !rest.is_empty() {
                             yield Ok(Bytes::from(rest));
                         }
-
+                        buffer.clear();
                         patched = true;
                     }
                     // else: keep buffering until we have a complete event
