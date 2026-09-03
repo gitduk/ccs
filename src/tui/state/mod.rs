@@ -115,6 +115,12 @@ pub(super) enum TestEvent {
         provider: String,
         models: Vec<String>,
     },
+    /// A manual model-list refresh came back empty (fetch or parse failed),
+    /// so the caller can surface an error instead of silently keeping the
+    /// stale catalog.
+    ModelsRefreshFailed {
+        provider: String,
+    },
     /// API format auto-detection finished for a new provider being added.
     /// Carries every already-validated field needed to finish constructing
     /// and inserting the `Provider`, since it doesn't exist in config yet.
@@ -177,6 +183,9 @@ pub struct ModelsState {
     pub selected: usize,
     /// Scroll offset (rows) for the models list.
     pub scroll: u16,
+    /// A manual catalog refresh (`r` in the Models panel) is in flight, so
+    /// further presses are ignored until it lands.
+    pub refresh_inflight: bool,
     /// Pending first key of a two-key sequence inside the Models panel.
     pub pending_key: Option<(char, std::time::Instant)>,
 }
@@ -767,6 +776,7 @@ mod tests {
                 selected: 0,
                 scroll: 0,
                 pending_key: None,
+                refresh_inflight: false,
             },
             request_log: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::metrics::RequestLog::default(),

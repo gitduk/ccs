@@ -356,6 +356,7 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
 | `q` / `Esc` / `Ctrl-C` | 返回提供商列表 |
 | `t` | 测试光标下的模型（结果显示在模型名后） |
 | `p` | 设置 / 清除该提供商的 Test Model |
+| `r` | 从上游重新拉取该提供商的模型列表 |
 
 ### 额度面板（`U`）
 

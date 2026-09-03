@@ -143,6 +143,29 @@ pub(super) fn handle_key(
                     set_test_model(app, &prov, name);
                 }
             }
+
+            KeyCode::Char('r') => {
+                // Reload the current provider's model catalog from upstream.
+                // The fetch is async; when it lands the list updates in place.
+                let Some(name) = current_provider(app).map(str::to_string) else {
+                    return Ok(());
+                };
+                if app.models.refresh_inflight {
+                    return Ok(());
+                }
+                if app.spawn_model_fetch(&name) {
+                    app.models.refresh_inflight = true;
+                    app.set_message(
+                        format!("Refreshing model list for '{name}'…"),
+                        MessageKind::Info,
+                    );
+                } else {
+                    app.set_message(
+                        format!("Cannot refresh '{name}': no base URL or API key"),
+                        MessageKind::Error,
+                    );
+                }
+            }
             KeyCode::Down | KeyCode::Char('j') => nav_down(app, total, 1),
             KeyCode::Up | KeyCode::Char('k') => nav_up(app, 1),
             KeyCode::Char('G') => {
@@ -508,5 +531,37 @@ mod tests {
             .results
             .get("first")
             .is_some_and(|m| m.contains_key("first-model")));
+        assert!(app
+            .tests
+            .results
+            .get("first")
+            .is_some_and(|m| m.contains_key("first-model")));
+    }
+
+    #[test]
+    fn r_without_credentials_reports_error_without_starting_refresh() {
+        let mut app = app_with_current("first");
+        app.models.search_active = false;
+        app.config.providers.get_mut("first").unwrap().api_key.clear();
+
+        handle_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE).unwrap();
+
+        assert!(!app.models.refresh_inflight);
+        let (msg, kind, _) = app.message.as_ref().expect("error message shown");
+        assert!(matches!(kind, MessageKind::Error), "{msg}");
+        assert!(msg.contains("Cannot refresh 'first'"), "{msg}");
+    }
+
+    #[test]
+    fn r_is_ignored_while_a_refresh_is_in_flight() {
+        let mut app = app_with_current("first");
+        app.models.search_active = false;
+        app.models.refresh_inflight = true;
+
+        handle_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE).unwrap();
+
+        // The in-flight marker survives and no misleading message is shown.
+        assert!(app.models.refresh_inflight);
+        assert!(app.message.is_none());
     }
 }

@@ -356,6 +356,7 @@ Fields: Name, Base URL, API Key, Format, then the Routes section. The Format fie
 | `q` / `Esc` / `Ctrl-C` | Back to the provider list |
 | `t` | Test the highlighted model (result shown after its name) |
 | `p` | Set/clear the provider's Test Model |
+| `r` | Reload this provider's model list from upstream |
 
 ### Quota panel (`U`)
 

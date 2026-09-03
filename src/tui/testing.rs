@@ -164,6 +164,7 @@ pub(crate) mod tests {
                 selected: 0,
                 scroll: 0,
                 pending_key: None,
+                refresh_inflight: false,
             },
             request_log: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::metrics::RequestLog::default(),

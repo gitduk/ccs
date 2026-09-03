@@ -368,26 +368,34 @@ impl App {
     }
 
     /// Fetch a provider's model list in the background so routes can be
-    /// configured immediately. Skips providers with no URL or key.
-    fn spawn_model_fetch(&self, name: &str) {
+    /// configured immediately (and the Models panel can refresh with `r`).
+    /// Returns `false` — without starting anything — when the provider is
+    /// missing or has no URL/API key, so callers can report the refusal.
+    /// A fetch that comes back empty reports `ModelsRefreshFailed`.
+    pub(crate) fn spawn_model_fetch(&self, name: &str) -> bool {
         let Some(p) = self.config.providers.get(name).cloned() else {
-            return;
+            return false;
         };
         if p.base_url.is_empty() || p.api_key.is_empty() {
-            return;
+            return false;
         }
         let tx = self.tests.tx.clone();
         let client = self.tests.client.clone();
         let provider_name = name.to_string();
         tokio::spawn(async move {
             let models = crate::tester::fetch_provider_models(&client, &p).await;
-            if !models.is_empty() {
-                let _ = tx.send(super::TestEvent::ModelsOnly {
+            let _ = tx.send(if models.is_empty() {
+                super::TestEvent::ModelsRefreshFailed {
+                    provider: provider_name,
+                }
+            } else {
+                super::TestEvent::ModelsOnly {
                     provider: provider_name,
                     models,
-                });
-            }
+                }
+            });
         });
+        true
     }
 
     /// Store a freshly discovered catalog in the DB and its in-memory mirror.
@@ -686,13 +694,31 @@ impl App {
                     provider: name,
                     models,
                 } => {
+                    let manual_refresh = self.models.refresh_inflight;
+                    self.models.refresh_inflight = false;
                     let provider_id = self
                         .config
                         .providers
                         .get(&name)
                         .map(|p| p.id.clone())
                         .unwrap_or_else(|| name.clone());
-                    self.store_provider_models(&provider_id, &name, models);
+                    self.store_provider_models(&provider_id, &name, models.clone());
+                    if manual_refresh {
+                        self.set_message(
+                            format!("Refreshed {} models for '{name}'", models.len()),
+                            MessageKind::Success,
+                        );
+                    }
+                }
+                TestEvent::ModelsRefreshFailed { provider: name } => {
+                    let manual_refresh = self.models.refresh_inflight;
+                    self.models.refresh_inflight = false;
+                    if manual_refresh {
+                        self.set_message(
+                            format!("Failed to refresh model list for '{name}'"),
+                            MessageKind::Error,
+                        );
+                    }
                 }
                 TestEvent::QuotaCompleted {
                     provider_id,
