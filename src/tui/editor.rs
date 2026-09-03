@@ -77,12 +77,13 @@ pub(super) fn handle_key(
     } else {
         None
     };
-    // Detection failed for this add: a/o pick a format and save without
+    // Detection failed for this add: a/o/g pick a format and save without
     // re-detecting. Skipped in the Routes section, where `a` adds a route.
     if form.detect_failed && !in_routes && form.vim_mode == VimMode::Normal {
         let format = match code {
             KeyCode::Char('a' | 'A') => Some(crate::config::ApiFormat::Anthropic),
             KeyCode::Char('o' | 'O') => Some(crate::config::ApiFormat::OpenAI),
+            KeyCode::Char('g' | 'G') => Some(crate::config::ApiFormat::Gemini),
             _ => None,
         };
         if let Some(format) = format {
@@ -133,7 +134,6 @@ pub(super) fn handle_key(
                 let idx = form.format_suggest.idx.min(len - 1);
                 let choice = choices[idx];
                 form.fields[FORMAT_FIELD_IDX].value = choice.to_string();
-                form.fields[FORMAT_FIELD_IDX].cursor = choice.len();
                 form.format_suggest.reset();
                 form.vim_mode = VimMode::Normal;
                 return Ok(());

@@ -166,25 +166,38 @@ pub async fn handle_models(
         .and_then(|v| v.to_str().ok())
         .map(|v| v.starts_with("Bearer "))
         .unwrap_or(false);
-    let provider_is_openai = provider.api_format == ApiFormat::OpenAI;
 
-    // Pass-through when both sides already speak the same wire format (no
-    // parse+reserialize needed).
-    let response_body = match (provider_is_openai, client_wants_openai) {
-        (false, false) => body,
-        (true, false) => {
+    // Normalise the upstream catalog to the canonical Anthropic shape unless
+    // both sides already speak the same wire format (no parse+reserialize
+    // needed). Gemini catalogs are fetched in their own shape and converted
+    // first, mirroring the per-provider request conversion.
+    let response_body = match (provider.api_format, client_wants_openai) {
+        (ApiFormat::Anthropic, false) | (ApiFormat::OpenAI, true) => body,
+        (ApiFormat::OpenAI, false) => {
             let openai_json: serde_json::Value = serde_json::from_slice(&body)?;
             Bytes::from(serde_json::to_vec(&transform::openai_to_anthropic_models(
                 &openai_json,
             ))?)
         }
-        (false, true) => {
+        (ApiFormat::Anthropic, true) => {
             let anthropic_json: serde_json::Value = serde_json::from_slice(&body)?;
             Bytes::from(serde_json::to_vec(&transform::anthropic_to_openai_models(
                 &anthropic_json,
             ))?)
         }
-        (true, true) => body,
+        (ApiFormat::Gemini, false) => {
+            let gemini_json: serde_json::Value = serde_json::from_slice(&body)?;
+            Bytes::from(serde_json::to_vec(&transform::gemini_to_anthropic_models(
+                &gemini_json,
+            ))?)
+        }
+        (ApiFormat::Gemini, true) => {
+            let gemini_json: serde_json::Value = serde_json::from_slice(&body)?;
+            let anthropic = transform::gemini_to_anthropic_models(&gemini_json);
+            Bytes::from(serde_json::to_vec(&transform::anthropic_to_openai_models(
+                &anthropic,
+            ))?)
+        }
     };
 
     Ok((
@@ -473,12 +486,21 @@ async fn try_providers(
             }
         };
         let model_override = Some(pipeline.req_model_hint.clone()).filter(|m| !m.is_empty());
+        let request_thinking = ctx
+            .req_json
+            .is_some_and(|j| {
+                j.get("thinking")
+                    .and_then(|t| t.get("type"))
+                    .and_then(|t| t.as_str())
+                    .is_some_and(|t| matches!(t, "enabled" | "adaptive"))
+            });
         return if ctx.is_stream {
             handle_streaming_response(
                 response,
-                provider.api_format == ApiFormat::OpenAI,
+                provider.api_format,
                 ctx.client_format,
                 passthrough.is_some(),
+                request_thinking,
                 StreamTrackingCtx {
                     db: state.db.clone(),
                     provider_id: pkey.id,
@@ -495,7 +517,7 @@ async fn try_providers(
         } else {
             handle_buffered_response(
                 response,
-                provider.api_format == ApiFormat::OpenAI,
+                provider.api_format,
                 ctx.client_format,
                 passthrough.is_some(),
                 BufferedTrackingCtx {
@@ -602,7 +624,7 @@ pub async fn handle_responses(
 /// Handle non-streaming response.
 async fn handle_buffered_response(
     response: reqwest::Response,
-    is_openai: bool,
+    provider_format: ApiFormat,
     client_format: ClientFormat,
     passthrough: bool,
     bctx: BufferedTrackingCtx,
@@ -639,11 +661,16 @@ async fn handle_buffered_response(
     // Normalise provider response to the Anthropic canonical form for token
     // extraction. Keep the raw bytes around so the Anthropic→Anthropic
     // pass-through path can return them untouched (no reserialize).
-    let mut usage_json: Option<serde_json::Value> = if is_openai {
-        let openai_json: serde_json::Value = serde_json::from_slice(&body)?;
-        Some(transform::openai_to_anthropic_response(&openai_json)?)
-    } else {
-        serde_json::from_slice::<serde_json::Value>(&body).ok()
+    let mut usage_json: Option<serde_json::Value> = match provider_format {
+        ApiFormat::Anthropic => serde_json::from_slice::<serde_json::Value>(&body).ok(),
+        ApiFormat::OpenAI => {
+            let openai_json: serde_json::Value = serde_json::from_slice(&body)?;
+            Some(transform::openai_to_anthropic_response(&openai_json)?)
+        }
+        ApiFormat::Gemini => {
+            let gemini_json: serde_json::Value = serde_json::from_slice(&body)?;
+            Some(transform::gemini_to_anthropic_response(&gemini_json)?)
+        }
     };
 
     // Stats record what actually served the request, so read the model before
@@ -671,7 +698,9 @@ async fn handle_buffered_response(
                 let out = transform::anthropic_to_openai_response(anthropic_json, api_version)?;
                 Bytes::from(serde_json::to_vec(&out)?)
             }
-            (None, Some(anthropic_json)) if is_openai => {
+            // A non-Anthropic upstream was normalised to canonical above; an
+            // Anthropic client gets that canonical form re-serialized.
+            (None, Some(anthropic_json)) if provider_format != ApiFormat::Anthropic => {
                 Bytes::from(serde_json::to_vec(anthropic_json)?)
             }
             _ => body,
@@ -724,9 +753,10 @@ async fn handle_buffered_response(
 /// Handle streaming response.
 async fn handle_streaming_response(
     response: reqwest::Response,
-    is_openai: bool,
+    provider_format: ApiFormat,
     client_format: ClientFormat,
     passthrough: bool,
+    request_thinking: bool,
     ctx: StreamTrackingCtx,
 ) -> Result<Response, AppError> {
     let model_override = ctx.model_override.clone();
@@ -754,16 +784,23 @@ async fn handle_streaming_response(
     }
 
     // Canonical Anthropic SSE, still carrying the upstream's own model name.
+    // Gemini and OpenAI payloads are translated to that canonical form; an
+    // Anthropic upstream's bytes already are canonical.
     let raw_stream: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>> =
-        if !is_openai {
-            Box::pin(response.bytes_stream().map(|r| {
+        match provider_format {
+            ApiFormat::Anthropic => Box::pin(response.bytes_stream().map(|r| {
                 r.map_err(|e| {
                     tracing::error!("Stream error: {e}");
                     std::io::Error::other(e)
                 })
-            }))
-        } else {
-            Box::pin(transform::openai_stream_to_anthropic(response, None))
+            })),
+            ApiFormat::OpenAI => Box::pin(transform::openai_stream_to_anthropic(response, None)),
+            // `request_thinking` asks Gemini for readable thinking summaries;
+            // thought steps (with their signatures) are always surfaced so
+            // the client can replay them on the next tool-calling turn.
+            ApiFormat::Gemini => {
+                Box::pin(transform::gemini_stream_to_anthropic(response, request_thinking))
+            }
         };
 
     // Track first, rewrite second: stats must see what actually served the
@@ -1344,4 +1381,103 @@ mod tests {
         // survive (it would if passthrough had forwarded raw bytes).
         assert!(json.get("x_upstream_marker").is_none());
     }
+    /// Spin up a Gemini-format proxy wired to a fake upstream speaking the
+    /// Interactions API, returning the proxy address.
+    async fn spawn_gemini_proxy(upstream: Router) -> std::net::SocketAddr {
+        use tokio::net::TcpListener;
+
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(upstream_listener, upstream).await;
+        });
+
+        let mut p = make_provider(true, true);
+        p.api_format = ApiFormat::Gemini;
+        p.api_version = None;
+        p.base_url = format!("http://{upstream_addr}");
+        p.api_key = "AIza-test".into();
+        let mut providers = IndexMap::new();
+        providers.insert("gemini".into(), p);
+        let state = make_state(AppConfig {
+            current: "gemini".into(),
+            listen: "127.0.0.1:7896".into(),
+            providers,
+            db_path: None,
+            request_log_limit: 100,
+        });
+
+        let router = crate::proxy::build_router(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        proxy_addr
+    }
+
+    #[tokio::test]
+    async fn anthropic_client_gemini_provider_buffered_end_to_end() {
+        use axum::Json;
+        use axum::http::StatusCode as AxumStatus;
+        use axum::routing::post;
+
+        // Fake Gemini upstream: validates that the proxy translated the
+        // Anthropic request into stateless Interactions form, then answers
+        // with a canned interaction so the client-facing response can be
+        // asserted. A body missing the translation triggers a 400 instead.
+        async fn interactions(body: axum::body::Bytes) -> impl axum::response::IntoResponse {
+            let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) else {
+                return (AxumStatus::BAD_REQUEST, Json(serde_json::json!({"error": "not json"})));
+            };
+            let translated_ok = v.get("model").is_some()
+                && v.get("store") == Some(&serde_json::Value::Bool(false))
+                && v["input"]
+                    .as_array()
+                    .is_some_and(|steps| steps.first().is_some_and(|s| s["type"] == "user_input"));
+            if !translated_ok {
+                return (
+                    AxumStatus::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "untranslated body"})),
+                );
+            }
+            (
+                AxumStatus::OK,
+                Json(serde_json::json!({
+                    "id": "v1_test",
+                    "status": "completed",
+                    "model": "gemini-3.8-flash",
+                    "usage": {"total_tokens": 33, "total_input_tokens": 11, "total_output_tokens": 22},
+                    "steps": [{
+                        "type": "model_output",
+                        "content": [{"type": "text", "text": "pong from gemini"}]
+                    }]
+                })),
+            )
+        }
+
+        let proxy_addr = spawn_gemini_proxy(
+            Router::new().route("/v1beta/interactions", post(interactions)),
+        )
+        .await;
+
+        let body = r#"{"model":"gemini-3.8-flash","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}"#;
+        let resp = reqwest::Client::new()
+            .post(format!("http://{proxy_addr}/v1/messages"))
+            .header("content-type", "application/json")
+            .header("x-api-key", "AIza-test")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), AxumStatus::OK);
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(json["type"], "message");
+        assert_eq!(json["content"][0]["type"], "text");
+        assert_eq!(json["content"][0]["text"], "pong from gemini");
+        assert_eq!(json["usage"]["input_tokens"], 11);
+        assert_eq!(json["usage"]["output_tokens"], 22);
+    }
 }
+

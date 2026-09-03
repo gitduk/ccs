@@ -2,14 +2,14 @@
 
 中文 | [English](README.md)
 
-轻量级 API 代理，支持在多个提供商之间路由 Claude Code 流量，并自动完成 Anthropic ↔ OpenAI 格式转换。
+轻量级 API 代理，支持在多个提供商之间路由 Claude Code 流量，并自动完成 Anthropic ↔ OpenAI ↔ Gemini 格式转换。
 
 ## 功能特性
 
 - **多提供商支持**：配置并切换多个 API 提供商
+- **多提供商支持**：配置并切换多个 API 提供商（Anthropic / OpenAI / Gemini 原生格式）
 - **双端点**：同时服务 Anthropic（`/v1/messages`）和 OpenAI（`/v1/chat/completions`、`/v1/responses`）客户端，无需手动切换
-- **格式转换**：Anthropic 与 OpenAI API 格式双向自动转换
-- **流式响应**：完整支持 Server-Sent Events (SSE) 流式输出
+- **格式转换**：Anthropic、OpenAI 与 Gemini（原生 Interactions API）之间自动双向转换
 - **TUI 管理界面**：交互式终端 UI，用于提供商配置管理
 - **热重载**：无需重启即可从磁盘重载配置（TUI 按 `r`）
 - **模型路由**：每个提供商可配置 glob 规则，在请求发往上游前改写模型名
@@ -60,7 +60,7 @@ TUI 支持：
 - 浏览模型列表与请求日志
 - 启动 / 停止代理服务器
 
-添加提供商时只需填写 **Name**、**Base URL**、**API Key**，保存时会自动探测 API 格式。若探测失败，表单会保留并提示：可修正 Base URL / API Key 后按 `q` 重试，或按 `a`（Anthropic）/ `o`（OpenAI）手动指定格式保存。
+添加提供商时只需填写 **Name**、**Base URL**、**API Key**，保存时会自动探测 API 格式。若探测失败，表单会保留并提示：可修正 Base URL / API Key 后按 `q` 重试，或按 `a`（Anthropic）/ `o`（OpenAI）/ `g`（Gemini）手动指定格式保存。
 
 ### 2. 或直接启动代理
 
@@ -148,7 +148,7 @@ export OPENAI_API_KEY=any-value
 | `id` | 自动生成 | 稳定 UUID，重命名后不变（数据库以此为键） |
 | `base_url` | — | 上游 Base URL |
 | `api_key` | — | 明文 Key，或 `$ENV_VAR` 从环境变量读取 |
-| `api_format` | 自动探测 | `anthropic` 或 `openai` |
+| `api_format` | 自动探测 | `anthropic`、`openai` 或 `gemini` |
 | `api_version` | `responses` | 仅 OpenAI 格式生效：`responses` 或 `chat_completions` |
 | `enabled` | `true` | 禁用后转发时跳过该提供商 |
 | `fallback` | `true` | 是否参与 fallback 轮询（TUI 新建时写入 `false`） |
@@ -200,6 +200,29 @@ routes 在 `model_map` 之前应用，且按提供商各自生效：请求 fallb
 ```json
 "api_version": "chat_completions"
 ```
+### Gemini 提供商
+
+`api_format` 为 `"gemini"` 时，请求会翻译成 Google Gemini 的原生 Interactions API（`POST {base_url}/v1beta/interactions`，认证头 `x-goog-api-key`），流式请求自动加 `?alt=sse`。代理总是以无状态模式调用（`store: false`，每轮重发完整历史），因此多轮对话与工具调用循环（`function_call` ↔ `tool_result`）都直接可用。请求中的 `model` 名照常经过该提供商的 `model_map` / `routes` 改写，所以把 Claude 模型映射到 Gemini 模型即可，例如：
+
+```json
+{
+  "gemini": {
+    "id": "…",
+    "base_url": "https://generativelanguage.googleapis.com",
+    "api_key": "$GEMINI_API_KEY",
+    "api_format": "gemini",
+    "enabled": true,
+    "fallback": true,
+    "model_map": {
+      "claude-sonnet-4-20250514": "gemini-3.8-flash"
+    }
+  }
+}
+```
+
+客户端无需感知上游格式：Anthropic 客户端直接指向本代理的 `/v1/messages` 即可，OpenAI 客户端则走 `/v1/chat/completions` 或 `/v1/responses`。
+
+已知限制：上游暂不转发 `max_tokens` / `max_tokens_cap`（Interactions 请求体未暴露对应的等效字段）；thought 步骤始终以 thinking 块（含真实签名）透传，以保证下一轮工具调用能原样回放——客户端请求 thinking 时才额外开启 readable 摘要（`thinking_level: high` + 思考摘要）。
 
 ### 按提供商控制 Fallback
 
@@ -287,7 +310,7 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
 
 ### 提供商编辑器（`a` / `e`）
 
-字段依次为 Name、Base URL、API Key、Format，以及 Routes 区域。Format 是下拉选择：聚焦后按 `↓`/`↑`（或 `Ctrl-J`/`Ctrl-K`）在 `anthropic` / `chat_completions` / `responses` 间选择，`Enter` 确认。选 `chat_completions` / `responses` 表示该提供商为 OpenAI 格式并带上对应 API 版本；选 `anthropic` 则为 Anthropic 格式。Vim 风格，默认处于 Normal 模式。
+字段依次为 Name、Base URL、API Key、Format，以及 Routes 区域。Format 是下拉选择：聚焦后按 `↓`/`↑`（或 `Ctrl-J`/`Ctrl-K`）在 `anthropic` / `chat_completions` / `responses` / `gemini` 间选择，`Enter` 确认。选 `chat_completions` / `responses` 表示该提供商为 OpenAI 格式并带上对应 API 版本；选 `anthropic` 或 `gemini` 则为对应原生格式。Vim 风格，默认处于 Normal 模式。
 
 | 按键 | 操作 |
 | --- | --- |
@@ -404,6 +427,13 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
   - `length` → `max_tokens`
   - `tool_calls` → `tool_use`
 
+### Gemini（上游为 `api_format: "gemini"` 时）
+
+下游客户端格式不变（Anthropic / OpenAI），只有发往 Gemini 的上游请求换成原生 Interactions 形状：
+
+- 请求：Anthropic canonical → `input` steps（`user_input` / `model_output` / `thought` / `function_call` / `function_result`）+ `system_instruction` + `tools`，无状态模式（`store: false`）
+- 响应：`steps` → canonical（`text` / `tool_use`），`usage` 的 `total_input_tokens` / `total_output_tokens` → Anthropic token 统计
+- 流式：Gemini SSE（`step.start` / `step.delta` / `step.stop`）→ Anthropic SSE 事件（thought 步骤始终转成 thinking 块并携带签名；readable 摘要仅在客户端请求 thinking 时透传）
 ## 安全说明
 
 - 以 `$` 开头的 API Key 从环境变量读取

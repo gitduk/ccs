@@ -2,13 +2,13 @@
 
 English | [中文](README.zh.md)
 
-A lightweight API proxy for routing Claude Code traffic between multiple providers with Anthropic ↔ OpenAI format conversion.
+A lightweight API proxy for routing Claude Code traffic between multiple providers with automatic Anthropic ↔ OpenAI ↔ Gemini format conversion.
 
 ## Features
 
-- **Multi-Provider Support**: Configure and switch between multiple API providers
+- **Multi-Provider Support**: Configure and switch between multiple API providers (Anthropic / OpenAI / native Gemini formats)
 - **Dual-Endpoint**: Serve Anthropic (`/v1/messages`) and OpenAI (`/v1/chat/completions`, `/v1/responses`) clients simultaneously — no toggle needed
-- **Format Conversion**: Automatic bidirectional translation between Anthropic and OpenAI API formats
+- **Format Conversion**: Automatic bidirectional translation between Anthropic, OpenAI and Gemini (native Interactions API) formats
 - **Streaming Support**: Full support for Server-Sent Events (SSE) streaming responses
 - **TUI Management**: Interactive terminal UI for provider configuration
 - **Hot Reload**: Reload configuration from disk without restarting the proxy (press `r` in the TUI)
@@ -60,7 +60,7 @@ The TUI allows you to:
 - Browse models and request logs
 - Start/stop the proxy server
 
-When adding a provider you only enter **Name**, **Base URL** and **API Key** — the API format is detected automatically on save. If detection fails the form stays open; fix the Base URL / API Key and press `q` to retry, or press `a` (Anthropic) / `o` (OpenAI) to save manually with a chosen format.
+When adding a provider you only enter **Name**, **Base URL** and **API Key** — the API format is detected automatically on save. If detection fails the form stays open; fix the Base URL / API Key and press `q` to retry, or press `a` (Anthropic) / `o` (OpenAI) / `g` (Gemini) to save manually with a chosen format.
 
 ### 2. Or start the proxy directly
 
@@ -148,7 +148,7 @@ Configuration is stored in `~/.ccs/config.json`. Set `CCS_CONFIG_DIR` to use a d
 | `id` | generated | Stable UUID; survives renames (used as the DB key) |
 | `base_url` | — | Upstream base URL |
 | `api_key` | — | Literal key, or `$ENV_VAR` to read from the environment |
-| `api_format` | detected | `anthropic` or `openai` |
+| `api_format` | detected | `anthropic`, `openai` or `gemini` |
 | `api_version` | `responses` | OpenAI-only: `responses` or `chat_completions` |
 | `enabled` | `true` | Disabled providers are skipped when forwarding |
 | `fallback` | `true` | Participate in the fallback rotation (TUI adds set it to `false`) |
@@ -200,6 +200,30 @@ For OpenAI-format providers, set `api_version` to control which upstream endpoin
 ```json
 "api_version": "chat_completions"
 ```
+
+### Gemini Providers
+
+With `"api_format": "gemini"`, requests are translated into Google's native Gemini Interactions API (`POST {base_url}/v1beta/interactions`, authenticated with the `x-goog-api-key` header); streaming requests automatically append `?alt=sse`. ccs always calls Gemini in stateless mode (`store: false`, resending the full history each turn), so multi-turn conversations and tool-call loops (`function_call` ↔ `tool_result`) work directly. The request's `model` still goes through this provider's `model_map` / `routes`, so point a Claude model at a Gemini one to switch, e.g.:
+
+```json
+{
+  "gemini": {
+    "id": "…",
+    "base_url": "https://generativelanguage.googleapis.com",
+    "api_key": "$GEMINI_API_KEY",
+    "api_format": "gemini",
+    "enabled": true,
+    "fallback": true,
+    "model_map": {
+      "claude-sonnet-4-20250514": "gemini-3.8-flash"
+    }
+  }
+}
+```
+
+Clients never need to know the upstream format: point an Anthropic client at this proxy's `/v1/messages`, or an OpenAI client at `/v1/chat/completions` / `/v1/responses`.
+
+Known limitations: `max_tokens` / `max_tokens_cap` are not forwarded upstream (the Interactions request exposes no equivalent field); Gemini `thought` steps are always surfaced as Anthropic thinking blocks carrying their real signature so the next tool-calling turn can be replayed verbatim — readable thinking summaries (mapped from the Claude request's thinking setting to `thinking_level: high`) are only requested when the client asked for thinking.
 
 ### Per-Provider Fallback
 Set `"fallback": true` to include a provider in the fallback rotation when the active provider fails. Providers added through the TUI start at `false`, and a provider hand-written into the config without the field also defaults to `false`.
@@ -286,7 +310,7 @@ Copying uses `wl-copy` (Wayland).
 
 ### Provider editor (`a` / `e`)
 
-Fields: Name, Base URL, API Key, Format, then the Routes section. The Format field is a dropdown — focus it and press `↓`/`↑` (or `Ctrl-J`/`Ctrl-K`) to choose from `anthropic` / `chat_completions` / `responses`, then `Enter` to select. Choosing a `chat_completions` / `responses` sets the provider to OpenAI with that API version; `anthropic` uses the Anthropic format. Vim-style, starts in Normal mode.
+Fields: Name, Base URL, API Key, Format, then the Routes section. The Format field is a dropdown — focus it and press `↓`/`↑` (or `Ctrl-J`/`Ctrl-K`) to choose from `anthropic` / `chat_completions` / `responses` / `gemini`, then `Enter` to select. Choosing `chat_completions` / `responses` sets the provider to OpenAI with that API version; `anthropic` or `gemini` uses that provider's native format. Vim-style, starts in Normal mode.
 
 | Key | Action |
 | --- | --- |
@@ -403,6 +427,13 @@ Configuration is reloaded from the TUI (`r`), not over HTTP.
   - `length` → `max_tokens`
   - `tool_calls` → `tool_use`
 
+### Gemini (when the upstream is `api_format: "gemini"`)
+
+The client-facing formats stay the same (Anthropic / OpenAI); only the request sent to Gemini is translated into the native Interactions shape:
+
+- Requests: Anthropic canonical → `input` steps (`user_input` / `model_output` / `thought` / `function_call` / `function_result`) + `system_instruction` + `tools`, in stateless mode (`store: false`)
+- Responses: `steps` → canonical (`text` / `tool_use`); `usage`'s `total_input_tokens` / `total_output_tokens` feed the Anthropic token stats
+- Streaming: Gemini SSE (`step.start` / `step.delta` / `step.stop`) → Anthropic SSE events (thought steps always become thinking blocks with their signature; readable summaries only when the client requested thinking)
 ## Security Notes
 
 - API keys starting with `$` are resolved from environment variables

@@ -188,12 +188,18 @@ pub struct Provider {
     pub max_tokens_cap: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Upstream wire format a provider speaks. The proxy normalises client
+/// traffic to the Anthropic canonical form internally, then converts to
+/// whichever of these formats the configured provider expects.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ApiFormat {
     #[serde(rename = "anthropic")]
     Anthropic,
     #[serde(rename = "openai")]
     OpenAI,
+    /// Google Gemini native REST — the Interactions API (`/v1beta/interactions`).
+    #[serde(rename = "gemini")]
+    Gemini,
 }
 
 impl std::fmt::Display for ApiFormat {
@@ -201,23 +207,25 @@ impl std::fmt::Display for ApiFormat {
         match self {
             ApiFormat::Anthropic => write!(f, "anthropic"),
             ApiFormat::OpenAI => write!(f, "openai"),
+            ApiFormat::Gemini => write!(f, "gemini"),
         }
     }
 }
 
 /// The Format field's dropdown values (see [`Provider::format_choice`] and
 /// [`Provider::set_format_choice`]). `chat_completions` / `responses` map to
-/// an OpenAI provider with that API version; `anthropic` to the Anthropic format.
-pub const FORMAT_CHOICES: [&str; 3] = ["anthropic", "chat_completions", "responses"];
+/// an OpenAI provider with that API version; `anthropic` and `gemini` map to
+/// those providers' native formats.
+pub const FORMAT_CHOICES: [&str; 4] = ["anthropic", "chat_completions", "responses", "gemini"];
 
 impl Provider {
     /// Effective single-valued format choice for this provider: `anthropic`
-    /// or, for OpenAI providers, its configured API version.
+    /// or `gemini`, or, for OpenAI providers, its configured API version.
     pub fn format_choice(&self) -> String {
-        if self.api_format == ApiFormat::Anthropic {
-            "anthropic".to_string()
-        } else {
-            self.openai_api_version().to_string()
+        match self.api_format {
+            ApiFormat::Anthropic => "anthropic".to_string(),
+            ApiFormat::OpenAI => self.openai_api_version().to_string(),
+            ApiFormat::Gemini => "gemini".to_string(),
         }
     }
 
@@ -231,6 +239,10 @@ impl Provider {
             "responses" => {
                 self.api_format = ApiFormat::OpenAI;
                 self.api_version = Some(OpenAiApiVersion::Responses);
+            }
+            "gemini" => {
+                self.api_format = ApiFormat::Gemini;
+                self.api_version = None;
             }
             _ => {
                 self.api_format = ApiFormat::Anthropic;
@@ -261,11 +273,12 @@ impl Provider {
         resolve_api_key_str(&self.api_key)
     }
 
-    /// Build the auth header (name, value) for this provider's API format.
     pub fn auth_header(&self, api_key: &str) -> (&'static str, String) {
         match self.api_format {
             ApiFormat::Anthropic => ("x-api-key", api_key.to_string()),
             ApiFormat::OpenAI => ("authorization", format!("Bearer {api_key}")),
+            // Gemini authenticates with the raw API key (see the Gemini REST docs).
+            ApiFormat::Gemini => ("x-goog-api-key", api_key.to_string()),
         }
     }
 
@@ -338,8 +351,8 @@ impl Provider {
     }
 
     /// Compute the chat endpoint URL for this provider's API format and the
-    /// given OpenAI API version (ignored for Anthropic format). Single source
-    /// of truth for the format/version -> path mapping.
+    /// given OpenAI API version (ignored for Anthropic/Gemini formats). Single
+    /// source of truth for the format/version -> path mapping.
     pub fn endpoint_url(&self, version: OpenAiApiVersion) -> String {
         let base = self.base_url.trim_end_matches('/');
         match self.api_format {
@@ -348,6 +361,9 @@ impl Provider {
                 OpenAiApiVersion::ChatCompletions => format!("{base}/v1/chat/completions"),
                 OpenAiApiVersion::Responses => format!("{base}/v1/responses"),
             },
+            // Native Gemini is the Interactions API; streaming appends
+            // `?alt=sse` in the forwarder, so this is the bare path.
+            ApiFormat::Gemini => format!("{base}/v1beta/interactions"),
         }
     }
 
@@ -360,6 +376,8 @@ impl Provider {
         let body = if self.api_format == ApiFormat::OpenAI && version == OpenAiApiVersion::Responses
         {
             format!(r#"{{"model":"{model}","max_output_tokens":1,"input":"ping"}}"#)
+        } else if self.api_format == ApiFormat::Gemini {
+            format!(r#"{{"model":"{model}","input":"ping"}}"#)
         } else {
             format!(
                 r#"{{"model":"{model}","max_tokens":1,"messages":[{{"role":"user","content":"ping"}}]}}"#
@@ -1019,6 +1037,40 @@ mod tests {
         );
         cfg.sort_providers_by_enabled();
         let order: Vec<&str> = cfg.providers.keys().map(|k| k.as_str()).collect();
+
         assert_eq!(order, vec!["prov-c", "prov-a", "prov-b"]);
+    }
+
+    #[test]
+    fn gemini_format_choice_round_trips() {
+        let mut p = make_provider("key", ApiFormat::Anthropic);
+        p.set_format_choice("gemini");
+        assert_eq!(p.api_format, ApiFormat::Gemini);
+        assert_eq!(p.api_version, None);
+        assert_eq!(p.format_choice(), "gemini");
+        assert!(FORMAT_CHOICES.contains(&"gemini"));
+    }
+
+    #[test]
+    fn gemini_uses_goog_api_key_auth_header() {
+        let p = make_provider("AIza-key", ApiFormat::Gemini);
+        let (name, value) = p.auth_header(&p.resolve_api_key().unwrap());
+        assert_eq!(name, "x-goog-api-key");
+        assert_eq!(value, "AIza-key");
+    }
+
+    #[test]
+    fn gemini_endpoint_is_interactions_api() {
+        let p = make_provider("key", ApiFormat::Gemini);
+        assert_eq!(
+            p.endpoint_url(OpenAiApiVersion::Responses),
+            "https://api.example.com/v1beta/interactions"
+        );
+        let (url, body) = p.chat_url_and_body("gemini-3.8-flash");
+        assert_eq!(
+            url,
+            "https://api.example.com/v1beta/interactions"
+        );
+        assert!(body.contains("\"input\":\"ping\""));
     }
 }

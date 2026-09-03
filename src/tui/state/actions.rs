@@ -134,7 +134,7 @@ impl App {
             .cloned()
             .unwrap_or_default();
 
-        // One-shot: consume the explicit a/o format choice (if any) on this
+        // One-shot: consume the explicit a/o/g format choice (if any) on this
         // save attempt, so a later `q` re-runs detection instead of a stale
         // manual choice left behind by a validation-error or IO-error attempt.
         let manual_format = self.form.as_mut().and_then(|f| f.manual_format.take());
@@ -183,7 +183,7 @@ impl App {
             // Placeholder format — overwritten below by the form choice or
             // by auto-detection for a new provider.
             api_format: existing
-                .map(|p| p.api_format.clone())
+                .map(|p| p.api_format)
                 .unwrap_or(crate::config::ApiFormat::Anthropic),
             model_map,
             routes: fields.routes.clone(),
@@ -197,7 +197,7 @@ impl App {
             test_model: existing.and_then(|p| p.test_model.clone()),
             max_tokens_cap: existing.and_then(|p| p.max_tokens_cap),
         };
-        // An explicit a/o keypress after detection failed wins over whatever
+        // An explicit a/o/g keypress after detection failed wins over whatever
         // text the user typed into the Format field.
         let has_manual_format = manual_format.is_some();
         if let Some(format) = manual_format {
@@ -208,6 +208,7 @@ impl App {
                     // to Responses, matching the pre-Format-field manual path.
                     provider.api_format = crate::config::ApiFormat::OpenAI;
                 }
+                crate::config::ApiFormat::Gemini => provider.set_format_choice("gemini"),
             }
         } else if let Some(choice) = &fields.format_choice {
             provider.set_format_choice(choice);
@@ -244,7 +245,7 @@ impl App {
                     Ok(key) => crate::tester::detect_api_format(&client, &base_url, &key, None)
                         .await
                         .ok_or_else(|| {
-                            "Could not detect API format - fix Base URL / API Key and retry, or press a/o in the form to save manually"
+                            "Could not detect API format - fix Base URL / API Key and retry, or press a/o/g in the form to save manually"
                                 .to_string()
                         }),
                     Err(e) => Err(format!("API key resolution failed: {e}")),

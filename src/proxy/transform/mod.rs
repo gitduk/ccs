@@ -1,9 +1,13 @@
+mod gemini;
 mod models;
 mod request;
 mod response;
 mod stream;
 
-pub use models::{anthropic_to_openai_models, openai_to_anthropic_models};
+pub use gemini::{
+    anthropic_to_gemini_request, gemini_stream_to_anthropic, gemini_to_anthropic_response,
+};
+pub use models::{anthropic_to_openai_models, gemini_to_anthropic_models, openai_to_anthropic_models};
 pub use request::{
     anthropic_to_openai_request, clamp_max_tokens, map_anthropic_model,
     openai_to_anthropic_request, patch_thinking_history, to_openai,

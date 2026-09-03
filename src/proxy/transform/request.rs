@@ -17,7 +17,7 @@ fn get_mapped_model(req: &Value, provider: &Provider) -> String {
 }
 
 /// Extract system text from Anthropic request
-fn extract_system_text(req: &Value) -> String {
+pub(crate) fn extract_system_text(req: &Value) -> String {
     req.get("system")
         .map(|system| match system {
             Value::String(s) => s.clone(),

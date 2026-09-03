@@ -46,8 +46,14 @@ pub fn models_request_at(
 ) -> reqwest::RequestBuilder {
     let base = base_url.trim_end_matches('/');
     let (auth_key, auth_val) = provider.auth_header(api_key);
+    // Gemini's model catalog lives at /v1beta/models on the API root; all
+    // other formats expose /v1/models.
+    let models_path = match provider.api_format {
+        ApiFormat::Gemini => "/v1beta/models",
+        _ => "/v1/models",
+    };
     let mut req = client
-        .get(format!("{base}/v1/models"))
+        .get(format!("{base}{models_path}"))
         .header(auth_key, auth_val);
     if provider.api_format == ApiFormat::Anthropic {
         req = req
@@ -68,6 +74,9 @@ pub fn root_base_url(base_url: &str) -> Option<String> {
 }
 
 /// Forward a request to the upstream provider.
+///
+/// `stream` selects Gemini's SSE form (`?alt=sse` on the interactions
+/// endpoint); it is ignored by the Anthropic and OpenAI paths.
 pub async fn forward_request(
     client: &Client,
     provider: &Provider,
@@ -75,8 +84,12 @@ pub async fn forward_request(
     body: Bytes,
     incoming_headers: &HeaderMap,
     openai_api_version: OpenAiApiVersion,
+    stream: bool,
 ) -> Result<reqwest::Response> {
-    let url = provider.endpoint_url(openai_api_version);
+    let mut url = provider.endpoint_url(openai_api_version);
+    if provider.api_format == ApiFormat::Gemini && stream {
+        url.push_str("?alt=sse");
+    }
     let (auth_key, auth_val) = provider.auth_header(api_key);
 
     let mut request = client.post(&url);

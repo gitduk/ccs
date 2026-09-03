@@ -429,6 +429,9 @@ fn build_test_curl(provider: &Provider, model: &str) -> Result<String, String> {
         ApiFormat::OpenAI => {
             cmd.push_str(&format!("  -H 'Authorization: Bearer {api_key}' \\\n"));
         }
+        ApiFormat::Gemini => {
+            cmd.push_str(&format!("  -H 'x-goog-api-key: {api_key}' \\\n"));
+        }
     }
 
     cmd.push_str(&format!("  -d '{body}'"));

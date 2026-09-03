@@ -1328,7 +1328,7 @@ fn patch_message_start_model(event: &str, model: &str) -> String {
 }
 
 /// Serialize a single SSE event (`event:` + `data:` lines) for any wire format.
-fn sse_event(event_type: &str, data: &Value) -> String {
+pub(crate) fn sse_event(event_type: &str, data: &Value) -> String {
     format!(
         "event: {event_type}\ndata: {}\n\n",
         serde_json::to_string(data).unwrap_or_default()

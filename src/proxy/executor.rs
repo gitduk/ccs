@@ -7,6 +7,7 @@ use bytes::Bytes;
 use crate::config::{ApiFormat, OpenAiApiVersion, Provider};
 use crate::error::AppError;
 use crate::proxy::{forwarder, transform};
+use serde_json::Value;
 
 /// Providers discovered at runtime to not support `/v1/responses` (an
 /// endpoint-style 404 followed by a successful `/v1/chat/completions` retry).
@@ -120,26 +121,48 @@ pub(crate) async fn execute_provider_request(
 ) -> Result<ProviderRequestOutcome, AppError> {
     let t0 = std::time::Instant::now();
     let passthrough_active = passthrough.is_some();
-    let initial_api_version = if passthrough_active {
+
+    // Which upstream conversation the request takes: OpenAI variants get a
+    // normalised-to-OpenAI body (or raw bytes in passthrough), Anthropic
+    // providers get the canonical body patched in place, and Gemini providers
+    // get a canonical→Interactions translation.
+    let plan = if passthrough_active {
         // Passthrough forwards raw bytes to the provider's configured variant
         // (already guaranteed to match the client's and not be known-unsupported).
-        Some(provider.openai_api_version_enum())
-    } else if provider.api_format == ApiFormat::OpenAI {
-        match provider.openai_api_version_enum() {
-            // A previous request proved /v1/responses is missing upstream.
-            OpenAiApiVersion::Responses if responses_known_unsupported(provider) => {
-                Some(OpenAiApiVersion::ChatCompletions)
-            }
-            v => Some(v),
-        }
+        UpstreamPlan::OpenAi(provider.openai_api_version_enum())
     } else {
-        None
+        match provider.api_format {
+            ApiFormat::Anthropic => UpstreamPlan::Anthropic,
+            ApiFormat::Gemini => UpstreamPlan::Gemini,
+            ApiFormat::OpenAI => {
+                let version = match provider.openai_api_version_enum() {
+                    // A previous request proved /v1/responses is missing upstream.
+                    OpenAiApiVersion::Responses if responses_known_unsupported(provider) => {
+                        OpenAiApiVersion::ChatCompletions
+                    }
+                    v => v,
+                };
+                UpstreamPlan::OpenAi(version)
+            }
+        }
     };
-    let request_json = if initial_api_version.is_some() {
+
+    let needs_json = matches!(&plan, UpstreamPlan::OpenAi(_) | UpstreamPlan::Gemini);
+    let request_json = if needs_json {
         Some(req_json.ok_or_else(|| AppError::Transform("Invalid JSON body".into()))?)
     } else {
         None
     };
+
+    let is_stream = request_json
+        .and_then(|j| j.get("stream").and_then(|s| s.as_bool()))
+        .or_else(|| {
+            serde_json::from_slice::<serde_json::Value>(body)
+                .ok()
+                .and_then(|j| j.get("stream").and_then(|s| s.as_bool()))
+        })
+        .unwrap_or(false);
+
     let make_openai_body = |api_version: OpenAiApiVersion| -> Result<Bytes, AppError> {
         let transformed = transform::to_openai(
             request_json.expect("OpenAI request JSON should exist"),
@@ -152,34 +175,25 @@ pub(crate) async fn execute_provider_request(
     let upstream_body = if passthrough_active {
         patch_stream_usage(passthrough.unwrap_or(body))
     } else {
-        match initial_api_version.as_ref() {
-            Some(api_version) => make_openai_body(api_version.clone())?,
-            None => {
-                let patched = req_json.and_then(|req| {
-                    let after_model_map = transform::map_anthropic_model(req, provider);
-                    let after_thinking = if provider.inject_thinking_history {
-                        let base = after_model_map.as_ref().unwrap_or(req);
-                        transform::patch_thinking_history(base, provider.strict_thinking_history)
-                            .or(after_model_map)
-                    } else {
-                        after_model_map
-                    };
-                    transform::clamp_max_tokens(
-                        after_thinking.as_ref().unwrap_or(req),
-                        provider.max_tokens_cap,
-                    )
-                    .or(after_thinking)
-                });
-                match patched {
-                    Some(v) => Bytes::from(serde_json::to_vec(&v)?),
-                    None => body.clone(),
-                }
+        match &plan {
+            UpstreamPlan::OpenAi(api_version) => make_openai_body(api_version.clone())?,
+            UpstreamPlan::Gemini => {
+                // `needs_json` above guarantees this request carries JSON.
+                let req = request_json.expect("Gemini requires canonical JSON");
+                let canonical =
+                    patched_canonical(Some(req), provider).unwrap_or_else(|| req.clone());
+                let gemini_req = transform::anthropic_to_gemini_request(&canonical, provider)?;
+                Bytes::from(serde_json::to_vec(&gemini_req)?)
             }
+            UpstreamPlan::Anthropic => match patched_canonical(req_json, provider) {
+                Some(v) => Bytes::from(serde_json::to_vec(&v)?),
+                None => body.clone(),
+            },
         }
     };
 
-    let mut response = match initial_api_version.as_ref() {
-        Some(api_version) => {
+    let mut response = match &plan {
+        UpstreamPlan::OpenAi(api_version) => {
             forwarder::forward_request(
                 client,
                 provider,
@@ -187,10 +201,12 @@ pub(crate) async fn execute_provider_request(
                 upstream_body,
                 headers,
                 api_version.clone(),
+                is_stream,
             )
             .await?
         }
-        None => {
+        // Anthropic and Gemini providers ignore the OpenAI version argument.
+        _ => {
             forwarder::forward_request(
                 client,
                 provider,
@@ -198,15 +214,16 @@ pub(crate) async fn execute_provider_request(
                 upstream_body,
                 headers,
                 OpenAiApiVersion::Responses,
+                is_stream,
             )
             .await?
         }
     };
 
-    if !passthrough_active
-        && matches!(initial_api_version, Some(OpenAiApiVersion::Responses))
-        && response.status() == StatusCode::NOT_FOUND
-    {
+    let responses_404_fallback = !passthrough_active
+        && matches!(&plan, UpstreamPlan::OpenAi(OpenAiApiVersion::Responses))
+        && response.status() == StatusCode::NOT_FOUND;
+    if responses_404_fallback {
         let not_found_body = response.bytes().await?;
         if should_fallback_from_responses_404(&not_found_body) {
             tracing::warn!(
@@ -220,6 +237,7 @@ pub(crate) async fn execute_provider_request(
                 make_openai_body(OpenAiApiVersion::ChatCompletions)?,
                 headers,
                 OpenAiApiVersion::ChatCompletions,
+                is_stream,
             )
             .await?;
             // Only cache once the retry proves chat/completions works, so a
@@ -241,6 +259,32 @@ pub(crate) async fn execute_provider_request(
         latency_ms: t0.elapsed().as_millis() as u64,
     })
 }
+
+/// Which upstream path a request takes inside [`execute_provider_request`].
+enum UpstreamPlan {
+    Anthropic,
+    OpenAi(OpenAiApiVersion),
+    Gemini,
+}
+
+/// Apply the model-rewrite/thinking/cap patches an Anthropic-format body
+/// needs before it is serialised upstream (shared by Anthropic and the
+/// Gemini translation, which starts from the same canonical value).
+fn patched_canonical(req_json: Option<&serde_json::Value>, provider: &Provider) -> Option<Value> {
+    let req = req_json?;
+    let after_model_map = transform::map_anthropic_model(req, provider);
+    let after_thinking = if provider.inject_thinking_history {
+        let base = after_model_map.as_ref().unwrap_or(req);
+        transform::patch_thinking_history(base, provider.strict_thinking_history)
+            .or(after_model_map)
+    } else {
+        after_model_map
+    };
+    transform::clamp_max_tokens(after_thinking.as_ref().unwrap_or(req), provider.max_tokens_cap)
+        .or(after_thinking)
+}
+
+
 
 pub(crate) async fn probe_provider_message(
     client: &reqwest::Client,

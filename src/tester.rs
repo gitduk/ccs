@@ -44,8 +44,8 @@ fn probe_provider(base_url: &str, api_key: &str, api_format: ApiFormat) -> Provi
 
 /// Auto-detect which API format a provider's `base_url` speaks, by probing
 /// candidates in priority order: Anthropic, OpenAI Chat Completions, OpenAI
-/// Responses. Returns the first candidate that completes a real request
-/// successfully, or `None` if none of them do.
+/// Responses, Gemini. Returns the first candidate that completes a real
+/// request successfully, or `None` if none of them do.
 ///
 /// A real model name is required to tell "wrong format" apart from "right
 /// format, unknown model" — a bogus model name gets rejected by every
@@ -53,7 +53,8 @@ fn probe_provider(base_url: &str, api_key: &str, api_format: ApiFormat) -> Provi
 /// is used directly. Otherwise this fetches a model list first (trying
 /// OpenAI's `/v1/models` before Anthropic's, since many Anthropic-compatible
 /// relays don't expose a model-list endpoint at all — an already-known real
-/// case is DeepSeek's Anthropic-compatible endpoint).
+/// case is DeepSeek's Anthropic-compatible endpoint; Gemini uses its own
+/// `/v1beta/models` catalog).
 pub async fn detect_api_format(
     client: &reqwest::Client,
     base_url: &str,
@@ -64,17 +65,26 @@ pub async fn detect_api_format(
         Some(m) => (m.to_string(), vec![m.to_string()]),
         None => {
             // Side-effect-free GETs, unlike the completion probes below — run
-            // both candidates concurrently instead of paying full latency twice.
+            // the candidates concurrently instead of paying full latency each.
             let openai_probe = probe_provider(base_url, api_key, ApiFormat::OpenAI);
             let anthropic_probe = probe_provider(base_url, api_key, ApiFormat::Anthropic);
-            let (openai_models, anthropic_models) = tokio::join!(
+            let gemini_probe = probe_provider(base_url, api_key, ApiFormat::Gemini);
+            let (openai_models, anthropic_models, gemini_models) = tokio::join!(
                 fetch_provider_models(client, &openai_probe),
                 fetch_provider_models(client, &anthropic_probe),
+                fetch_provider_models(client, &gemini_probe),
             );
             if !openai_models.is_empty() {
                 (openai_models[0].clone(), openai_models)
             } else if !anthropic_models.is_empty() {
                 (anthropic_models[0].clone(), anthropic_models)
+            } else if !gemini_models.is_empty() {
+                // The catalog is unordered and mixes text, image, TTS and
+                // embedding models; the probe needs a conversational one.
+                let model = first_text_model(&gemini_models)
+                    .unwrap_or(gemini_models[0].as_str())
+                    .to_string();
+                (model, gemini_models)
             } else {
                 return None;
             }
@@ -91,10 +101,11 @@ pub async fn detect_api_format(
         (ApiFormat::Anthropic, None),
         (ApiFormat::OpenAI, Some(OpenAiApiVersion::ChatCompletions)),
         (ApiFormat::OpenAI, Some(OpenAiApiVersion::Responses)),
+        (ApiFormat::Gemini, None),
     ];
 
     for (api_format, api_version) in candidates {
-        let mut candidate = probe_provider(base_url, api_key, api_format.clone());
+        let mut candidate = probe_provider(base_url, api_key, api_format);
         candidate.api_version = api_version.clone();
         match probe_provider_message(client, &candidate, api_key, &req_json).await {
             Ok((status, _)) if status.is_success() => {
@@ -362,7 +373,8 @@ async fn check_image_support(
 }
 
 /// Returns true if a JSON response body contains actual structured tool-call content.
-/// Handles Anthropic messages, OpenAI chat completions, and OpenAI Responses API formats.
+/// Handles Anthropic messages, OpenAI chat completions, OpenAI Responses API,
+/// and Gemini Interactions (`steps[*].type == "function_call"`).
 fn response_body_has_tool_call(body: &[u8]) -> bool {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
         return false;
@@ -397,6 +409,16 @@ fn response_body_has_tool_call(body: &[u8]) -> bool {
         .is_some_and(|arr| {
             arr.iter()
                 .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call"))
+        })
+    {
+        return true;
+    }
+    // Gemini Interactions: steps[*].type == "function_call"
+    if v.get("steps")
+        .and_then(|s| s.as_array())
+        .is_some_and(|arr| {
+            arr.iter()
+                .any(|s| s.get("type").and_then(|t| t.as_str()) == Some("function_call"))
         })
     {
         return true;
@@ -436,6 +458,21 @@ async fn parse_models_response(r: reqwest::Response) -> (Option<usize>, Option<V
     let Ok(json) = r.json::<serde_json::Value>().await else {
         return (None, None);
     };
+    // OpenAI/Anthropic catalogs list `data[].id`; Gemini's `/v1beta/models`
+    // lists `models[].name` with a `models/` prefix.
+    if let Some(models) = json["models"].as_array() {
+        let names: Vec<String> = models
+            .iter()
+            .filter_map(|m| {
+                m["name"].as_str().map(|n| {
+                    n.strip_prefix("models/")
+                        .unwrap_or(n)
+                        .to_string()
+                })
+            })
+            .collect();
+        return (Some(names.len()), Some(names));
+    }
     let Some(arr) = json["data"].as_array() else {
         return (None, None);
     };
@@ -444,6 +481,19 @@ async fn parse_models_response(r: reqwest::Response) -> (Option<usize>, Option<V
         .filter_map(|v| v["id"].as_str().map(|s| s.to_string()))
         .collect();
     (Some(names.len()), Some(names))
+}
+
+/// First model in a Gemini catalog that a chat probe can use. The catalog is
+/// unordered and lists image, TTS, embedding and audio models too; a probe
+/// against one of those fails regardless of the key's validity. Falls back to
+/// the first entry when nothing looks conversational.
+fn first_text_model(models: &[String]) -> Option<&str> {
+    let non_chat = ["-image", "-tts", "embedding", "-audio", "-search"];
+    models
+        .iter()
+        .find(|m| !non_chat.iter().any(|s| m.contains(s)))
+        .map(|m| m.as_str())
+        .or_else(|| models.first().map(|m| m.as_str()))
 }
 
 #[cfg(test)]
@@ -812,5 +862,23 @@ pub(crate) mod tests {
                 ..
             })
         ));
+    }
+    #[test]
+    fn first_text_model_skips_non_conversational_catalog_entries() {
+        // A realistic Gemini catalog slice: image/TTS models come first, the
+        // conversational model is buried further down.
+        let models = vec![
+            "gemini-3.1-flash-image".to_string(),
+            "gemini-2.5-flash-preview-tts".to_string(),
+            "gemini-2.5-flash".to_string(),
+            "gemini-2.5-pro".to_string(),
+        ];
+        assert_eq!(super::first_text_model(&models), Some("gemini-2.5-flash"));
+        // Falls back to the head when nothing looks conversational.
+        let only_image = vec!["gemini-3.1-flash-image".to_string()];
+        assert_eq!(
+            super::first_text_model(&only_image),
+            Some("gemini-3.1-flash-image")
+        );
     }
 }
