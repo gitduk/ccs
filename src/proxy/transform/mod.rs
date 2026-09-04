@@ -1,9 +1,14 @@
+pub mod canonical;
 mod gemini;
 mod models;
 mod request;
 mod response;
 mod stream;
 
+pub use canonical::{
+    ContentBlock as CanonicalContentBlock, Message as CanonicalMessage, Request as CanonicalRequest,
+    Response as CanonicalResponse, Tool as CanonicalTool, Usage as CanonicalUsage, WirePayload,
+};
 pub use gemini::{
     anthropic_to_gemini_request, gemini_stream_to_anthropic, gemini_to_anthropic_response,
 };
@@ -44,6 +49,28 @@ fn tool_use_parts(block: &Value) -> Result<(&str, &str, String)> {
     let arguments = serde_json::to_string(&input)
         .map_err(|e| AppError::Transform(format!("Failed to serialize tool input: {e}")))?;
     Ok((id, name, arguments))
+}
+
+/// Flatten a tool-result payload (plain string, text/image block array, or
+/// JSON value) into the single text form OpenAI and Gemini tool messages
+/// carry, mirroring how OpenAI tool messages carry results.
+pub(crate) fn tool_result_text(content: Option<&Value>) -> Result<String> {
+    match content {
+        None | Some(Value::Null) => Ok(String::new()),
+        Some(Value::String(s)) => Ok(s.clone()),
+        Some(Value::Array(blocks)) => {
+            let mut parts = Vec::new();
+            for b in blocks {
+                if b.get("type").and_then(|t| t.as_str()) == Some("text")
+                    && let Some(t) = b.get("text").and_then(|t| t.as_str())
+                {
+                    parts.push(t.to_string());
+                }
+            }
+            Ok(parts.join("\n"))
+        }
+        _ => Ok(serde_json::to_string(content.expect("guarded above")).unwrap_or_default()),
+    }
 }
 
 /// Map an OpenAI chat `finish_reason` to an Anthropic `stop_reason`.

@@ -290,7 +290,7 @@ fn tool_result_to_function_result(block: &Value, id_to_name: &ToolIdMap) -> Resu
             "tool_result references unknown tool_use_id '{call_id}'"
         )));
     }
-    let text = tool_result_text(block.get("content"))?;
+    let text = super::tool_result_text(block.get("content"))?;
     Ok(json!({
         "type": "function_result",
         "call_id": call_id,
@@ -299,26 +299,6 @@ fn tool_result_to_function_result(block: &Value, id_to_name: &ToolIdMap) -> Resu
     }))
 }
 
-/// Flatten Anthropic `tool_result.content` (string or text/image blocks) into
-/// a single text payload, mirroring how OpenAI tool messages carry results.
-fn tool_result_text(content: Option<&Value>) -> Result<String> {
-    match content {
-        None | Some(Value::Null) => Ok(String::new()),
-        Some(Value::String(s)) => Ok(s.clone()),
-        Some(Value::Array(blocks)) => {
-            let mut parts = Vec::new();
-            for b in blocks {
-                if b.get("type").and_then(|t| t.as_str()) == Some("text")
-                    && let Some(t) = b.get("text").and_then(|t| t.as_str())
-                {
-                    parts.push(t.to_string());
-                }
-            }
-            Ok(parts.join("\n"))
-        }
-        _ => Ok(serde_json::to_string(content.expect("guarded above")).unwrap_or_default()),
-    }
-}
 
 // ─── Non-streaming response ────────────────────────────────────────────────
 
@@ -388,7 +368,7 @@ pub fn gemini_to_anthropic_response(resp: &Value) -> Result<Value> {
     }
 
     let stop_reason = if last_step_was_tool { "tool_use" } else { "end_turn" };
-    let (input_tokens, output_tokens) = gemini_usage(resp);
+    let usage = gemini_usage(resp);
     let model = resp
         .get("model")
         .and_then(|m| m.as_str())
@@ -403,10 +383,7 @@ pub fn gemini_to_anthropic_response(resp: &Value) -> Result<Value> {
         "content": content,
         "stop_reason": stop_reason,
         "stop_sequence": null,
-        "usage": {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-        }
+        "usage": usage.to_anthropic(),
     }))
 }
 
@@ -419,29 +396,9 @@ fn gemini_image_to_anthropic(item: &Value) -> Value {
     })
 }
 
-/// Extract input/output token counts from an interaction's `usage` object.
-///
-/// Gemini splits generated tokens between `total_output_tokens` and
-/// `total_thought_tokens`; Anthropic's `output_tokens` counts both (verified
-/// live: `input 8 + output 13 + thought 74 = total 95`), so they are summed.
-fn gemini_usage(resp: &Value) -> (u64, u64) {
-    let usage = resp.get("usage").unwrap_or(&Value::Null);
-    let get = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-    let input = get("total_input_tokens");
-    let output = get("total_output_tokens") + get("total_thought_tokens");
-    if input != 0 || output != 0 {
-        (input, output)
-    } else {
-        // Fallback when only the aggregate is reported.
-        let total = get("total_tokens");
-        if total != 0 && output == 0 {
-            // Cannot separate the halves without input tokens; report the
-            // aggregate on the input side so totals still add up.
-            (total, 0)
-        } else {
-            (0, 0)
-        }
-    }
+fn gemini_usage(resp: &Value) -> super::canonical::Usage {
+    super::canonical::Usage::try_from(super::canonical::WirePayload::Gemini(resp))
+        .unwrap_or_default()
 }
 
 fn synthesized_tool_id() -> String {
@@ -579,8 +536,7 @@ struct GeminiStreamState {
     summaries: bool,
     message_id: String,
     model: String,
-    input_tokens: u64,
-    output_tokens: u64,
+    usage: super::canonical::Usage,
     content_index: usize,
     started: bool,
     finalized: bool,
@@ -603,8 +559,7 @@ impl GeminiStreamState {
             summaries,
             message_id: format!("msg_{}", Uuid::new_v4()),
             model: "gemini".to_string(),
-            input_tokens: 0,
-            output_tokens: 0,
+            usage: super::canonical::Usage::default(),
             content_index: 0,
             started: false,
             finalized: false,
@@ -659,7 +614,7 @@ impl GeminiStreamState {
                     "stop_reason": null,
                     "stop_sequence": null,
                     "usage": {
-                        "input_tokens": self.input_tokens,
+                        "input_tokens": self.usage.input_tokens,
                         "output_tokens": 0,
                     }
                 }
@@ -857,18 +812,8 @@ impl GeminiStreamState {
 
     fn usage_from(&mut self, interaction: &Value) {
         let Some(usage) = interaction.get("usage") else { return };
-        if let Some(v) = usage.get("total_input_tokens").and_then(|v| v.as_u64()) {
-            self.input_tokens = v;
-        }
-        if let Some(v) = usage.get("total_output_tokens").and_then(|v| v.as_u64()) {
-            // Gemini splits generated tokens between `total_output_tokens`
-            // and `total_thought_tokens`; Anthropic's `output_tokens` counts
-            // both, mirroring `gemini_usage` for buffered responses.
-            let thoughts = usage
-                .get("total_thought_tokens")
-                .and_then(|t| t.as_u64())
-                .unwrap_or(0);
-            self.output_tokens = v + thoughts;
+        if let Ok(u) = super::canonical::Usage::try_from(super::canonical::WirePayload::Gemini(usage)) {
+            self.usage = u;
         }
     }
 
@@ -903,10 +848,7 @@ impl GeminiStreamState {
                     "stop_reason": self.final_stop_reason(),
                     "stop_sequence": null,
                 },
-                "usage": {
-                    "input_tokens": self.input_tokens,
-                    "output_tokens": self.output_tokens,
-                }
+                "usage": self.usage.to_anthropic(),
             }),
         ));
         events.push(sse_event("message_stop", &json!({"type": "message_stop"})));
@@ -1149,6 +1091,28 @@ mod tests {
         assert_eq!(out["content"][0]["text"], "It is 22C.");
         assert_eq!(out["usage"]["input_tokens"], 10);
         assert_eq!(out["usage"]["output_tokens"], 36);
+        assert_eq!(out["usage"]["cache_read_input_tokens"], 0);
+    }
+
+    #[test]
+    fn buffered_response_maps_cached_tokens() {
+        let resp = json!({
+            "status": "completed",
+            "model": "gemini-3.8-flash",
+            "usage": {
+                "total_tokens": 50,
+                "total_input_tokens": 30,
+                "total_output_tokens": 20,
+                "total_cached_tokens": 15
+            },
+            "steps": [
+                {"type": "model_output", "content": [{"type": "text", "text": "Cached."}]}
+            ]
+        });
+        let out = gemini_to_anthropic_response(&resp).unwrap();
+        assert_eq!(out["usage"]["input_tokens"], 30);
+        assert_eq!(out["usage"]["output_tokens"], 20);
+        assert_eq!(out["usage"]["cache_read_input_tokens"], 15);
     }
 
     #[test]
@@ -1220,7 +1184,7 @@ mod tests {
         raw.extend(state.process_event("interaction.completed", &json!({
             "interaction": {
                 "status": "completed",
-                "usage": {"total_tokens": 38, "total_input_tokens": 10, "total_output_tokens": 20, "total_thought_tokens": 8}
+                "usage": {"total_tokens": 38, "total_input_tokens": 10, "total_output_tokens": 20, "total_thought_tokens": 8, "total_cached_tokens": 5}
             },
             "event_type": "interaction.completed"
         })));
@@ -1240,6 +1204,7 @@ mod tests {
         assert_eq!(events[5].1["delta"]["stop_reason"], "end_turn");
         assert_eq!(events[5].1["usage"]["input_tokens"], 10);
         assert_eq!(events[5].1["usage"]["output_tokens"], 28);
+        assert_eq!(events[5].1["usage"]["cache_read_input_tokens"], 5);
     }
 
     #[test]
@@ -1375,7 +1340,7 @@ mod tests {
             "event: step.stop\n",
             "data: {\"index\":1,\"event_type\":\"step.stop\"}\n\n",
             "event: interaction.completed\n",
-            "data: {\"interaction\":{\"status\":\"completed\",\"usage\":{\"total_tokens\":95,\"total_input_tokens\":8,\"total_output_tokens\":13,\"total_thought_tokens\":74}},\"event_type\":\"interaction.completed\"}\n\n",
+            "data: {\"interaction\":{\"status\":\"completed\",\"usage\":{\"total_tokens\":95,\"total_input_tokens\":8,\"total_output_tokens\":13,\"total_thought_tokens\":74,\"total_cached_tokens\":25}},\"event_type\":\"interaction.completed\"}\n\n",
             "event: done\n",
             "data: [DONE]\n\n",
         );
@@ -1396,6 +1361,7 @@ mod tests {
         // message_delta usage sums output + thought tokens (13 + 74 = 87).
         assert!(out.contains("\"output_tokens\":87"), "{out}");
         assert!(out.contains("\"input_tokens\":8"), "{out}");
+        assert!(out.contains("\"cache_read_input_tokens\":25"), "{out}");
         assert!(!out.contains("total_thought_tokens"), "raw usage leaked: {out}");
     }
 }
