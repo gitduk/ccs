@@ -310,7 +310,7 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
 
 ### 提供商编辑器（`a` / `e`）
 
-字段依次为 Name、Base URL、API Key、Format，以及 Routes 区域。Format 是下拉选择：聚焦后按 `↓`/`↑`（或 `Ctrl-J`/`Ctrl-K`）在 `anthropic` / `chat_completions` / `responses` / `gemini` 间选择，`Enter` 确认。选 `chat_completions` / `responses` 表示该提供商为 OpenAI 格式并带上对应 API 版本；选 `anthropic` 或 `gemini` 则为对应原生格式。Vim 风格，默认处于 Normal 模式。
+字段依次为 Name、Base URL、API Key、Format，以及 Routes 区域。Format 是固定四个选项的下拉（`anthropic` / `chat_completions` / `responses` / `gemini`），只在 Insert 模式下展开——聚焦后按 `i` 或 `Enter` 进入 Insert，再按 `↓`/`↑`（或 `Ctrl-J`/`Ctrl-K`）选择，`Enter` 确认。选 `chat_completions` / `responses` 表示该提供商为 OpenAI 格式并带上对应 API 版本；选 `anthropic` 或 `gemini` 则为对应原生格式。Vim 风格，默认处于 Normal 模式。
 
 | 按键 | 操作 |
 | --- | --- |

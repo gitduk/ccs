@@ -49,7 +49,10 @@ fn parse_provider_form(
     } else if crate::config::FORMAT_CHOICES.contains(&raw_format.as_str()) {
         Some(raw_format)
     } else {
-        return Err("Format must be one of: anthropic, chat_completions, responses".to_string());
+        return Err(format!(
+            "Format must be one of: {}",
+            crate::config::FORMAT_CHOICES.join(", ")
+        ));
     };
 
     let routes: Vec<RouteRule> = form

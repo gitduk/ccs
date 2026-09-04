@@ -50,7 +50,7 @@ pub(super) fn draw_help(f: &mut Frame, scroll: &mut u16) {
                 ("h / l", "Move cursor (Normal)"),
                 ("0 / $", "Jump to field start / end (Normal)"),
                 ("Tab / S-Tab", "Next / previous field"),
-                ("Format field", "↓/↑ or C-j/C-k choose · Enter select"),
+                ("Format field", "↓/↑ choose (Insert mode) · Enter select"),
             ],
         ),
         (

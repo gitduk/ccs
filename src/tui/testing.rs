@@ -436,21 +436,27 @@ pub(crate) mod tests {
         assert_eq!(saved.api_format, ApiFormat::Anthropic);
     }
 
-    /// Focusing the Format field opens the three-choice dropdown; `↓` then
-    /// `Enter` selects `chat_completions` and saving persists it as OpenAI.
+    /// The Format field expands into its four fixed options only in Insert
+    /// mode; `↓` then `Enter` selects `chat_completions`, and saving persists
+    /// it as OpenAI. In Normal mode `↓` just moves to the next field.
     #[tokio::test]
     async fn format_dropdown_selects_choice() {
-        use crate::tui::state::FORMAT_FIELD_IDX;
+        use crate::tui::state::{FORMAT_FIELD_IDX, VimMode};
         use crossterm::event::{KeyCode, KeyModifiers};
+
+        let press = |app: &mut App, code: KeyCode| {
+            crate::tui::input::handle_key(app, code, KeyModifiers::NONE, &mut None).unwrap();
+        };
+        let focus_format = |app: &mut App| {
+            app.form.as_mut().unwrap().focused = FORMAT_FIELD_IDX;
+        };
 
         let _guard = ConfigDirGuard::new();
         let mut app = app_with_current("first");
         app.start_edit();
-        // Focus the Format field (index 3).
-        {
-            let form = app.form.as_mut().unwrap();
-            form.focused = FORMAT_FIELD_IDX;
-        }
+
+        // Focus the Format field (index 3) while still in Normal mode.
+        focus_format(&mut app);
         assert!(
             app.form
                 .as_ref()
@@ -458,23 +464,46 @@ pub(crate) mod tests {
             "Format field focused"
         );
 
-        // `↓` opens the dropdown (highlight on first item); a second `↓`
+        // Normal mode: ↓ moves focus off the field; the options stay closed.
+        press(&mut app, KeyCode::Down);
+        assert!(
+            app.form
+                .as_ref()
+                .is_some_and(|f| !f.format_suggest.active && f.focused != FORMAT_FIELD_IDX),
+            "Normal-mode ↓ should leave the Format field without opening options"
+        );
+
+        // Refocus and enter Insert mode (`i`), which expands the options.
+        focus_format(&mut app);
+        press(&mut app, KeyCode::Char('i'));
+        assert!(
+            app.form
+                .as_ref()
+                .is_some_and(|f| f.vim_mode == VimMode::Insert),
+            "expected Insert mode after i"
+        );
+
+        // `↓` opens the options (highlight on first item); a second `↓`
         // moves the highlight to the second item (chat_completions).
-        crate::tui::input::handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut None)
-            .unwrap();
+        press(&mut app, KeyCode::Down);
         assert!(
             app.form.as_ref().is_some_and(|f| f.format_suggest.active),
-            "dropdown active after ↓"
+            "options active after ↓ in Insert mode"
         );
-        crate::tui::input::handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut None)
-            .unwrap();
+        press(&mut app, KeyCode::Down);
 
-        // `Enter` selects the highlighted choice (chat_completions).
-        crate::tui::input::handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut None)
-            .unwrap();
+        // `Enter` selects the highlighted choice (chat_completions) and
+        // collapses the options by returning to Normal mode.
+        press(&mut app, KeyCode::Enter);
         assert_eq!(
             app.form.as_ref().unwrap().fields[FORMAT_FIELD_IDX].value,
             "chat_completions"
+        );
+        assert!(
+            app.form
+                .as_ref()
+                .is_some_and(|f| f.vim_mode == VimMode::Normal),
+            "selection should return to Normal mode"
         );
 
         app.save_form_and_close().unwrap();

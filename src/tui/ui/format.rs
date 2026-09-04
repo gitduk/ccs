@@ -24,13 +24,15 @@ pub(crate) fn cursor_split_spans(text: &str, cursor: usize, color: Color) -> Vec
     ]
 }
 
-/// Suggestion list presentation.
+/// Dropdown list presentation.
 pub(crate) enum SuggestionStyle {
     /// Routes target: titled list with (n/m) counter, indented, ▶ highlight.
     Classic,
+    /// Fixed Format-field options: titled list of the API formats.
+    Options,
 }
 
-/// Render a model-suggestion list (8-row window).
+/// Render a dropdown list (8-row window for lists longer than 8 entries).
 /// Empty list → empty Vec, so callers can unconditionally `extend`.
 pub(crate) fn render_suggestion_lines(
     suggestions: &[&str],
@@ -47,21 +49,22 @@ pub(crate) fn render_suggestion_lines(
     let total = suggestions.len();
     let window = &suggestions[scroll..total.min(scroll + 8)];
 
-    if matches!(style, SuggestionStyle::Classic) {
-        let scroll_hint = if total > 8 {
-            format!(
-                "  ── Suggestions ({}/{}) ─────────────────",
-                scroll + window.len(),
-                total
-            )
-        } else {
-            "  ── Suggestions ────────────────────────".to_string()
-        };
-        lines.push(Line::from(Span::styled(
-            scroll_hint,
-            Style::default().fg(t::MUTED),
-        )));
-    }
+    let (title, counter) = match style {
+        SuggestionStyle::Classic => ("Suggestions", total > 8),
+        SuggestionStyle::Options => ("Options", false),
+    };
+    let head = if counter {
+        format!("  ── {title} ({}/{}) ", scroll + window.len(), total)
+    } else {
+        format!("  ── {title} ")
+    };
+    // Pad with ─ so every titled header spans the same fixed width.
+    let dashes = "─".repeat(41usize.saturating_sub(head.chars().count()));
+    let scroll_hint = format!("{head}{dashes}");
+    lines.push(Line::from(Span::styled(
+        scroll_hint,
+        Style::default().fg(t::MUTED),
+    )));
 
     for (wi, model) in window.iter().enumerate() {
         let is_hi = suggest.active && scroll + wi == suggest.idx;

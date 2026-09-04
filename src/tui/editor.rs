@@ -92,9 +92,10 @@ pub(super) fn handle_key(
     }
 
     // ── Format field dropdown ─────────────────────────────────────────────────
-    // When the Format field is focused, show its three choices and let the
-    // user navigate (`↓` / `Ctrl-J`) and select (`Enter`).
-    if !in_routes && form.focused == FORMAT_FIELD_IDX && form.fields[FORMAT_FIELD_IDX].editable {
+    // In Insert mode on the Format field its fixed options expand and let the
+    // user navigate (`↓` / `Ctrl-J`) and select (`Enter`); in Normal mode the
+    // field behaves like any other (↓/↑ move between fields, nothing expands).
+    if format_dropdown_active(form) {
         let choices = format_suggest_choices(form);
         let len = choices.len();
         match code {
@@ -309,7 +310,7 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
         vim_tag
     );
 
-    let format_choices: Vec<&'static str> = if form.focused == FORMAT_FIELD_IDX && !in_routes {
+    let format_choices = if format_dropdown_active(form) {
         format_suggest_choices(form)
     } else {
         Vec::new()
@@ -406,7 +407,7 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
                     &format_choices,
                     &form.format_suggest,
                     prov_color,
-                    SuggestionStyle::Classic,
+                    SuggestionStyle::Options,
                 );
                 f.render_widget(Paragraph::new(lines), render_target);
             }
@@ -562,8 +563,17 @@ fn prune_current_rule(form: &mut ProviderForm, provider_models: &[String]) {
     }
 }
 
-/// Format choices shown for the Format field. A complete current choice
-/// (exact match in [`crate::config::FORMAT_CHOICES`]) shows all three — it's
+/// True while the Format field's option dropdown is shown: focused on it in
+/// Insert mode. Normal mode never expands — ↓/↑ just move between fields.
+fn format_dropdown_active(form: &ProviderForm) -> bool {
+    !form.in_routes()
+        && form.vim_mode == VimMode::Insert
+        && form.focused == FORMAT_FIELD_IDX
+        && form.fields[FORMAT_FIELD_IDX].editable
+}
+
+/// Format options shown for the Format field. A complete current choice
+/// (exact match in [`crate::config::FORMAT_CHOICES`]) shows all four — it's
 /// a select field, not free text; a partial typed prefix narrows by prefix.
 fn format_suggest_choices(form: &ProviderForm) -> Vec<&'static str> {
     let raw = form.fields[FORMAT_FIELD_IDX].value.trim().to_lowercase();

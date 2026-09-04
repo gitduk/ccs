@@ -261,8 +261,8 @@ pub struct App {
     pub(super) config_needs_sync: bool,
 }
 
-/// Keyboard-navigable suggestion dropdown state shared by any text field
-/// offering model-name autocomplete (route Target).
+/// Keyboard-navigable dropdown state shared by any text field offering a
+/// filterable list: route-target model suggestions or the Format options.
 #[derive(Default)]
 pub struct SuggestState {
     /// True when keyboard navigation focus is inside the suggestion list.
@@ -336,7 +336,7 @@ pub struct ProviderForm {
     pub route_suggest: SuggestState,
 
     // ── Format field dropdown ──
-    /// Suggestion dropdown for the Format field's three choices.
+    /// Option-list highlight state for the Format field's four choices.
     pub format_suggest: SuggestState,
     /// Pending first key of a two-key sequence (`dd`, `gg`, `yy`) inside the form.
     pub pending_key: Option<(char, std::time::Instant)>,
