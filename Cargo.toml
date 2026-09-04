@@ -1,6 +1,6 @@
 [package]
 name = "ccs"
-version = "0.64.0"
+version = "0.64.1"
 repository = "https://github.com/gitduk/ccs"
 edition = "2024"
 description = "Claude Code Switch - Lightweight API proxy for routing Claude Code traffic"
