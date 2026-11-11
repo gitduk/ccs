@@ -252,7 +252,7 @@ pub enum ApiFormat {
     Anthropic,
     #[serde(rename = "openai")]
     OpenAI,
-    /// Google Gemini native REST — the Interactions API (`/v1beta/interactions`).
+    /// Google Gemini native REST — the Interactions API (`{base_url}/interactions`).
     #[serde(rename = "gemini")]
     Gemini,
 }
@@ -393,7 +393,7 @@ impl Provider {
     /// variant matches the client's, and nothing configured forces a rewrite.
     ///
     /// Only the Chat Completions variant is eligible. Raw Responses bytes
-    /// can't fall back to `/v1/chat/completions` on a 404 (they speak the
+    /// can't fall back to `/chat/completions` on a 404 (they speak the
     /// Responses format), so passthrough there would surface upstream 404s
     /// instead of the existing auto-retry.
     pub fn passthrough_for(&self, client: OpenAiApiVersion) -> bool {
@@ -424,19 +424,19 @@ impl Provider {
     }
 
     /// Compute the chat endpoint URL for this provider's API format and the
-    /// given OpenAI API version (ignored for Anthropic/Gemini formats). Single
-    /// source of truth for the format/version -> path mapping.
+    /// given OpenAI API version (ignored for Anthropic/Gemini formats), where
+    /// `base_url` already carries the API version (`/v1`, `/v1beta`, …).
     pub fn endpoint_url(&self, version: OpenAiApiVersion) -> String {
         let base = self.base_url.trim_end_matches('/');
         match self.api_format {
-            ApiFormat::Anthropic => format!("{base}/v1/messages"),
+            ApiFormat::Anthropic => format!("{base}/messages"),
             ApiFormat::OpenAI => match version {
-                OpenAiApiVersion::ChatCompletions => format!("{base}/v1/chat/completions"),
-                OpenAiApiVersion::Responses => format!("{base}/v1/responses"),
+                OpenAiApiVersion::ChatCompletions => format!("{base}/chat/completions"),
+                OpenAiApiVersion::Responses => format!("{base}/responses"),
             },
             // Native Gemini is the Interactions API; streaming appends
             // `?alt=sse` in the forwarder, so this is the bare path.
-            ApiFormat::Gemini => format!("{base}/v1beta/interactions"),
+            ApiFormat::Gemini => format!("{base}/interactions"),
         }
     }
 
@@ -1018,7 +1018,7 @@ mod tests {
 
     #[test]
     fn passthrough_for_never_activates_for_responses() {
-        // Raw Responses bytes can't fall back to /v1/chat/completions on a
+        // Raw Responses bytes can't fall back to /chat/completions on a
         // 404, so even a same-variant Responses provider must not passthrough
         // — the transform path owns the 404 auto-retry.
         let mut p = make_provider("key", ApiFormat::OpenAI);
@@ -1232,7 +1232,8 @@ mod tests {
 
     #[test]
     fn gemini_endpoint_is_interactions_api() {
-        let p = make_provider("key", ApiFormat::Gemini);
+        let mut p = make_provider("key", ApiFormat::Gemini);
+        p.base_url = "https://api.example.com/v1beta".into();
         assert_eq!(
             p.endpoint_url(OpenAiApiVersion::Responses),
             "https://api.example.com/v1beta/interactions"
@@ -1240,6 +1241,26 @@ mod tests {
         let (url, body) = p.chat_url_and_body("gemini-3.8-flash");
         assert_eq!(url, "https://api.example.com/v1beta/interactions");
         assert!(body.contains("\"input\":\"ping\""));
+    }
+
+    #[test]
+    fn endpoints_append_only_the_leaf_below_the_versioned_base() {
+        let mut p = make_provider("key", ApiFormat::Anthropic);
+        p.base_url = "https://api.example.com/v1".into();
+        assert_eq!(
+            p.endpoint_url(OpenAiApiVersion::Responses),
+            "https://api.example.com/v1/messages"
+        );
+
+        p.api_format = ApiFormat::OpenAI;
+        assert_eq!(
+            p.endpoint_url(OpenAiApiVersion::Responses),
+            "https://api.example.com/v1/responses"
+        );
+        assert_eq!(
+            p.endpoint_url(OpenAiApiVersion::ChatCompletions),
+            "https://api.example.com/v1/chat/completions"
+        );
     }
 
     // ─── GlobalRoute ────────────────────────────────────────────────────────

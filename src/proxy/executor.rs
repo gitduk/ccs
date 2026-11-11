@@ -10,7 +10,7 @@ use crate::proxy::{forwarder, transform};
 use serde_json::Value;
 
 /// Providers discovered at runtime to not support `/v1/responses` (an
-/// endpoint-style 404 followed by a successful `/v1/chat/completions` retry).
+/// endpoint-style 404 followed by a successful `/chat/completions` retry).
 /// Cached so later requests skip the doomed Responses round-trip. Keyed by
 /// id + base_url so editing the provider's URL re-probes.
 static RESPONSES_UNSUPPORTED: LazyLock<RwLock<HashSet<String>>> =
@@ -135,7 +135,7 @@ pub(crate) async fn execute_provider_request(
             ApiFormat::Gemini => UpstreamPlan::Gemini,
             ApiFormat::OpenAI => {
                 let version = match provider.openai_api_version_enum() {
-                    // A previous request proved /v1/responses is missing upstream.
+                    // A previous request proved /responses is missing upstream.
                     OpenAiApiVersion::Responses if responses_known_unsupported(provider) => {
                         OpenAiApiVersion::ChatCompletions
                     }
@@ -230,7 +230,7 @@ pub(crate) async fn execute_provider_request(
         let not_found_body = response.bytes().await?;
         if should_fallback_from_responses_404(&not_found_body) {
             tracing::warn!(
-                "Provider {} returned endpoint-style 404 for /v1/responses, retrying /v1/chat/completions",
+                "Provider {} returned endpoint-style 404 for /responses, retrying /chat/completions",
                 provider.base_url
             );
             response = forwarder::forward_request(

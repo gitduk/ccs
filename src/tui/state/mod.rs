@@ -993,7 +993,7 @@ mod tests {
         assert_eq!(r.tools_supported, Some(true));
     }
 
-    /// An upstream that answers `/v1/models` with an empty list must not blank
+    /// An upstream that answers `/models` with an empty list must not blank
     /// the provider's known catalog — in the DB or in the in-memory mirror.
     #[tokio::test]
     async fn empty_model_list_from_a_test_keeps_the_known_catalog() {

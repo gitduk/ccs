@@ -27,6 +27,21 @@ impl ParsedProviderFields {
     }
 }
 
+/// `:8001` is shorthand for a server on this machine: `http://127.0.0.1:8001`;
+/// a path after the port is kept (`:8001/v1` -> `http://127.0.0.1:8001/v1`).
+fn expand_local_base_url(raw: &str) -> String {
+    let raw = raw.trim_end_matches('/');
+    let Some(rest) = raw.strip_prefix(':') else {
+        return raw.to_string();
+    };
+    let path_start = rest.find('/').unwrap_or(rest.len());
+    let (port, path) = rest.split_at(path_start);
+    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return raw.to_string();
+    }
+    format!("http://127.0.0.1:{port}{path}")
+}
+
 /// Extract, parse, and validate the provider form fields that can be checked
 /// without App state (name uniqueness is checked by the caller).
 /// Returns `Err(message)` with a user-facing error string on the first failure.
@@ -35,11 +50,7 @@ fn parse_provider_form(
     known_models: &[String],
 ) -> std::result::Result<ParsedProviderFields, String> {
     let name = form.fields[NAME_FIELD_IDX].value.trim().to_string();
-    let base_url = form.fields[BASE_URL_FIELD_IDX]
-        .value
-        .trim()
-        .trim_end_matches('/')
-        .to_string();
+    let base_url = expand_local_base_url(form.fields[BASE_URL_FIELD_IDX].value.trim());
     let api_key = form.fields[API_KEY_FIELD_IDX].value.trim().to_string();
     let original_name = form.original_name.clone();
 
@@ -872,7 +883,43 @@ mod tests {
     use crate::config::GlobalRoute;
     use crate::config::test_support::ConfigDirGuard;
     use crate::tui::state::ProviderForm;
+    use crate::tui::state::{BASE_URL_FIELD_IDX, NAME_FIELD_IDX};
     use crate::tui::testing::tests::app_with_current;
+
+    #[test]
+    fn base_url_shorthand_expands_to_loopback() {
+        let mut form = ProviderForm::new("local", None);
+        form.fields[NAME_FIELD_IDX].value = "local".to_string();
+        form.fields[BASE_URL_FIELD_IDX].value = ":8001".to_string();
+
+        let parsed = super::parse_provider_form(&form, &[]).unwrap();
+        assert_eq!(parsed.base_url, "http://127.0.0.1:8001");
+
+        form.fields[BASE_URL_FIELD_IDX].value = ":8001/v1/".to_string();
+        let parsed = super::parse_provider_form(&form, &[]).unwrap();
+        assert_eq!(parsed.base_url, "http://127.0.0.1:8001/v1");
+
+        form.fields[BASE_URL_FIELD_IDX].value = "https://api.example.com/".to_string();
+        let parsed = super::parse_provider_form(&form, &[]).unwrap();
+        assert_eq!(parsed.base_url, "https://api.example.com");
+    }
+
+    #[test]
+    fn colon_shorthand_without_a_port_is_still_rejected() {
+        let mut form = ProviderForm::new("local", None);
+        form.fields[NAME_FIELD_IDX].value = "local".to_string();
+
+        for bad in [":", ":abc", "::1"] {
+            form.fields[BASE_URL_FIELD_IDX].value = bad.to_string();
+            let Err(err) = super::parse_provider_form(&form, &[]) else {
+                panic!("{bad} should be rejected, but it parsed");
+            };
+            assert!(
+                err.starts_with("Base URL must start with"),
+                "{bad} should be rejected, got: {err}"
+            );
+        }
+    }
 
     #[test]
     fn deleting_a_provider_drops_the_global_routes_pointing_at_it() {

@@ -15,7 +15,7 @@ pub struct DetectedFormat {
     pub api_format: ApiFormat,
     pub api_version: Option<OpenAiApiVersion>,
     /// Model list discovered while detecting, if any — reused by the caller
-    /// so it doesn't need a redundant `/v1/models` round trip after saving.
+    /// so it doesn't need a redundant `/models` round trip after saving.
     pub models: Vec<String>,
 }
 
@@ -52,10 +52,9 @@ fn probe_provider(base_url: &str, api_key: &str, api_format: ApiFormat) -> Provi
 /// format, unknown model" — a bogus model name gets rejected by every
 /// format alike, so it can't discriminate anything. `test_model`, if given,
 /// is used directly. Otherwise this fetches a model list first (trying
-/// OpenAI's `/v1/models` before Anthropic's, since many Anthropic-compatible
+/// OpenAI's `/models` before Anthropic's, since many Anthropic-compatible
 /// relays don't expose a model-list endpoint at all — an already-known real
-/// case is DeepSeek's Anthropic-compatible endpoint; Gemini uses its own
-/// `/v1beta/models` catalog).
+/// case is DeepSeek's Anthropic-compatible endpoint).
 pub async fn detect_api_format(
     client: &reqwest::Client,
     base_url: &str,
@@ -161,7 +160,7 @@ pub struct TestResult {
 /// Run a latency test against the provider using `model`.
 ///
 /// `prefetched` is for callers that already fetched the catalog this round —
-/// it is attached directly to the result and the internal `/v1/models` fetch is
+/// it is attached directly to the result and the internal `/models` fetch is
 /// skipped, saving one extra HTTP request. Pass `None` to have the test refresh
 /// the catalog; never pass a cached copy, or the catalog can never go stale-free.
 pub async fn test_latency(
@@ -459,8 +458,8 @@ async fn parse_models_response(r: reqwest::Response) -> (Option<usize>, Option<V
     let Ok(json) = r.json::<serde_json::Value>().await else {
         return (None, None);
     };
-    // OpenAI/Anthropic catalogs list `data[].id`; Gemini's `/v1beta/models`
-    // lists `models[].name` with a `models/` prefix.
+    // OpenAI/Anthropic catalogs list `data[].id`; Gemini's catalog lists
+    // `models[].name` with a `models/` prefix.
     if let Some(models) = json["models"].as_array() {
         let names: Vec<String> = models
             .iter()
@@ -569,12 +568,12 @@ pub(crate) mod tests {
 
         let addr = spawn_test_server(Router::new().route("/v1/chat/completions", post(chat))).await;
 
-        let provider = test_provider(format!("http://{addr}"));
+        let provider = test_provider(format!("http://{addr}/v1"));
         let result = check_tool_support(&reqwest::Client::new(), &provider, "test-key", "m").await;
         assert_eq!(result, Some(true));
     }
 
-    /// Regression test for the DeepSeek-style asymmetric gateway: `/v1/models`
+    /// Regression test for the DeepSeek-style asymmetric gateway: `/models`
     /// 404s under the provider's configured path (however deeply nested) but
     /// is reachable at the bare scheme+host root. `fetch_models` must retry
     /// there instead of reporting no models.
@@ -599,11 +598,11 @@ pub(crate) mod tests {
                 // Two levels deep — proves the fallback goes straight to the
                 // root, not just one segment up.
                 .route("/{*rest}", get(nested_404))
-                .route("/v1/models", get(root_models)),
+                .route("/models", get(root_models)),
         )
         .await;
 
-        let provider = test_provider(format!("http://{addr}/org123/anthropic"));
+        let provider = test_provider(format!("http://{addr}/org123/anthropic/v1"));
         let (count, names) = super::fetch_models(&reqwest::Client::new(), &provider, "key").await;
 
         assert_eq!(count, Some(2));
@@ -671,7 +670,7 @@ pub(crate) mod tests {
 
         let addr = spawn_test_server(Router::new().route("/v1/chat/completions", post(chat))).await;
 
-        let provider = test_provider(format!("http://{addr}"));
+        let provider = test_provider(format!("http://{addr}/v1"));
         let result = test_latency(&reqwest::Client::new(), &provider, "m".into(), None).await;
 
         assert!(matches!(
@@ -744,7 +743,7 @@ pub(crate) mod tests {
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        format!("http://{addr}")
+        format!("http://{addr}/v1")
     }
 
     #[tokio::test]
@@ -829,7 +828,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn detect_api_format_none_without_models_list_or_test_model() {
-        // No /v1/models on either format and no test_model given: there's no
+        // No /models on either format and no test_model given: there's no
         // real model name to probe with, so detection can't proceed at all.
         let base = spawn_scenario_server(Scenario {
             messages_ok: true,

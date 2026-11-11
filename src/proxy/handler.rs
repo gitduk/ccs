@@ -1162,7 +1162,7 @@ mod tests {
         let mut p = make_provider(true, true);
         p.api_format = ApiFormat::OpenAI;
         p.api_version = Some(OpenAiApiVersion::ChatCompletions);
-        p.base_url = format!("http://{upstream_addr}");
+        p.base_url = format!("http://{upstream_addr}/v1");
         providers.insert("prov-a".into(), p);
         let state = make_state(AppConfig {
             current: "prov-a".into(),
@@ -1375,9 +1375,9 @@ mod tests {
 
         let mut providers = IndexMap::new();
         let mut prov_a = make_provider(true, true);
-        prov_a.base_url = format!("http://{addr_a}");
+        prov_a.base_url = format!("http://{addr_a}/v1");
         let mut prov_b = make_provider(true, true);
-        prov_b.base_url = format!("http://{addr_b}");
+        prov_b.base_url = format!("http://{addr_b}/v1");
         providers.insert("prov-a".into(), prov_a);
         providers.insert("prov-b".into(), prov_b);
 
@@ -1625,7 +1625,7 @@ mod tests {
         let mut p = make_provider(true, true);
         p.api_format = ApiFormat::Gemini;
         p.api_version = None;
-        p.base_url = format!("http://{upstream_addr}");
+        p.base_url = format!("http://{upstream_addr}/v1beta");
         p.api_key = "AIza-test".into();
         let mut providers = IndexMap::new();
         providers.insert("gemini".into(), p);

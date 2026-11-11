@@ -1,5 +1,5 @@
 //! Conversions between the Anthropic canonical form and Google Gemini's
-//! native Interactions API (`POST /v1beta/interactions`).
+//! native Interactions API (`POST {base_url}/interactions`).
 //!
 //! The proxy normalises every client request to the Anthropic canonical form
 //! first (see `crate::proxy::handler`); this module then translates that form

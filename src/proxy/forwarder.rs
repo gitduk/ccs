@@ -48,9 +48,9 @@ fn apply_extra_headers(
     request
 }
 
-/// Build the GET /v1/models request for a provider. Anthropic-format
+/// Build the GET `{base_url}/models` request for a provider. Anthropic-format
 /// providers get both x-api-key and Bearer auth because some proxies require
-/// Bearer on /v1/models even when /v1/messages accepts x-api-key.
+/// Bearer on `/models` even when `/messages` accepts x-api-key.
 pub fn models_request(
     client: &Client,
     provider: &Provider,
@@ -60,7 +60,7 @@ pub fn models_request(
 }
 
 /// Like `models_request`, but probes `base_url` directly instead of the
-/// provider's configured base — used by the `/v1/models` root-domain retry.
+/// provider's configured base — used by the `/models` root-domain retry.
 pub fn models_request_at(
     client: &Client,
     provider: &Provider,
@@ -69,14 +69,10 @@ pub fn models_request_at(
 ) -> reqwest::RequestBuilder {
     let base = base_url.trim_end_matches('/');
     let (auth_key, auth_val) = provider.auth_header(api_key);
-    // Gemini's model catalog lives at /v1beta/models on the API root; all
-    // other formats expose /v1/models.
-    let models_path = match provider.api_format {
-        ApiFormat::Gemini => "/v1beta/models",
-        _ => "/v1/models",
-    };
+    // The catalog sits beside the chat endpoint, below whatever version
+    // segment `base_url` already carries (`/v1/models`, `/v1beta/models`, …).
     let mut req = client
-        .get(format!("{base}{models_path}"))
+        .get(format!("{base}/models"))
         .header(auth_key, auth_val);
     if provider.api_format == ApiFormat::Anthropic {
         req = req
@@ -170,6 +166,16 @@ mod tests {
             max_tokens_cap: None,
             extra_headers: extra,
         }
+    }
+
+    #[test]
+    fn models_request_keeps_the_base_url_version() {
+        let mut provider = provider_with_extra_headers(HashMap::new());
+        provider.base_url = "https://api.example.com/v1".into();
+        let req = models_request(&Client::new(), &provider, "key")
+            .build()
+            .unwrap();
+        assert_eq!(req.url().as_str(), "https://api.example.com/v1/models");
     }
 
     #[test]

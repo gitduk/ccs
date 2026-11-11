@@ -99,7 +99,7 @@ Configuration is stored in `~/.ccs/config.json`. Set `CCS_CONFIG_DIR` to use a d
   "providers": {
     "anthropic-official": {
       "id": "0f0b1e9e-…",
-      "base_url": "https://api.anthropic.com",
+      "base_url": "https://api.anthropic.com/v1",
       "api_key": "$ANTHROPIC_API_KEY",
       "api_format": "anthropic",
       "enabled": true,
@@ -109,7 +109,7 @@ Configuration is stored in `~/.ccs/config.json`. Set `CCS_CONFIG_DIR` to use a d
     },
     "openrouter": {
       "id": "6d2c4a11-…",
-      "base_url": "https://openrouter.ai/api",
+      "base_url": "https://openrouter.ai/api/v1",
       "api_key": "$OPENROUTER_API_KEY",
       "api_format": "openai",
       "api_version": "responses",
@@ -147,7 +147,7 @@ Configuration is stored in `~/.ccs/config.json`. Set `CCS_CONFIG_DIR` to use a d
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `id` | generated | Stable UUID; survives renames (used as the DB key) |
-| `base_url` | — | Upstream base URL |
+| `base_url` | — | Upstream base URL **including the API version** (`/v1`, `/v1beta`, …); ccs appends only the endpoint path below it |
 | `api_key` | — | Literal key, or `$ENV_VAR` to read from the environment |
 | `api_format` | detected | `anthropic`, `openai` or `gemini` |
 | `api_version` | `responses` | OpenAI-only: `responses` or `chat_completions` |
@@ -214,8 +214,8 @@ Exact-name mapping, applied after routes:
 
 For OpenAI-format providers, set `api_version` to control which upstream endpoint is used:
 
-- `"responses"` (default) — use the `/v1/responses` endpoint
-- `"chat_completions"` — use the `/v1/chat/completions` endpoint
+- `"responses"` (default) — use the `{base_url}/responses` endpoint
+- `"chat_completions"` — use the `{base_url}/chat/completions` endpoint
 
 ```json
 "api_version": "chat_completions"
@@ -223,13 +223,13 @@ For OpenAI-format providers, set `api_version` to control which upstream endpoin
 
 ### Gemini Providers
 
-With `"api_format": "gemini"`, requests are translated into Google's native Gemini Interactions API (`POST {base_url}/v1beta/interactions`, authenticated with the `x-goog-api-key` header); streaming requests automatically append `?alt=sse`. ccs always calls Gemini in stateless mode (`store: false`, resending the full history each turn), so multi-turn conversations and tool-call loops (`function_call` ↔ `tool_result`) work directly. The request's `model` still goes through this provider's `model_map` / `routes`, so point a Claude model at a Gemini one to switch, e.g.:
+With `"api_format": "gemini"`, requests are translated into Google's native Gemini Interactions API (`POST {base_url}/interactions`, authenticated with the `x-goog-api-key` header); streaming requests automatically append `?alt=sse`. ccs always calls Gemini in stateless mode (`store: false`, resending the full history each turn), so multi-turn conversations and tool-call loops (`function_call` ↔ `tool_result`) work directly. The request's `model` still goes through this provider's `model_map` / `routes`, so point a Claude model at a Gemini one to switch, e.g.:
 
 ```json
 {
   "gemini": {
     "id": "…",
-    "base_url": "https://generativelanguage.googleapis.com",
+    "base_url": "https://generativelanguage.googleapis.com/v1beta",
     "api_key": "$GEMINI_API_KEY",
     "api_format": "gemini",
     "enabled": true,
@@ -260,11 +260,11 @@ When you need different projects to use different providers simultaneously (e.g.
 {
   "providers": {
     "openrouter": {
-      "base_url": "https://openrouter.ai/api",
+      "base_url": "https://openrouter.ai/api/v1",
       "port": 7901
     },
     "anthropic": {
-      "base_url": "https://api.anthropic.com",
+      "base_url": "https://api.anthropic.com/v1",
       "port": 7902
     }
   }
@@ -293,7 +293,7 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
 `quota_command` is a shell snippet run with `sh -lc` (15s timeout) whose output is shown in the table's Quota column and in the quota panel. It runs with `$_API_KEY`, `$_BASE_URL` and `$_PROVIDER` exported, so the key never has to be written into the command in plaintext. Configure it with `U` in the TUI, or press `u` to run it immediately and refresh the Quota column.
 
 ```json
-"quota_command": "xh -b GET \"$_BASE_URL/v1/credits\" \"Authorization: Bearer $_API_KEY\""
+"quota_command": "xh -b GET \"$_BASE_URL/credits\" \"Authorization: Bearer $_API_KEY\""
 ```
 
 ## TUI Keybindings
@@ -331,7 +331,7 @@ Copying uses `wl-copy` (Wayland).
 
 ### Provider editor (`a` / `e`)
 
-Fields: Name, Base URL, API Key, Format, then the Routes section. The Format field is a dropdown of four fixed options (`anthropic` / `chat_completions` / `responses` / `gemini`) that only expands in Insert mode — press `i` or `Enter` on it, then `↓`/`↑` (or `Ctrl-J`/`Ctrl-K`) to choose and `Enter` to select. Choosing `chat_completions` / `responses` sets the provider to OpenAI with that API version; `anthropic` or `gemini` uses that provider's native format. Vim-style, starts in Normal mode.
+Fields: Name, Base URL, API Key, Format, then the Routes section. The Format field is a dropdown of four fixed options (`anthropic` / `chat_completions` / `responses` / `gemini`) that only expands in Insert mode — press `i` or `Enter` on it, then `↓`/`↑` (or `Ctrl-J`/`Ctrl-K`) to choose and `Enter` to select. Choosing `chat_completions` / `responses` sets the provider to OpenAI with that API version; `anthropic` or `gemini` uses that provider's native format. **Base URL** must carry the API version (`/v1`, `/v1beta`, …); it also accepts a bare `:PORT` shorthand, optionally with a path — `:8001` → `http://127.0.0.1:8001`, `:8001/v1` → `http://127.0.0.1:8001/v1`. Vim-style, starts in Normal mode.
 
 | Key | Action |
 | --- | --- |

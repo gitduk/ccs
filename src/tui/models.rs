@@ -529,7 +529,7 @@ mod tests {
         app.mode = Mode::Models;
         app.models.search_active = false;
         app.models.selected = 0;
-        app.config.providers.get_mut("first").unwrap().base_url = format!("http://{addr}");
+        app.config.providers.get_mut("first").unwrap().base_url = format!("http://{addr}/v1");
 
         handle_key(&mut app, KeyCode::Char('t'), KeyModifiers::NONE).unwrap();
 

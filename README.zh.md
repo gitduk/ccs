@@ -100,7 +100,7 @@ export OPENAI_API_KEY=any-value
   "providers": {
     "anthropic-official": {
       "id": "0f0b1e9e-…",
-      "base_url": "https://api.anthropic.com",
+      "base_url": "https://api.anthropic.com/v1",
       "api_key": "$ANTHROPIC_API_KEY",
       "api_format": "anthropic",
       "enabled": true,
@@ -110,7 +110,7 @@ export OPENAI_API_KEY=any-value
     },
     "openrouter": {
       "id": "6d2c4a11-…",
-      "base_url": "https://openrouter.ai/api",
+      "base_url": "https://openrouter.ai/api/v1",
       "api_key": "$OPENROUTER_API_KEY",
       "api_format": "openai",
       "api_version": "responses",
@@ -148,7 +148,7 @@ export OPENAI_API_KEY=any-value
 | 字段 | 默认值 | 含义 |
 | --- | --- | --- |
 | `id` | 自动生成 | 稳定 UUID，重命名后不变（数据库以此为键） |
-| `base_url` | — | 上游 Base URL |
+| `base_url` | — | 上游 Base URL，**须带上 API 版本**（`/v1`、`/v1beta` 等），ccs 只在它下面拼端点路径 |
 | `api_key` | — | 明文 Key，或 `$ENV_VAR` 从环境变量读取 |
 | `api_format` | 自动探测 | `anthropic`、`openai` 或 `gemini` |
 | `api_version` | `responses` | 仅 OpenAI 格式生效：`responses` 或 `chat_completions` |
@@ -215,21 +215,21 @@ routes 在 `model_map` 之前应用，且按提供商各自生效：请求 fallb
 
 对于 OpenAI 格式的提供商，`api_version` 控制上游使用哪个端点：
 
-- `"responses"`（默认）— 使用 `/v1/responses`
-- `"chat_completions"` — 使用 `/v1/chat/completions`
+- `"responses"`（默认）— 使用 `{base_url}/responses`
+- `"chat_completions"` — 使用 `{base_url}/chat/completions`
 
 ```json
 "api_version": "chat_completions"
 ```
 ### Gemini 提供商
 
-`api_format` 为 `"gemini"` 时，请求会翻译成 Google Gemini 的原生 Interactions API（`POST {base_url}/v1beta/interactions`，认证头 `x-goog-api-key`），流式请求自动加 `?alt=sse`。代理总是以无状态模式调用（`store: false`，每轮重发完整历史），因此多轮对话与工具调用循环（`function_call` ↔ `tool_result`）都直接可用。请求中的 `model` 名照常经过该提供商的 `model_map` / `routes` 改写，所以把 Claude 模型映射到 Gemini 模型即可，例如：
+`api_format` 为 `"gemini"` 时，请求会翻译成 Google Gemini 的原生 Interactions API（`POST {base_url}/interactions`，认证头 `x-goog-api-key`），流式请求自动加 `?alt=sse`。代理总是以无状态模式调用（`store: false`，每轮重发完整历史），因此多轮对话与工具调用循环（`function_call` ↔ `tool_result`）都直接可用。请求中的 `model` 名照常经过该提供商的 `model_map` / `routes` 改写，所以把 Claude 模型映射到 Gemini 模型即可，例如：
 
 ```json
 {
   "gemini": {
     "id": "…",
-    "base_url": "https://generativelanguage.googleapis.com",
+    "base_url": "https://generativelanguage.googleapis.com/v1beta",
     "api_key": "$GEMINI_API_KEY",
     "api_format": "gemini",
     "enabled": true,
@@ -261,11 +261,11 @@ routes 在 `model_map` 之前应用，且按提供商各自生效：请求 fallb
 {
   "providers": {
     "openrouter": {
-      "base_url": "https://openrouter.ai/api",
+      "base_url": "https://openrouter.ai/api/v1",
       "port": 7901
     },
     "anthropic": {
-      "base_url": "https://api.anthropic.com",
+      "base_url": "https://api.anthropic.com/v1",
       "port": 7902
     }
   }
@@ -294,7 +294,7 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
 `quota_command` 是一条用 `sh -lc` 执行的 shell 片段（15 秒超时），输出显示在表格的 Quota 列和额度面板中。执行时会导出 `$_API_KEY`、`$_BASE_URL`、`$_PROVIDER`，因此密钥不必明文写进命令里。在 TUI 中按 `U` 配置，或按 `u` 直接执行并刷新 Quota。
 
 ```json
-"quota_command": "xh -b GET \"$_BASE_URL/v1/credits\" \"Authorization: Bearer $_API_KEY\""
+"quota_command": "xh -b GET \"$_BASE_URL/credits\" \"Authorization: Bearer $_API_KEY\""
 ```
 
 ## TUI 快捷键
@@ -332,7 +332,7 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
 
 ### 提供商编辑器（`a` / `e`）
 
-字段依次为 Name、Base URL、API Key、Format，以及 Routes 区域。Format 是固定四个选项的下拉（`anthropic` / `chat_completions` / `responses` / `gemini`），只在 Insert 模式下展开——聚焦后按 `i` 或 `Enter` 进入 Insert，再按 `↓`/`↑`（或 `Ctrl-J`/`Ctrl-K`）选择，`Enter` 确认。选 `chat_completions` / `responses` 表示该提供商为 OpenAI 格式并带上对应 API 版本；选 `anthropic` 或 `gemini` 则为对应原生格式。Vim 风格，默认处于 Normal 模式。
+字段依次为 Name、Base URL、API Key、Format，以及 Routes 区域。Format 是固定四个选项的下拉（`anthropic` / `chat_completions` / `responses` / `gemini`），只在 Insert 模式下展开——聚焦后按 `i` 或 `Enter` 进入 Insert，再按 `↓`/`↑`（或 `Ctrl-J`/`Ctrl-K`）选择，`Enter` 确认。选 `chat_completions` / `responses` 表示该提供商为 OpenAI 格式并带上对应 API 版本；选 `anthropic` 或 `gemini` 则为对应原生格式。**Base URL** 须带上 API 版本（`/v1`、`/v1beta` 等）；也接受裸 `:端口` 简写，可带路径——`:8001` → `http://127.0.0.1:8001`，`:8001/v1` → `http://127.0.0.1:8001/v1`。Vim 风格，默认处于 Normal 模式。
 
 | 按键 | 操作 |
 | --- | --- |

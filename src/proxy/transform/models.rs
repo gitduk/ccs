@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-/// Convert a Gemini `GET /v1beta/models` response to Anthropic format.
+/// Convert a Gemini `GET {base_url}/models` response to Anthropic format.
 /// Gemini entries use `models/<id>` style names with no `id` field, so the
 /// `models/` prefix is stripped to expose the bare model id.
 pub fn gemini_to_anthropic_models(gemini: &Value) -> Value {
@@ -31,7 +31,7 @@ pub fn gemini_to_anthropic_models(gemini: &Value) -> Value {
     })
 }
 
-/// Convert an Anthropic GET /v1/models response to OpenAI format.
+/// Convert an Anthropic `GET {base_url}/models` response to OpenAI format.
 pub fn anthropic_to_openai_models(anthropic: &Value) -> Value {
     let models = anthropic["data"].as_array().cloned().unwrap_or_default();
     let data: Vec<Value> = models
@@ -52,7 +52,7 @@ pub fn anthropic_to_openai_models(anthropic: &Value) -> Value {
     })
 }
 
-/// Convert an OpenAI GET /v1/models response to Anthropic format.
+/// Convert an OpenAI `GET {base_url}/models` response to Anthropic format.
 pub fn openai_to_anthropic_models(openai: &Value) -> Value {
     let models = openai["data"].as_array().cloned().unwrap_or_default();
     let data: Vec<Value> = models
