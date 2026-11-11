@@ -140,6 +140,7 @@ Configuration is stored in `~/.ccs/config.json`. Set `CCS_CONFIG_DIR` to use a d
 | `providers` | — | Ordered map of provider name → provider |
 | `db_path` | `~/.ccs/ccs.db` | SQLite file holding stats, request log and model lists |
 | `request_log_limit` | `100` | How many recent requests the TUI keeps |
+| `global_routes` | `[]` | Global model routing (see "Global Routing" below) |
 
 ### Provider fields
 
@@ -178,6 +179,25 @@ Configuration is stored in `~/.ccs/config.json`. Set `CCS_CONFIG_DIR` to use a d
 Routes are applied before `model_map`, and they are per-provider: when a request falls back to a different provider, *that* provider's routes are applied. Routes never select the provider — provider choice comes from `current`, the fallback rotation, or a pinned port.
 
 Edit them in the TUI editor's **Routes** section (`e` on a provider, then Tab down to Routes).
+
+### Global Routing (`R`)
+
+`global_routes` are top-level rules shaped as `model -> provider/model`: a matching request is sent **exclusively** to the named provider (no fallback rotation) with its `model` rewritten to the right-hand name. The left side supports `*`, and the first match wins.
+
+```json
+"global_routes": [
+  { "id": "…", "pattern": "deepseek-v4.1-flash", "target": "deepseek-v4.1-flash",
+    "enabled": true, "provider": "openc" }
+]
+```
+
+- A global rule outranks that provider's own `routes`; `model_map` still applies afterwards, so exact-name prefixes keep working.
+- The named provider must exist and be enabled — otherwise the request fails instead of falling back elsewhere.
+- Pinned ports win: a request arriving on a pinned listener still goes only to that listener's provider.
+- A matched request always goes through the format transform (no byte-for-byte passthrough), because the model name changed.
+- `GET /v1/models` is unaffected; clients still see the upstream catalog.
+
+Press `R` on the provider list to open the panel: `a`/`o` add, `i` edit the left-hand model (suggestions from every provider's catalog), `t` edit the right-hand `provider/model` — one field, suggested from every enabled provider's catalog — `Space` toggle, `dd` delete, `J`/`K` reorder. `Enter` commits; it writes the config file and pushes it to a running proxy, and rows that fail validation are never saved.
 
 ### Model Mapping
 
@@ -298,6 +318,7 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:7902   # → anthropic
 | `yc` | Copy a ready-to-run test curl command to the clipboard |
 | `S` | Toggle the background proxy server |
 | `r` | Reload configuration from disk |
+| `R` | Open the global model-routes panel |
 | `c` | Clear the current provider's usage data |
 | `C` | Clear all providers' usage data |
 | `l` | Open the request logs panel |

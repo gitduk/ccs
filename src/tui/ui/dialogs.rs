@@ -32,6 +32,7 @@ pub(super) fn draw_help(f: &mut Frame, scroll: &mut u16) {
                 ("yc", "Copy test curl command to clipboard"),
                 ("S", "Toggle / restart background proxy"),
                 ("r", "Reload config from disk"),
+                ("R", "Global model routes (model → provider/model)"),
                 ("c", "Clear current provider usage data"),
                 ("C", "Clear all providers' usage data"),
                 ("l", "Open request log / expand disabled block"),
@@ -51,6 +52,22 @@ pub(super) fn draw_help(f: &mut Frame, scroll: &mut u16) {
                 ("0 / $", "Jump to field start / end (Normal)"),
                 ("Tab / S-Tab", "Next / previous field"),
                 ("Format field", "↓/↑ choose (Insert mode) · Enter select"),
+            ],
+        ),
+        (
+            "Global Routes  (R)",
+            &[
+                ("a / o", "New rule (auto-edits the pattern)"),
+                ("i / Enter", "Edit model pattern (supports *)"),
+                ("t", "Edit provider/model (one field, with suggestions)"),
+                ("Space", "Toggle rule enabled / disabled"),
+                ("dd", "Delete selected rule"),
+                ("J / K", "Move rule down / up (priority)"),
+                ("G", "Jump to the last rule"),
+                ("Tab", "Next field while editing"),
+                ("Esc", "Close suggestions, then the row, then the panel"),
+                ("q / Ctrl+C", "Close the panel"),
+                ("Enter", "Commit the row (saves immediately)"),
             ],
         ),
         (
@@ -285,7 +302,7 @@ mod tests {
     #[test]
     fn help_does_not_scroll_when_the_terminal_fits_every_section() {
         let mut scroll = u16::MAX;
-        render_help(120, 80, &mut scroll);
+        render_help(120, 120, &mut scroll);
         assert_eq!(scroll, 0);
     }
 }

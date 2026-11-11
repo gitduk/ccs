@@ -2,7 +2,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Cell;
 
-use super::super::state::SuggestState;
+use super::super::state::{SUGGEST_WINDOW_ROWS, SuggestState};
 use super::super::theme::{self as t};
 
 /// Split `text` at `cursor` into three spans — text before, the
@@ -32,8 +32,8 @@ pub(crate) enum SuggestionStyle {
     Options,
 }
 
-/// Render a dropdown list (8-row window for lists longer than 8 entries).
-/// Empty list → empty Vec, so callers can unconditionally `extend`.
+/// Render a dropdown list (`SUGGEST_WINDOW_ROWS`-row window, scrolled to the
+/// highlight). Empty list → empty Vec, so callers can unconditionally `extend`.
 pub(crate) fn render_suggestion_lines(
     suggestions: &[&str],
     suggest: &SuggestState,
@@ -45,12 +45,15 @@ pub(crate) fn render_suggestion_lines(
     }
 
     let mut lines = Vec::new();
-    let scroll = suggest.scroll;
     let total = suggestions.len();
-    let window = &suggestions[scroll..total.min(scroll + 8)];
+    // A list that shrank under a stale offset would otherwise index past its end.
+    let scroll = suggest
+        .scroll
+        .min(total.saturating_sub(SUGGEST_WINDOW_ROWS));
+    let window = &suggestions[scroll..total.min(scroll + SUGGEST_WINDOW_ROWS)];
 
     let (title, counter) = match style {
-        SuggestionStyle::Classic => ("Suggestions", total > 8),
+        SuggestionStyle::Classic => ("Suggestions", total > SUGGEST_WINDOW_ROWS),
         SuggestionStyle::Options => ("Options", false),
     };
     let head = if counter {
@@ -258,7 +261,29 @@ pub(crate) fn shorten_model_name(model: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_error_width;
+    use super::{
+        SUGGEST_WINDOW_ROWS, SuggestState, SuggestionStyle, render_suggestion_lines,
+        truncate_error_width,
+    };
+
+    #[test]
+    fn a_scroll_offset_past_a_shrunken_list_still_renders() {
+        // The filter shrank the list while the highlight kept its offset.
+        let suggest = SuggestState {
+            active: true,
+            idx: 9,
+            scroll: 9,
+        };
+        let lines = render_suggestion_lines(
+            &["a", "b"],
+            &suggest,
+            ratatui::style::Color::Blue,
+            SuggestionStyle::Classic,
+        );
+
+        assert_eq!(lines.len(), 1 + 2, "header plus every remaining row");
+        assert!(lines.len() <= 1 + SUGGEST_WINDOW_ROWS);
+    }
 
     #[test]
     fn truncate_error_width_keeps_http_status_and_message() {

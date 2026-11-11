@@ -29,10 +29,9 @@ impl App {
         let (metrics_data, provider_models) = db.load_all();
         let metrics = Arc::new(Mutex::new(metrics_data));
 
-        let initial_logs = db.load_recent_request_logs(config.request_log_limit);
-        let request_log = Arc::new(Mutex::new(crate::metrics::RequestLog::from_entries(
-            initial_logs,
-        )));
+        // History loads in the first background sync: with bodies it is the
+        // heaviest read of startup and must not delay the first frame.
+        let request_log = Arc::new(Mutex::new(crate::metrics::RequestLog::default()));
 
         let bg_proxy_pid = super::bg_proxy::load_bg_proxy_pid();
 
@@ -100,6 +99,7 @@ impl App {
             quota_status,
             quota_form: None,
             quick_form: None,
+            global_routes: super::GlobalRoutesState::default(),
             help_scroll: 0,
             sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler::new(),
             config_needs_sync: false,
@@ -370,6 +370,7 @@ mod tests {
             providers,
             db_path: None,
             request_log_limit: 100,
+            global_routes: Vec::new(),
         }
     }
 

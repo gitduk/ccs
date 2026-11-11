@@ -73,6 +73,53 @@ impl RouteRule {
     }
 }
 
+/// A model-routing rule that also selects the provider serving the request.
+///
+/// The first enabled rule whose `pattern` matches the request model wins: its
+/// `target` is sent upstream and the named provider serves the request
+/// exclusively (no fallback rotation).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GlobalRoute {
+    #[serde(flatten)]
+    pub rule: RouteRule,
+    /// Provider that exclusively serves a request matching `rule.pattern`.
+    pub provider: String,
+}
+
+/// Why a global route's provider cannot serve its requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteBlock {
+    /// No provider carries that name.
+    Missing,
+    /// The provider exists but is disabled.
+    Disabled,
+}
+
+impl GlobalRoute {
+    pub fn new(provider: impl Into<String>, pattern: impl Into<String>) -> Self {
+        Self {
+            rule: RouteRule::new(pattern),
+            provider: provider.into(),
+        }
+    }
+
+    /// True when this rule matches `model`. An empty target never matches:
+    /// it would silence the provider's own routes without rewriting anything.
+    pub fn matches(&self, model: &str) -> bool {
+        !self.rule.target.is_empty() && self.rule.matches(model)
+    }
+}
+
+#[cfg(test)]
+impl GlobalRoute {
+    /// Test builder: `new` leaves the target empty, which no rule may match on.
+    pub(crate) fn for_test(provider: &str, pattern: &str, target: &str) -> Self {
+        let mut route = Self::new(provider, pattern);
+        route.rule.target = target.to_string();
+        route
+    }
+}
+
 /// Glob pattern matching where `*` matches any sequence of characters.
 /// `**` is treated the same as `*` — there is no directory-separator semantics.
 ///
@@ -121,6 +168,10 @@ pub struct AppConfig {
     /// Maximum number of recent requests shown in the TUI. Default: 100.
     #[serde(default = "default_request_log_limit")]
     pub request_log_limit: usize,
+    /// Global model routes: a matching request is pinned to one provider.
+    /// Evaluated in order, first match wins; see [`AppConfig::global_route_for`].
+    #[serde(default)]
+    pub global_routes: Vec<GlobalRoute>,
 }
 
 fn default_listen() -> String {
@@ -438,6 +489,42 @@ impl AppConfig {
             .collect()
     }
 
+    /// First global route matching `model`, as `(provider, rule)`.
+    /// Ignored rules: disabled ones and ones with an empty target.
+    pub fn global_route_for(&self, model: &str) -> Option<(&str, &RouteRule)> {
+        self.global_routes
+            .iter()
+            .find(|r| r.matches(model))
+            .map(|r| (r.provider.as_str(), &r.rule))
+    }
+
+    /// Why a global route naming `provider` could never be served, or `None`
+    /// when that provider exists and is enabled.
+    pub fn route_block(&self, provider: &str) -> Option<RouteBlock> {
+        match self.providers.get(provider) {
+            None => Some(RouteBlock::Missing),
+            Some(p) if !p.enabled => Some(RouteBlock::Disabled),
+            Some(_) => None,
+        }
+    }
+
+    /// Follow a provider rename in `global_routes`; a rule left on the old
+    /// name would 400 every request it matches.
+    pub fn rename_global_route_provider(&mut self, old: &str, new: &str) {
+        for route in &mut self.global_routes {
+            if route.provider == old {
+                route.provider = new.to_string();
+            }
+        }
+    }
+
+    /// Drop the global routes of a deleted provider and report how many went.
+    pub fn drop_global_routes_for(&mut self, name: &str) -> usize {
+        let before = self.global_routes.len();
+        self.global_routes.retain(|r| r.provider != name);
+        before - self.global_routes.len()
+    }
+
     /// Parse the port number out of the global `listen` address.
     /// Returns None if `listen` is malformed (we don't fail load on bad listen
     /// here — the bind step will surface the error).
@@ -535,8 +622,26 @@ pub fn load_config() -> Result<AppConfig> {
     if needs_save {
         save_config(&config)?;
     }
+    warn_about_dead_global_routes(&config);
     config.validate_ports()?;
     Ok(config)
+}
+
+/// A global route pointing at a missing or disabled provider makes every
+/// matching request fail; say so at load instead of only at request time.
+fn warn_about_dead_global_routes(config: &AppConfig) {
+    for route in &config.global_routes {
+        let why = match config.route_block(&route.provider) {
+            None => continue,
+            Some(RouteBlock::Missing) => "unknown",
+            Some(RouteBlock::Disabled) => "disabled",
+        };
+        tracing::warn!(
+            "Global route '{}' targets {why} provider '{}'; matching requests will fail",
+            route.rule.pattern,
+            route.provider
+        );
+    }
 }
 
 /// Write a file atomically: write to a `.tmp` sibling with 0600 permissions,
@@ -580,6 +685,7 @@ fn default_config() -> AppConfig {
         providers: IndexMap::new(),
         db_path: None,
         request_log_limit: default_request_log_limit(),
+        global_routes: Vec::new(),
     }
 }
 
@@ -1041,6 +1147,7 @@ mod tests {
             providers: map,
             db_path: None,
             request_log_limit: 100,
+            global_routes: Vec::new(),
         }
     }
 
@@ -1133,5 +1240,121 @@ mod tests {
         let (url, body) = p.chat_url_and_body("gemini-3.8-flash");
         assert_eq!(url, "https://api.example.com/v1beta/interactions");
         assert!(body.contains("\"input\":\"ping\""));
+    }
+
+    // ─── GlobalRoute ────────────────────────────────────────────────────────
+
+    #[test]
+    fn config_without_global_routes_deserializes_to_empty() {
+        let cfg: AppConfig = serde_json::from_value(serde_json::json!({
+            "current": "prov-a",
+            "providers": {}
+        }))
+        .unwrap();
+        assert!(cfg.global_routes.is_empty());
+    }
+
+    #[test]
+    fn global_route_serializes_flat_with_provider() {
+        let mut cfg = make_config("prov-a", &[("prov-a", true)]);
+        cfg.global_routes = vec![GlobalRoute::for_test(
+            "prov-a",
+            "deepseek-v4.1-flash",
+            "deepseek-v4.1-flash",
+        )];
+
+        let json = serde_json::to_value(&cfg).unwrap();
+        let rule = &json["global_routes"][0];
+        assert_eq!(rule["pattern"], "deepseek-v4.1-flash");
+        assert_eq!(rule["target"], "deepseek-v4.1-flash");
+        assert_eq!(rule["provider"], "prov-a");
+        assert_eq!(rule["enabled"], true);
+        assert!(rule["rule"].is_null(), "flattened, not nested");
+
+        let back: AppConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(back.global_routes.len(), 1);
+        assert_eq!(back.global_routes[0].provider, "prov-a");
+    }
+
+    #[test]
+    fn global_route_first_match_wins() {
+        let mut cfg = make_config("prov-a", &[("prov-a", true), ("prov-b", true)]);
+        cfg.global_routes = vec![
+            GlobalRoute::for_test("prov-a", "deepseek-*", "ds-a"),
+            GlobalRoute::for_test("prov-b", "deepseek-v4.1-flash", "ds-b"),
+        ];
+
+        let (provider, rule) = cfg.global_route_for("deepseek-v4.1-flash").unwrap();
+        assert_eq!(provider, "prov-a");
+        assert_eq!(rule.target, "ds-a");
+    }
+
+    #[test]
+    fn global_route_rename_and_delete_follow_the_provider() {
+        let mut cfg = make_config("prov-a", &[("prov-a", true), ("prov-b", true)]);
+        cfg.global_routes = vec![
+            GlobalRoute::for_test("prov-a", "a-*", "m"),
+            GlobalRoute::for_test("prov-b", "b-*", "m"),
+        ];
+
+        cfg.rename_global_route_provider("prov-b", "prov-c");
+        assert_eq!(cfg.global_routes[0].provider, "prov-a", "untouched");
+        assert_eq!(cfg.global_routes[1].provider, "prov-c");
+
+        assert_eq!(cfg.drop_global_routes_for("prov-a"), 1);
+        assert_eq!(cfg.global_routes.len(), 1);
+        assert_eq!(cfg.drop_global_routes_for("gone"), 0);
+    }
+
+    #[test]
+    fn global_route_supports_wildcards() {
+        let mut cfg = make_config("prov-a", &[("prov-a", true)]);
+        cfg.global_routes = vec![GlobalRoute::for_test("prov-a", "*flash*", "ds-flash")];
+
+        assert_eq!(
+            cfg.global_route_for("deepseek-v4.1-flash").unwrap().0,
+            "prov-a"
+        );
+        assert!(cfg.global_route_for("claude-opus-4").is_none());
+    }
+
+    #[test]
+    fn global_route_skips_disabled_and_empty_target_rules() {
+        let mut cfg = make_config("prov-a", &[("prov-a", true), ("prov-b", true)]);
+        let mut disabled = GlobalRoute::for_test("prov-b", "deepseek-*", "ds-b");
+        disabled.rule.enabled = false;
+        cfg.global_routes = vec![
+            GlobalRoute::for_test("prov-b", "deepseek-*", ""),
+            disabled,
+            GlobalRoute::for_test("prov-a", "deepseek-*", "ds-a"),
+        ];
+
+        let (provider, rule) = cfg.global_route_for("deepseek-v4.1-flash").unwrap();
+        assert_eq!(provider, "prov-a");
+        assert_eq!(rule.target, "ds-a");
+    }
+
+    #[test]
+    fn injected_global_route_outranks_the_providers_own_routes() {
+        let mut cfg = make_config("prov-a", &[("prov-a", true)]);
+        let mut served = cfg.providers["prov-a"].clone();
+        served.routes = vec![RouteRule {
+            id: "own".into(),
+            pattern: "deepseek-*".into(),
+            target: "from-provider-route".into(),
+            enabled: true,
+        }];
+        cfg.global_routes = vec![GlobalRoute::for_test(
+            "prov-a",
+            "deepseek-v4.1-flash",
+            "from-global",
+        )];
+
+        let (_, rule) = cfg.global_route_for("deepseek-v4.1-flash").unwrap();
+        served.routes.insert(0, rule.clone());
+
+        let (model, pattern) = served.resolve_model("deepseek-v4.1-flash");
+        assert_eq!(model, "from-global");
+        assert_eq!(pattern.as_deref(), Some("deepseek-v4.1-flash"));
     }
 }

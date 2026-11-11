@@ -15,8 +15,8 @@ use super::App;
 use super::ServerHandle;
 use super::server::sync_proxy_config;
 use super::state::{
-    FORMAT_FIELD_IDX, FormField, MessageKind, Mode, NAME_FIELD_IDX, ProviderForm, VimMode,
-    filter_suggestions, provider_model_suggestions,
+    FORMAT_FIELD_IDX, FormField, ListMove, MessageKind, Mode, NAME_FIELD_IDX, ProviderForm,
+    VimMode, filter_suggestions, provider_model_suggestions, suggest_move,
 };
 use super::theme::{self as t};
 use super::ui::format::{SuggestionStyle, mask_api_key_str, render_suggestion_lines};
@@ -98,37 +98,26 @@ pub(super) fn handle_key(
     if format_dropdown_active(form) {
         let choices = format_suggest_choices(form);
         let len = choices.len();
+        // On the Format field, ↓/↑ always navigate the choice list (it is a
+        // select field); j/k in Normal mode still move between fields.
+        if let Some(dir) = suggest_move(code, ctrl) {
+            match dir {
+                ListMove::Down => {
+                    if !nav_suggest_down(&mut form.format_suggest, len) {
+                        form.focus_next();
+                    }
+                }
+                ListMove::Up => {
+                    if !form.format_suggest.active {
+                        form.focus_prev();
+                    } else {
+                        nav_suggest_up(&mut form.format_suggest);
+                    }
+                }
+            }
+            return Ok(());
+        }
         match code {
-            // On the Format field, ↓/↑ always navigate the choice list (it is
-            // a select field); j/k in Normal mode still move between fields.
-            KeyCode::Down => {
-                if !nav_suggest_down(&mut form.format_suggest, len) {
-                    form.focus_next();
-                }
-                return Ok(());
-            }
-            KeyCode::Up => {
-                if !form.format_suggest.active {
-                    form.focus_prev();
-                } else {
-                    nav_suggest_up(&mut form.format_suggest);
-                }
-                return Ok(());
-            }
-            KeyCode::Char('j') if ctrl => {
-                if !nav_suggest_down(&mut form.format_suggest, len) {
-                    form.focus_next();
-                }
-                return Ok(());
-            }
-            KeyCode::Char('k') if ctrl => {
-                if !form.format_suggest.active {
-                    form.focus_prev();
-                } else {
-                    nav_suggest_up(&mut form.format_suggest);
-                }
-                return Ok(());
-            }
             // Select only after the user navigated the list (↓/↑); a plain
             // Enter without navigation falls through to normal Insert mode.
             KeyCode::Enter if form.format_suggest.active && len > 0 => {
@@ -672,6 +661,21 @@ fn handle_routes_key(
             return;
         }
 
+        if form.route_edit_target
+            && let Some(dir) = suggest_move(code, ctrl)
+        {
+            match dir {
+                ListMove::Down => {
+                    let len = route_target_suggest_len(form, provider_models);
+                    nav_suggest_down(&mut form.route_suggest, len);
+                }
+                ListMove::Up => {
+                    nav_suggest_up(&mut form.route_suggest);
+                }
+            }
+            return;
+        }
+
         match code {
             KeyCode::Enter => {
                 if form.route_suggest.active {
@@ -707,24 +711,6 @@ fn handle_routes_key(
                     exit_route_insert(form, provider_models);
                     form.focus_prev();
                 }
-                return;
-            }
-            KeyCode::Down if form.route_edit_target => {
-                let len = route_target_suggest_len(form, provider_models);
-                nav_suggest_down(&mut form.route_suggest, len);
-                return;
-            }
-            KeyCode::Char('j') if ctrl && form.route_edit_target => {
-                let len = route_target_suggest_len(form, provider_models);
-                nav_suggest_down(&mut form.route_suggest, len);
-                return;
-            }
-            KeyCode::Up if form.route_edit_target => {
-                nav_suggest_up(&mut form.route_suggest);
-                return;
-            }
-            KeyCode::Char('k') if ctrl && form.route_edit_target => {
-                nav_suggest_up(&mut form.route_suggest);
                 return;
             }
             KeyCode::Char(' ') if !ctrl => return,

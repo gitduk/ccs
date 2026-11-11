@@ -57,24 +57,23 @@ pub(super) fn start_db_watcher(app: &App) -> Option<(Receiver<()>, notify::Recom
 // reload_metrics_from_db are App methods defined in state/metrics_sync.rs.
 // tui/mod.rs imports MetricsSnapshot directly from state.
 
-pub(crate) fn replace_request_logs_if_changed(
-    app: &mut App,
-    logs: Vec<crate::metrics::RequestLogEntry>,
-) -> bool {
-    let Ok(mut current) = app.request_log.lock() else {
+/// Apply one background request-log sync: merge the rows read from the DB (or
+/// replace the window when the table was cleared under us), then patch the
+/// usage a finished stream wrote into rows already held. Returns whether the
+/// panel changed and so needs a redraw.
+pub(crate) fn append_request_log_rows(app: &mut App, patch: super::RequestLogPatch) -> bool {
+    let Ok(mut log) = app.request_log.lock() else {
         return false;
     };
-    if current.entries().len() == logs.len()
-        && current
-            .entries()
-            .iter()
-            .zip(logs.iter())
-            .all(|(a, b)| a == b)
-    {
-        return false;
-    }
-    current.replace(logs);
-    true
+    let keep = app.config.request_log_limit;
+    let mut changed = if patch.reset {
+        log.replace(patch.rows, keep);
+        true
+    } else {
+        log.merge(patch.rows, keep)
+    };
+    changed |= log.apply_usage(&patch.usage);
+    changed
 }
 
 pub(super) fn check_server_status(app: &mut App, server: &mut Option<ServerHandle>) -> bool {

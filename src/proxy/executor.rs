@@ -179,9 +179,13 @@ pub(crate) async fn execute_provider_request(
             UpstreamPlan::Gemini => {
                 // `needs_json` above guarantees this request carries JSON.
                 let req = request_json.expect("Gemini requires canonical JSON");
-                let canonical =
-                    patched_canonical(Some(req), provider).unwrap_or_else(|| req.clone());
-                let gemini_req = transform::anthropic_to_gemini_request(&canonical, provider)?;
+                // The translator resolves the model itself; only the history and
+                // cap patches belong here.
+                let patched = patched_history_and_cap(req, provider);
+                let gemini_req = transform::anthropic_to_gemini_request(
+                    patched.as_ref().unwrap_or(req),
+                    provider,
+                )?;
                 Bytes::from(serde_json::to_vec(&gemini_req)?)
             }
             UpstreamPlan::Anthropic => match patched_canonical(req_json, provider) {
@@ -266,24 +270,31 @@ enum UpstreamPlan {
     Gemini,
 }
 
-/// Apply the model-rewrite/thinking/cap patches an Anthropic-format body
-/// needs before it is serialised upstream (shared by Anthropic and the
-/// Gemini translation, which starts from the same canonical value).
-fn patched_canonical(req_json: Option<&serde_json::Value>, provider: &Provider) -> Option<Value> {
-    let req = req_json?;
-    let after_model_map = transform::map_anthropic_model(req, provider);
+/// Thinking-history and token-cap patches, without the model rewrite.
+///
+/// The Anthropic path adds that rewrite via [`patched_canonical`]; the Gemini
+/// translator resolves the model itself, so applying it here too would run the
+/// provider's routes and `model_map` twice.
+fn patched_history_and_cap(req: &Value, provider: &Provider) -> Option<Value> {
     let after_thinking = if provider.inject_thinking_history {
-        let base = after_model_map.as_ref().unwrap_or(req);
-        transform::patch_thinking_history(base, provider.strict_thinking_history)
-            .or(after_model_map)
+        transform::patch_thinking_history(req, provider.strict_thinking_history)
     } else {
-        after_model_map
+        None
     };
     transform::clamp_max_tokens(
         after_thinking.as_ref().unwrap_or(req),
         provider.max_tokens_cap,
     )
     .or(after_thinking)
+}
+
+/// Everything an Anthropic-format body needs before it is serialised upstream:
+/// the model rewrite, then history and cap patches. `None` means send the
+/// original bytes untouched.
+fn patched_canonical(req_json: Option<&Value>, provider: &Provider) -> Option<Value> {
+    let req = req_json?;
+    let after_model_map = transform::map_anthropic_model(req, provider);
+    patched_history_and_cap(after_model_map.as_ref().unwrap_or(req), provider).or(after_model_map)
 }
 
 pub(crate) async fn probe_provider_message(
@@ -391,6 +402,43 @@ pub(crate) fn extract_error_message(body: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn provider() -> Provider {
+        Provider {
+            id: "p".into(),
+            base_url: "https://example.com".into(),
+            api_key: "k".into(),
+            api_format: ApiFormat::Gemini,
+            model_map: std::collections::HashMap::new(),
+            routes: Vec::new(),
+            enabled: true,
+            fallback: true,
+            api_version: None,
+            inject_thinking_history: false,
+            strict_thinking_history: false,
+            quota_command: None,
+            port: None,
+            test_model: None,
+            max_tokens_cap: None,
+            extra_headers: Default::default(),
+        }
+    }
+
+    #[test]
+    fn history_and_cap_patch_never_rewrites_the_model() {
+        // The Gemini translator owns the model rewrite; patching it here would
+        // apply the provider's routes and model_map a second time.
+        let mut p = provider();
+        p.model_map.insert("req-model".into(), "mapped".into());
+        let req = serde_json::json!({"model": "req-model", "messages": []});
+
+        let patched = patched_history_and_cap(&req, &p);
+
+        assert!(
+            patched.is_none(),
+            "nothing to patch: model must stay untouched"
+        );
+    }
 
     #[test]
     fn patch_stream_usage_injects_include_usage_for_chat_stream() {

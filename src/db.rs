@@ -522,54 +522,89 @@ pub fn update_request_log_tokens(
     Ok(())
 }
 
-/// Load the most recent `limit` entries, ordered oldest-first (for TUI display).
-pub fn load_recent_request_logs(
+/// The columns [`log_entry_from_row`] reads; the getters go by name so adding a
+/// column later cannot silently shift the fields.
+const REQUEST_LOG_COLUMNS: &str =
+    "SELECT id, timestamp_ms, provider_name, model, status, latency_ms,
+            input_tokens, output_tokens, is_stream, error, request_body, response_body
+     FROM request_log";
+
+fn log_entry_from_row(row: &rusqlite::Row) -> Result<crate::metrics::RequestLogEntry> {
+    let ts_ms: i64 = row.get("timestamp_ms")?;
+    let is_stream: i64 = row.get("is_stream")?;
+    let request_body: Option<String> = row.get("request_body")?;
+    let response_body: Option<String> = row.get("response_body")?;
+    Ok(crate::metrics::RequestLogEntry {
+        id: row.get("id")?,
+        timestamp: std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_millis(ts_ms as u64),
+        provider: row.get("provider_name")?,
+        model: row.get("model")?,
+        status: row.get("status")?,
+        latency_ms: row.get("latency_ms")?,
+        input_tokens: row.get("input_tokens")?,
+        output_tokens: row.get("output_tokens")?,
+        is_stream: is_stream != 0,
+        error: row.get("error")?,
+        request_body: request_body.map(std::sync::Arc::from),
+        response_body: response_body.map(std::sync::Arc::from),
+    })
+}
+
+/// The newest `limit` request-log rows with `id > after_id`, oldest-first.
+///
+/// Reading from the newest end keeps a burst from being fetched in catch-up
+/// rounds: rows older than the returned page would be trimmed off the TUI's
+/// window anyway. `after_id = 0` is the cold load.
+pub fn load_request_logs_after(
     conn: &Connection,
+    after_id: u64,
     limit: usize,
 ) -> Vec<crate::metrics::RequestLogEntry> {
-    let Ok(mut stmt) = conn.prepare(
-        "SELECT id, timestamp_ms, provider_name, model, status, latency_ms,
-                input_tokens, output_tokens, is_stream, error, request_body, response_body
-         FROM request_log
-         ORDER BY id DESC
-         LIMIT ?1",
-    ) else {
+    let Ok(mut stmt) = conn.prepare(&format!(
+        "{REQUEST_LOG_COLUMNS} WHERE id > ?1 ORDER BY id DESC LIMIT ?2"
+    )) else {
         return vec![];
     };
 
-    let rows = stmt.query_map([limit as i64], |row| {
-        let ts_ms: i64 = row.get(1)?;
-        let is_stream: i64 = row.get(8)?;
-        let error: Option<String> = row.get(9)?;
-        let request_body: Option<String> = row.get(10)?;
-        let response_body: Option<String> = row.get(11)?;
-        let request_body = request_body.map(std::sync::Arc::from);
-        let response_body = response_body.map(std::sync::Arc::from);
-        Ok(crate::metrics::RequestLogEntry {
-            id: row.get(0)?,
-            timestamp: std::time::SystemTime::UNIX_EPOCH
-                + std::time::Duration::from_millis(ts_ms as u64),
-            provider: row.get(2)?,
-            model: row.get(3)?,
-            status: row.get(4)?,
-            latency_ms: row.get(5)?,
-            input_tokens: row.get(6)?,
-            output_tokens: row.get(7)?,
-            is_stream: is_stream != 0,
-            error,
-            request_body,
-            response_body,
-        })
-    });
-
-    match rows {
+    match stmt.query_map(
+        rusqlite::params![after_id as i64, limit as i64],
+        log_entry_from_row,
+    ) {
         Ok(iter) => {
             let mut v: Vec<_> = iter.flatten().collect();
-            v.reverse(); // oldest-first for TUI
+            v.reverse(); // oldest-first, the order `RequestLog::merge` expects
             v
         }
         Err(e) => {
             tracing::warn!("Failed to load request logs: {e}");
+            vec![]
+        }
+    }
+}
+
+/// Token/model values of the newest `rows` rows, without their bodies.
+///
+/// A streamed request is inserted with zero usage and patched afterwards, which
+/// an append-only sync cannot see; this cheap read supplies the patch.
+pub fn load_request_log_usage(conn: &Connection, rows: usize) -> Vec<crate::metrics::LogUsage> {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT id, input_tokens, output_tokens, model FROM request_log
+         ORDER BY id DESC LIMIT ?1",
+    ) else {
+        return vec![];
+    };
+    match stmt.query_map([rows as i64], |row| {
+        Ok(crate::metrics::LogUsage {
+            id: row.get("id")?,
+            input_tokens: row.get("input_tokens")?,
+            output_tokens: row.get("output_tokens")?,
+            model: row.get("model")?,
+        })
+    }) {
+        Ok(iter) => iter.flatten().collect(),
+        Err(e) => {
+            tracing::warn!("Failed to load request-log usage: {e}");
             vec![]
         }
     }
@@ -909,5 +944,102 @@ mod tests {
         .unwrap();
         let snap = load_quota_snapshots(&conn);
         assert_eq!(snap.get("p1").map(String::as_str), Some("37 credits"));
+    }
+}
+
+#[cfg(test)]
+mod log_sync_tests {
+    use super::*;
+
+    /// In-memory DB with `ids` as request-log rows (body = id, so a test can
+    /// tell which rows were read).
+    fn log_db(ids: &[u64]) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        for id in ids {
+            conn.execute(
+                "INSERT INTO request_log (id, timestamp_ms, provider_name, model, status, request_body)
+                 VALUES (?1, ?1, 'p', 'm', 200, ?1)",
+                rusqlite::params![*id as i64],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    fn ids(entries: &[crate::metrics::RequestLogEntry]) -> Vec<u64> {
+        entries.iter().map(|e| e.id).collect()
+    }
+
+    #[test]
+    fn a_cold_load_returns_the_newest_rows_oldest_first() {
+        let conn = log_db(&[1, 2, 3, 4, 5]);
+
+        let rows = load_request_logs_after(&conn, 0, 3);
+
+        assert_eq!(ids(&rows), vec![3, 4, 5], "newest three, display order");
+    }
+
+    #[test]
+    fn an_incremental_load_reads_only_the_rows_appended_since_the_last_sync() {
+        let conn = log_db(&[1, 2, 3, 4, 5]);
+
+        let rows = load_request_logs_after(&conn, 3, 100);
+
+        assert_eq!(ids(&rows), vec![4, 5]);
+        assert!(load_request_logs_after(&conn, 5, 100).is_empty());
+    }
+
+    #[test]
+    fn a_burst_returns_the_newest_page_so_the_window_can_be_trimmed() {
+        let conn = log_db(&[1, 2, 3, 4, 5]);
+
+        // after_id = 0 with a page smaller than the table: the newest rows win,
+        // because the TUI keeps only the newest `limit` entries anyway.
+        assert_eq!(ids(&load_request_logs_after(&conn, 0, 2)), vec![4, 5]);
+        assert_eq!(ids(&load_request_logs_after(&conn, 2, 2)), vec![4, 5]);
+    }
+
+    #[test]
+    fn an_incremental_load_past_the_newest_row_is_empty() {
+        let conn = log_db(&[1, 2, 3]);
+
+        assert!(load_request_logs_after(&conn, 99, 10).is_empty());
+        assert!(load_request_logs_after(&conn, 0, 0).is_empty());
+    }
+
+    #[test]
+    fn usage_is_read_back_for_the_newest_rows_only() {
+        let conn = log_db(&[1, 2, 3]);
+        conn.execute(
+            "UPDATE request_log SET input_tokens = 10, output_tokens = 20, model = 'served'
+             WHERE id = 3",
+            [],
+        )
+        .unwrap();
+
+        let usage = load_request_log_usage(&conn, 2);
+
+        let ids: Vec<u64> = usage.iter().map(|u| u.id).collect();
+        assert_eq!(ids, vec![3, 2], "newest first");
+        let newest = &usage[0];
+        assert_eq!(
+            (
+                newest.input_tokens,
+                newest.output_tokens,
+                newest.model.as_str()
+            ),
+            (10, 20, "served")
+        );
+    }
+
+    #[test]
+    fn a_patched_rows_request_body_is_left_alone_by_the_usage_read() {
+        let conn = log_db(&[5]);
+
+        let usage = load_request_log_usage(&conn, 5);
+
+        assert_eq!(usage.len(), 1);
+        assert_eq!(usage[0].model, "m", "the seeded model, nothing rewritten");
     }
 }

@@ -13,7 +13,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::config::{ApiFormat, Provider};
 
-use super::state::{App, ConfirmAction, MessageKind, Mode, QuotaStatus};
+use super::state::{App, ConfirmAction, ListMove, MessageKind, Mode, QuotaStatus, list_move};
 use super::theme::{self as t};
 use super::ui::format::{
     api_key_display_len, col_width, config_path_display, masked_api_key, truncate_chars,
@@ -29,6 +29,7 @@ pub(super) fn handle_key(
     if app.message.is_some() {
         app.message = None;
     }
+    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
 
     let prev = super::input::insert::consume_pending_key(&mut app.pending_key);
 
@@ -106,6 +107,14 @@ pub(super) fn handle_key(
         }
     }
 
+    if let Some(dir) = list_move(code, ctrl, false) {
+        match dir {
+            ListMove::Up => app.select_prev(),
+            ListMove::Down => app.select_next(),
+        }
+        return Ok(());
+    }
+
     match code {
         KeyCode::Char('q') | KeyCode::Esc => {
             if app.bg_proxy_pid.is_some() {
@@ -114,8 +123,6 @@ pub(super) fn handle_key(
                 app.confirm(ConfirmAction::Quit);
             }
         }
-        KeyCode::Up | KeyCode::Char('k') => app.select_prev(),
-        KeyCode::Down | KeyCode::Char('j') => app.select_next(),
         KeyCode::Char('G') => {
             if !app.config.providers.is_empty() {
                 let last = app.table_row_count() - 1;
@@ -176,6 +183,7 @@ pub(super) fn handle_key(
             let _ = app.reload_config();
             server::sync_proxy_config(app, server_handle);
         }
+        KeyCode::Char('R') => super::global_routes::open(app),
         KeyCode::Char('S') => {
             server::toggle_bg_proxy(app, server_handle);
         }
@@ -200,7 +208,7 @@ pub(super) fn handle_key(
                 app.logs.scroll = 0;
             }
         }
-        KeyCode::Char('l') if modifiers == KeyModifiers::CONTROL => {
+        KeyCode::Char('l') if ctrl => {
             app.message_log.clear();
         }
         _ => {}
@@ -522,6 +530,7 @@ mod tests {
                 providers,
                 db_path: Some(path),
                 request_log_limit: 100,
+                global_routes: Vec::new(),
             },
             mode: crate::tui::state::Mode::Normal,
             terminal_focused: true,
@@ -564,6 +573,7 @@ mod tests {
             quota_status: std::collections::HashMap::new(),
             quota_form: None,
             quick_form: None,
+            global_routes: crate::tui::state::GlobalRoutesState::default(),
             help_scroll: 0,
             sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler::new(),
             config_needs_sync: false,

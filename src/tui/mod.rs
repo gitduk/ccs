@@ -4,6 +4,7 @@
 //! Shared rendering infrastructure remains under `src/tui/ui/`.
 
 mod editor;
+mod global_routes;
 mod logs;
 mod models;
 mod provider_stats;
@@ -38,7 +39,7 @@ use crate::error::Result;
 use state::{App, MetricsSnapshot};
 
 use event_loop::{
-    check_bg_proxy_status, check_server_status, replace_request_logs_if_changed, start_db_watcher,
+    append_request_log_rows, check_bg_proxy_status, check_server_status, start_db_watcher,
 };
 use server::start_server_background;
 
@@ -48,6 +49,9 @@ const ASYNC_DRAIN_INTERVAL: Duration = Duration::from_millis(200);
 const DB_WATCHER_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const BG_PROXY_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 const BG_PROXY_LOG_SYNC_INTERVAL: Duration = Duration::from_millis(500);
+/// Newest rows whose usage is re-read on every sync: a stream patches its row
+/// after the fact, which an append-only sync cannot see.
+const LOG_USAGE_TAIL: usize = 50;
 const METRICS_RELOAD_INTERVAL: Duration = Duration::from_secs(5);
 
 fn should_read_next_event(processed_events: usize, has_waiting_event: bool) -> bool {
@@ -102,11 +106,19 @@ enum BgDbResult {
     RequestLogs {
         data_version: i64,
         /// `None` when the database was unchanged and the reload was skipped.
-        logs: Option<Vec<crate::metrics::RequestLogEntry>>,
+        patch: Option<RequestLogPatch>,
     },
     /// Background proxy version reported by its /health endpoint; `None`
     /// when the probe failed (or the port serves something else).
     BgProxyVersion(Option<String>),
+}
+
+/// One request-log sync's payload: the rows read from the DB, whether they
+/// replace the window (the table was cleared), and the usage of the newest rows.
+struct RequestLogPatch {
+    reset: bool,
+    rows: Vec<crate::metrics::RequestLogEntry>,
+    usage: Vec<crate::metrics::LogUsage>,
 }
 
 struct BgDbJobs {
@@ -154,14 +166,30 @@ impl BgDbJobs {
         self.request_logs_running = true;
         let tx = self.tx.clone();
         let db = app.db.clone();
-        let request_log_limit = app.config.request_log_limit;
+        let limit = app.config.request_log_limit;
+        let newest = app
+            .request_log
+            .lock()
+            .map(|log| log.newest_id())
+            .unwrap_or(0);
         let last_version = self.request_log_data_version;
+        // The first sync reads the newest page even when the in-process proxy
+        // already pushed an entry: that entry carries the highest id.
+        let after_id = if last_version < 0 { 0 } else { newest };
         tokio::task::spawn_blocking(move || {
-            // Skip the full reload (bodies included) while the bg proxy is idle.
             let data_version = db.data_version();
-            let logs = (data_version != last_version)
-                .then(|| db.load_recent_request_logs(request_log_limit));
-            let _ = tx.send(BgDbResult::RequestLogs { data_version, logs });
+            let patch = (data_version != last_version).then(|| {
+                // Rows deleted under us (clear usage) mean the whole window is gone.
+                let reset = db.newest_request_log_id() < after_id;
+                let from = if reset { 0 } else { after_id };
+                let rows = db.load_request_logs_after(from, limit);
+                let usage = db.load_request_log_usage(LOG_USAGE_TAIL);
+                RequestLogPatch { reset, rows, usage }
+            });
+            let _ = tx.send(BgDbResult::RequestLogs {
+                data_version,
+                patch,
+            });
         });
     }
 
@@ -185,11 +213,14 @@ impl BgDbJobs {
                     self.metrics_running = false;
                     dirty |= app.apply_metrics_snapshot(snapshot);
                 }
-                BgDbResult::RequestLogs { data_version, logs } => {
+                BgDbResult::RequestLogs {
+                    data_version,
+                    patch,
+                } => {
                     self.request_logs_running = false;
                     self.request_log_data_version = data_version;
-                    if let Some(logs) = logs {
-                        dirty |= replace_request_logs_if_changed(app, logs);
+                    if let Some(patch) = patch {
+                        dirty |= append_request_log_rows(app, patch);
                     }
                 }
                 BgDbResult::BgProxyVersion(remote) => {
@@ -262,26 +293,29 @@ fn run_loop(
     if app.bg_proxy_pid.is_some() {
         bg_db_jobs.start_bg_proxy_version_check(app);
     }
+    // `App::new` leaves the request log empty so the first frame is cheap; fill it
+    // here, off the render thread.
+    bg_db_jobs.start_request_log_sync(app);
     let mut dirty = true;
     loop {
+        // Paint what is already known before blocking for input, so startup never
+        // waits for the first poll timeout.
+        if dirty {
+            terminal.draw(|f| ui::draw(f, app))?;
+            dirty = false;
+        }
+
         let now = Instant::now();
-        let mut input_dirty = false;
         if event::poll(scheduler.next_wake_in(
             now,
             message_deadline(app),
             app.bg_proxy_pid.is_some(),
         ))? {
-            input_dirty = process_input_events(app, server)?;
-            dirty |= input_dirty;
+            dirty |= process_input_events(app, server)?;
         }
 
         if app.should_quit {
             break;
-        }
-
-        if input_dirty {
-            terminal.draw(|f| ui::draw(f, app))?;
-            dirty = false;
         }
 
         dirty |= run_due_scheduled_tasks(
@@ -294,11 +328,6 @@ fn run_loop(
 
         if app.should_quit {
             break;
-        }
-
-        if dirty {
-            terminal.draw(|f| ui::draw(f, app))?;
-            dirty = false;
         }
     }
     Ok(())

@@ -2039,7 +2039,6 @@ mod tests {
         };
 
         let gemini_json = req.to_gemini().unwrap();
-        let gemini_json = req.to_gemini().unwrap();
         assert_eq!(gemini_json["model"], "gemini-2.5-pro");
         assert_eq!(
             gemini_json["system_instruction"],

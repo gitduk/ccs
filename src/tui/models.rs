@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use unicode_width::UnicodeWidthStr;
 
-use super::state::{App, MessageKind, Mode};
+use super::state::{App, ListMove, MessageKind, Mode, list_move, step};
 use super::theme::{self as t};
 use super::ui::format::{fmt_latency, truncate_error_width};
 use super::ui::layout::centered_fixed;
@@ -42,24 +42,9 @@ pub(super) fn handle_key(
             app.mode = Mode::Normal;
             return Ok(());
         }
-        match code {
-            KeyCode::Down => {
-                nav_down(app, total, 1);
-                return Ok(());
-            }
-            KeyCode::Up => {
-                nav_up(app, 1);
-                return Ok(());
-            }
-            KeyCode::Char('j') if ctrl => {
-                nav_down(app, total, 1);
-                return Ok(());
-            }
-            KeyCode::Char('k') if ctrl => {
-                nav_up(app, 1);
-                return Ok(());
-            }
-            _ => {}
+        if let Some(dir) = list_move(code, ctrl, true) {
+            nav(app, total, dir, 1);
+            return Ok(());
         }
 
         match super::input::insert::handle_field_insert_key(
@@ -80,6 +65,11 @@ pub(super) fn handle_key(
         }
     } else {
         let prev = super::input::insert::consume_pending_key(&mut app.models.pending_key);
+
+        if let Some(dir) = list_move(code, ctrl, false) {
+            nav(app, total, dir, 1);
+            return Ok(());
+        }
 
         if let Some(pk) = prev {
             match (pk, &code) {
@@ -168,16 +158,14 @@ pub(super) fn handle_key(
                     );
                 }
             }
-            KeyCode::Down | KeyCode::Char('j') => nav_down(app, total, 1),
-            KeyCode::Up | KeyCode::Char('k') => nav_up(app, 1),
             KeyCode::Char('G') => {
                 if total > 0 {
                     app.models.selected = total - 1;
                     app.models.scroll = total.saturating_sub(SCROLL_LOOKAHEAD) as u16;
                 }
             }
-            KeyCode::PageDown | KeyCode::Char('d') if ctrl => nav_down(app, total, 10),
-            KeyCode::PageUp | KeyCode::Char('u') if ctrl => nav_up(app, 10),
+            KeyCode::PageDown | KeyCode::Char('d') if ctrl => nav(app, total, ListMove::Down, 10),
+            KeyCode::PageUp | KeyCode::Char('u') if ctrl => nav(app, total, ListMove::Up, 10),
             KeyCode::Enter => copy_selected(app, &refs),
             KeyCode::Char('y') => {
                 app.models.pending_key = Some(('y', Instant::now()));
@@ -428,20 +416,13 @@ fn selected_model<'a>(app: &App, refs: &'a [&str]) -> Option<(String, &'a str)> 
     Some((prov, model))
 }
 
-fn nav_down(app: &mut App, total: usize, step: usize) {
-    if total == 0 {
-        return;
-    }
-    app.models.selected = (app.models.selected + step).min(total - 1);
+/// Move the models selection `rows` rows and keep it inside the 8-row viewport.
+fn nav(app: &mut App, total: usize, dir: ListMove, rows: isize) {
+    app.models.selected = step(app.models.selected, dir.delta() * rows, total);
     let bottom = app.models.scroll as usize + SCROLL_LOOKAHEAD;
     if app.models.selected >= bottom {
-        app.models.scroll = (app.models.selected + 1).saturating_sub(8) as u16;
-    }
-}
-
-fn nav_up(app: &mut App, step: usize) {
-    app.models.selected = app.models.selected.saturating_sub(step);
-    if app.models.selected < app.models.scroll as usize {
+        app.models.scroll = (app.models.selected + 1).saturating_sub(SCROLL_LOOKAHEAD) as u16;
+    } else if app.models.selected < app.models.scroll as usize {
         app.models.scroll = app.models.selected as u16;
     }
 }
@@ -496,6 +477,20 @@ mod tests {
                 .map(Vec::as_slice),
             Some(&["deepseek-v4-flash".to_string()][..])
         );
+    }
+
+    #[tokio::test]
+    async fn plain_j_types_into_the_search_box_instead_of_moving_the_selection() {
+        let mut app = app_with_no_models("");
+        app.models.search_active = true;
+
+        // `j` is buffered as the first half of the `jk` exit sequence, so it
+        // lands in the field only once the next key arrives.
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE).unwrap();
+        handle_key(&mut app, KeyCode::Char('x'), KeyModifiers::NONE).unwrap();
+
+        assert_eq!(app.models.search_field.value, "jx");
+        assert_eq!(app.models.selected, 0);
     }
 
     #[tokio::test]

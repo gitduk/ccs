@@ -287,6 +287,8 @@ impl App {
             if self.config.current == old_name {
                 self.config.current = fields.name.clone();
             }
+            self.config
+                .rename_global_route_provider(old_name, &fields.name);
 
             self.db.rename_provider(&provider_id, &fields.name);
 
@@ -432,11 +434,10 @@ impl App {
         if let Ok(mut m) = self.metrics.lock() {
             m.last_error.clear();
         }
-        // Clear in-process request log (bg proxy mode syncs via reload_metrics_from_db below).
-        if self.bg_proxy_pid.is_none()
-            && let Ok(mut log) = self.request_log.lock()
-        {
-            log.replace(vec![]);
+        // The TUI wrote the clear itself, so `PRAGMA data_version` will not move
+        // and no background sync will follow: empty the log here.
+        if let Ok(mut log) = self.request_log.lock() {
+            log.replace(vec![], self.config.request_log_limit);
         }
         // Reload immediately so the TUI reflects the cleared state right away
         // instead of waiting up to ~1s for the next periodic reload.
@@ -496,6 +497,7 @@ impl App {
         self.tests.pending.remove(name);
         self.tests.testing_model.remove(name);
         self.quota_status.remove(id);
+        let dropped = self.config.drop_global_routes_for(name);
         if self.config.current == name {
             self.config.current = self
                 .config
@@ -515,7 +517,11 @@ impl App {
             }
             self.providers.expanded = false;
         }
-        self.set_message(format!("Deleted '{name}'"), MessageKind::Success);
+        let msg = match dropped {
+            0 => format!("Deleted '{name}'"),
+            n => format!("Deleted '{name}' and {n} global route(s) pointing at it"),
+        };
+        self.set_message(msg, MessageKind::Success);
         Ok(())
     }
 
@@ -858,5 +864,52 @@ impl App {
             }
         }
         changed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::config::GlobalRoute;
+    use crate::config::test_support::ConfigDirGuard;
+    use crate::tui::state::ProviderForm;
+    use crate::tui::testing::tests::app_with_current;
+
+    #[test]
+    fn deleting_a_provider_drops_the_global_routes_pointing_at_it() {
+        let _guard = ConfigDirGuard::new();
+        let mut app = app_with_current("first");
+        app.config.global_routes = vec![
+            GlobalRoute::for_test("second", "second-*", "m"),
+            GlobalRoute::for_test("first", "first-*", "m"),
+        ];
+
+        app.do_delete("second").unwrap();
+
+        assert_eq!(app.config.global_routes.len(), 1);
+        assert_eq!(app.config.global_routes[0].provider, "first");
+        // The drop must reach disk, or a reload would resurrect the dead rule.
+        assert_eq!(crate::config::load_config().unwrap().global_routes.len(), 1);
+    }
+
+    #[test]
+    fn renaming_a_provider_follows_into_the_global_routes() {
+        let _guard = ConfigDirGuard::new();
+        let mut app = app_with_current("first");
+        app.config.global_routes = vec![GlobalRoute::for_test("second", "second-*", "m")];
+
+        let provider = app.config.providers.get("second").unwrap().clone();
+        let mut form = ProviderForm::new("second", Some(&provider));
+        form.fields[0].value = "renamed".to_string();
+        app.form = Some(form);
+
+        app.do_save_form(true).unwrap();
+
+        assert!(app.config.providers.contains_key("renamed"));
+        assert_eq!(app.config.global_routes[0].provider, "renamed");
+        assert_eq!(
+            crate::config::load_config().unwrap().global_routes[0].provider,
+            "renamed",
+            "the rewrite must reach disk, or the rule 400s after a reload"
+        );
     }
 }

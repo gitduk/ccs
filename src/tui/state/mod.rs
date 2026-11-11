@@ -12,7 +12,7 @@ pub(super) const FORMAT_FIELD_IDX: usize = 3;
 
 use ratatui::widgets::TableState;
 
-use crate::config::{AppConfig, Provider, RouteRule};
+use crate::config::{AppConfig, GlobalRoute, Provider, RouteRule};
 use crate::metrics::{SharedMetrics, SharedRequestLog};
 use crate::repo::Repository;
 use crate::tester::TestResult;
@@ -23,12 +23,14 @@ pub(super) const MESSAGE_TIMEOUT_SECS: u64 = 3;
 mod actions;
 mod bg_proxy;
 mod filter;
+mod list;
 mod metrics_sync;
 mod navigation;
 
 pub(crate) use bg_proxy::{bg_proxy_health_url, fetch_bg_proxy_version};
 pub use bg_proxy::{is_process_alive, send_sighup};
-pub use filter::{filter_suggestions, provider_model_suggestions};
+pub use filter::{all_models, filter_suggestions, provider_model_suggestions};
+pub use list::{ListMove, list_move, step, suggest_move};
 
 /// Snapshot of DB-backed metrics loaded off the hot path for non-blocking TUI redraws.
 pub(crate) struct MetricsSnapshot {
@@ -50,6 +52,8 @@ pub enum Mode {
     QuotaConfig,
     /// Quick single-field popup (Port via `o`).
     QuickInput,
+    /// Global model routes panel (`R`): model → provider/model.
+    GlobalRoutes,
 }
 
 /// Vim-style sub-mode used inside the provider editor form.
@@ -249,6 +253,8 @@ pub struct App {
     pub quota_form: Option<QuotaForm>,
     /// Quick single-field popup (Port) for the selected provider.
     pub quick_form: Option<QuickForm>,
+    /// Global model routes, edited in the `R` panel.
+    pub global_routes: GlobalRoutesState,
     /// Scroll offset of the Help dialog; it is taller than most terminals.
     pub help_scroll: u16,
     pub(super) sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler,
@@ -259,6 +265,10 @@ pub struct App {
     pub(super) config_needs_sync: bool,
 }
 
+/// How many rows a suggestion dropdown shows before it scrolls. The dropdown's
+/// renderer and [`SuggestState`]'s scroll arithmetic must agree on it.
+pub const SUGGEST_WINDOW_ROWS: usize = 8;
+
 /// Keyboard-navigable dropdown state shared by any text field offering a
 /// filterable list: route-target model suggestions or the Format options.
 #[derive(Default)]
@@ -267,7 +277,7 @@ pub struct SuggestState {
     pub active: bool,
     /// Currently highlighted index inside the filtered list (global, not viewport-relative).
     pub idx: usize,
-    /// First visible index; keeps the highlighted item within the 8-row viewport.
+    /// First visible index; keeps the highlighted item inside the viewport.
     pub scroll: usize,
 }
 
@@ -277,7 +287,7 @@ impl SuggestState {
     }
 
     /// Down: activate on first press, otherwise advance and keep the
-    /// highlighted item within an 8-row scroll window.
+    /// highlighted item inside the scroll window.
     pub fn advance(&mut self, len: usize) {
         if !self.active {
             self.active = true;
@@ -285,8 +295,8 @@ impl SuggestState {
             self.scroll = 0;
         } else {
             self.idx = (self.idx + 1).min(len.saturating_sub(1));
-            if self.idx >= self.scroll + 8 {
-                self.scroll = self.idx + 1 - 8;
+            if self.idx >= self.scroll + SUGGEST_WINDOW_ROWS {
+                self.scroll = self.idx + 1 - SUGGEST_WINDOW_ROWS;
             }
         }
     }
@@ -702,6 +712,59 @@ impl QuotaForm {
     }
 }
 
+// ─── Global route panel ─────────────────────────────────────────────────────
+
+/// Field of a global-route row that Insert mode edits. The right-hand side is
+/// one field holding `provider/model`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlobalRouteField {
+    Pattern,
+    Target,
+}
+
+impl GlobalRouteField {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Pattern => Self::Target,
+            Self::Target => Self::Pattern,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pattern => "pattern",
+            Self::Target => "provider/model",
+        }
+    }
+}
+
+/// In-progress edit of one row in the global-route panel: the typed field plus
+/// the row being edited. The config is written only when the row validates.
+pub struct GlobalRouteEdit {
+    pub index: usize,
+    pub field: GlobalRouteField,
+    pub text: FormField,
+    pub draft: GlobalRoute,
+    pub suggest: SuggestState,
+}
+
+/// Rows of `config.global_routes`, plus which field is being typed into.
+#[derive(Default)]
+pub struct GlobalRoutesState {
+    pub selected: usize,
+    pub editing: Option<GlobalRouteEdit>,
+    pub pending_key: Option<(char, std::time::Instant)>,
+    /// Validation failure of the last commit attempt; cleared on next key.
+    pub error: Option<String>,
+}
+
+impl GlobalRoutesState {
+    /// Keep the selection on a row after the list shrank.
+    pub fn clamp(&mut self, len: usize) {
+        self.selected = step(self.selected, 0, len);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
@@ -747,6 +810,7 @@ mod tests {
                 providers,
                 db_path: Some(path),
                 request_log_limit: 100,
+                global_routes: Vec::new(),
             },
             mode: super::Mode::Normal,
             terminal_focused: true,
@@ -793,6 +857,7 @@ mod tests {
             quota_status: std::collections::HashMap::new(),
             quota_form: None,
             quick_form: None,
+            global_routes: super::GlobalRoutesState::default(),
             help_scroll: 0,
             sysinfo_sampler: crate::tui::sysinfo::SysInfoSampler::new(),
             config_needs_sync: false,

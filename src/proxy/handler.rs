@@ -8,7 +8,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 
 use super::SharedState;
-use crate::config::{ApiFormat, OpenAiApiVersion};
+use crate::config::{ApiFormat, AppConfig, OpenAiApiVersion, Provider};
 use crate::error::AppError;
 use crate::proxy::executor::{
     ProviderRequestOutcome, execute_provider_request, extract_error_message,
@@ -208,31 +208,42 @@ pub async fn handle_models(
         .into_response())
 }
 
-/// Build the candidate provider list. Routes are per-provider and are applied
-/// at request execution time (see [`try_providers`]) so that a fallback to a
-/// different-format provider uses *its own* routes, not the current provider's.
+/// Build the candidate provider list for one request.
+///
+/// A global route matching `model` pins the request to its provider (no
+/// rotation) and is prepended to that provider's own routes, so it outranks
+/// them while `model_map` keeps working after it. Otherwise routes are
+/// per-provider and applied at execution time (see [`try_providers`]) so that a
+/// fallback to a different-format provider uses *its own* routes, not the
+/// current provider's.
 async fn resolve_provider_pool(
     state: &SharedState,
-) -> Result<(Vec<(String, crate::config::Provider)>, bool), AppError> {
+    model: &str,
+) -> Result<(Vec<(String, Provider)>, bool), AppError> {
     // Pinned listeners bypass the fallback rotation and go directly to their provider.
     if let Some(name) = &state.pinned_provider {
         let config = state.config.read().await;
-        let provider = config
-            .providers
-            .get(name)
-            .filter(|p| p.enabled)
-            .ok_or_else(|| AppError::ProviderNotFound(name.clone()))?;
+        let provider = enabled_provider(&config, name)?;
         return Ok((vec![(name.clone(), provider.clone())], false));
     }
 
     let config = state.config.read().await;
+
+    // Global route: exclusive, so a failing provider surfaces its error
+    // instead of silently serving the request from a different provider.
+    if let Some((name, rule)) = config.global_route_for(model) {
+        let provider = enabled_provider(&config, name)?;
+        let mut served = provider.clone();
+        served.routes.insert(0, rule.clone());
+        return Ok((vec![(name.to_string(), served)], false));
+    }
     let (_, current_provider) = config.current_enabled_provider()?;
     let start_idx = config
         .providers
         .get_index_of(&config.current)
         .ok_or_else(|| AppError::ProviderNotFound(config.current.clone()))?;
     let len = config.providers.len();
-    let list: Vec<(String, crate::config::Provider)> = (0..len)
+    let list: Vec<(String, Provider)> = (0..len)
         .map(|i| (start_idx + i) % len)
         .filter_map(|i| {
             config
@@ -246,6 +257,22 @@ async fn resolve_provider_pool(
         return Err(AppError::ProviderNotFound(config.current.clone()));
     }
     Ok((list, true))
+}
+
+/// The named provider, or `ProviderNotFound` when it is missing or disabled.
+fn enabled_provider<'a>(config: &'a AppConfig, name: &str) -> Result<&'a Provider, AppError> {
+    config
+        .providers
+        .get(name)
+        .filter(|p| p.enabled)
+        .ok_or_else(|| AppError::ProviderNotFound(name.to_string()))
+}
+
+/// The model the client asked for, or `""` when the body carries none.
+fn requested_model(req_json: Option<&serde_json::Value>) -> &str {
+    req_json
+        .and_then(|v| v.get("model").and_then(|m| m.as_str()))
+        .unwrap_or("")
 }
 
 /// Request context bundled to keep [`try_providers`] argument count in check.
@@ -290,11 +317,7 @@ async fn try_providers(
 
     let pipeline = RequestPipeline {
         state,
-        req_model_hint: ctx
-            .req_json
-            .and_then(|v| v.get("model").and_then(|m| m.as_str()))
-            .unwrap_or("")
-            .to_string(),
+        req_model_hint: requested_model(ctx.req_json).to_string(),
         request_body_str: body_to_string(ctx.body),
         is_stream: ctx.is_stream,
         request_log_limit,
@@ -579,7 +602,8 @@ async fn dispatch_completion(
         .and_then(|v| v.get("stream").and_then(|s| s.as_bool()))
         .unwrap_or(false);
 
-    let (pool, do_cycle) = resolve_provider_pool(&state).await?;
+    let (pool, do_cycle) =
+        resolve_provider_pool(&state, requested_model(canonical_json.as_ref())).await?;
 
     let ctx = RequestCtx {
         body: &canonical_body,
@@ -1081,7 +1105,7 @@ fn extract_openai_usage(finalizer: &mut StreamFinalizer, data: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ApiFormat, AppConfig, OpenAiApiVersion, Provider};
+    use crate::config::{ApiFormat, AppConfig, GlobalRoute, OpenAiApiVersion, Provider};
     use crate::proxy::metrics::RequestLog;
     use axum::Router;
     use indexmap::IndexMap;
@@ -1146,6 +1170,7 @@ mod tests {
             providers,
             db_path: None,
             request_log_limit: 100,
+            global_routes: Vec::new(),
         });
 
         let router = crate::proxy::build_router(state);
@@ -1186,10 +1211,220 @@ mod tests {
             providers,
             db_path: None,
             request_log_limit: 100,
+            global_routes: Vec::new(),
         });
 
-        assert!(resolve_provider_pool(&state).await.is_err());
+        assert!(resolve_provider_pool(&state, "m").await.is_err());
     }
+
+    // ─── Global routes ───────────────────────────────────────────────────────
+
+    fn state_with_global_route(
+        enabled_second: bool,
+        global_routes: Vec<GlobalRoute>,
+    ) -> SharedState {
+        let mut providers = IndexMap::new();
+        providers.insert("prov-a".into(), make_provider(true, true));
+        providers.insert("prov-b".into(), make_provider(enabled_second, true));
+        make_state(AppConfig {
+            current: "prov-a".into(),
+            listen: "127.0.0.1:7896".into(),
+            providers,
+            db_path: None,
+            request_log_limit: 100,
+            global_routes,
+        })
+    }
+
+    #[tokio::test]
+    async fn global_route_pins_the_named_provider_without_rotation() {
+        let state = state_with_global_route(
+            true,
+            vec![GlobalRoute::for_test(
+                "prov-b",
+                "deepseek-v4.1-flash",
+                "ds-flash",
+            )],
+        );
+
+        let (pool, do_cycle) = resolve_provider_pool(&state, "deepseek-v4.1-flash")
+            .await
+            .unwrap();
+
+        assert_eq!(pool.len(), 1);
+        assert_eq!(pool[0].0, "prov-b");
+        assert!(!do_cycle, "an exclusive route must not rotate");
+        let (served_model, pattern) = pool[0].1.resolve_model("deepseek-v4.1-flash");
+        assert_eq!(served_model, "ds-flash");
+        assert_eq!(pattern.as_deref(), Some("deepseek-v4.1-flash"));
+    }
+
+    #[tokio::test]
+    async fn global_route_to_a_disabled_provider_is_an_error() {
+        let state = state_with_global_route(
+            false,
+            vec![GlobalRoute::for_test("prov-b", "deepseek-*", "ds-flash")],
+        );
+
+        assert!(
+            resolve_provider_pool(&state, "deepseek-v4.1-flash")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn unmatched_model_keeps_the_fallback_rotation() {
+        let state = state_with_global_route(
+            true,
+            vec![GlobalRoute::for_test("prov-b", "deepseek-*", "ds-flash")],
+        );
+
+        let (pool, do_cycle) = resolve_provider_pool(&state, "claude-opus-4")
+            .await
+            .unwrap();
+
+        assert_eq!(pool.len(), 2);
+        assert!(do_cycle);
+    }
+    #[tokio::test]
+    async fn global_route_forces_the_transform_path_for_openai_clients() {
+        // An OpenAI client talking to a transparent OpenAI provider normally
+        // passes through byte-for-byte. A global route rewrites the model, so
+        // the pool's provider must no longer be passthrough-eligible.
+        let mut transparent = make_provider(true, true);
+        transparent.api_format = ApiFormat::OpenAI;
+        transparent.api_version = Some(OpenAiApiVersion::ChatCompletions);
+
+        let config_with = |global_routes: Vec<GlobalRoute>| {
+            let mut providers = IndexMap::new();
+            providers.insert("prov-a".into(), transparent.clone());
+            AppConfig {
+                current: "prov-a".into(),
+                listen: "127.0.0.1:7896".into(),
+                providers,
+                db_path: None,
+                request_log_limit: 100,
+                global_routes,
+            }
+        };
+
+        let routed = make_state(config_with(vec![GlobalRoute::for_test(
+            "prov-a",
+            "gpt-*",
+            "gpt-4o-mini",
+        )]));
+        let (pool, _) = resolve_provider_pool(&routed, "gpt-4o").await.unwrap();
+        assert!(
+            !pool[0].1.passthrough_for(OpenAiApiVersion::ChatCompletions),
+            "a matched global route must not stay byte-passthrough"
+        );
+
+        // Control: the same provider without a route keeps passthrough.
+        let plain = make_state(config_with(Vec::new()));
+        let (pool, _) = resolve_provider_pool(&plain, "gpt-4o").await.unwrap();
+        assert!(pool[0].1.passthrough_for(OpenAiApiVersion::ChatCompletions));
+    }
+
+    #[tokio::test]
+    async fn global_route_sends_the_request_only_to_the_named_provider() {
+        use axum::extract::State as AxumState;
+        use axum::routing::post;
+        use std::sync::Mutex as StdMutex;
+
+        #[derive(Clone)]
+        struct Seen(Arc<StdMutex<Vec<String>>>);
+
+        /// Records the model it received and answers with an Anthropic message.
+        async fn messages(
+            AxumState(seen): AxumState<Seen>,
+            body: axum::body::Bytes,
+        ) -> impl axum::response::IntoResponse {
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            seen.0
+                .lock()
+                .unwrap()
+                .push(v["model"].as_str().unwrap_or_default().to_string());
+            axum::Json(serde_json::json!({
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "ds-flash",
+                "content": [{"type": "text", "text": "pong"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 3, "output_tokens": 2}
+            }))
+        }
+
+        async fn spawn(seen: Seen) -> std::net::SocketAddr {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let app = Router::new()
+                .route("/v1/messages", post(messages))
+                .with_state(seen);
+            tokio::spawn(async move {
+                let _ = axum::serve(listener, app).await;
+            });
+            addr
+        }
+
+        let seen_a = Seen(Arc::new(StdMutex::new(Vec::new())));
+        let seen_b = Seen(Arc::new(StdMutex::new(Vec::new())));
+        let addr_a = spawn(seen_a.clone()).await;
+        let addr_b = spawn(seen_b.clone()).await;
+
+        let mut providers = IndexMap::new();
+        let mut prov_a = make_provider(true, true);
+        prov_a.base_url = format!("http://{addr_a}");
+        let mut prov_b = make_provider(true, true);
+        prov_b.base_url = format!("http://{addr_b}");
+        providers.insert("prov-a".into(), prov_a);
+        providers.insert("prov-b".into(), prov_b);
+
+        let state = make_state(AppConfig {
+            current: "prov-a".into(),
+            listen: "127.0.0.1:7896".into(),
+            providers,
+            db_path: None,
+            request_log_limit: 100,
+            global_routes: vec![GlobalRoute::for_test(
+                "prov-b",
+                "claude-sonnet-*",
+                "ds-flash",
+            )],
+        });
+
+        let router = crate::proxy::build_router(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://{proxy_addr}/v1/messages"))
+            .header("content-type", "application/json")
+            .header("x-api-key", "sk-test")
+            .body(
+                r#"{"model":"claude-sonnet-4-5","max_tokens":10,
+                    "messages":[{"role":"user","content":"hi"}]}"#,
+            )
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            *seen_b.0.lock().unwrap(),
+            vec!["ds-flash".to_string()],
+            "the named provider must receive the rewritten model once"
+        );
+        assert!(
+            seen_a.0.lock().unwrap().is_empty(),
+            "the current provider must not be touched"
+        );
+    }
+
     #[tokio::test]
     async fn buffered_openai_passthrough_returns_upstream_bytes_untouched() {
         use axum::Json;
@@ -1400,6 +1635,7 @@ mod tests {
             providers,
             db_path: None,
             request_log_limit: 100,
+            global_routes: Vec::new(),
         });
 
         let router = crate::proxy::build_router(state);

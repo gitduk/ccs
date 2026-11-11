@@ -272,12 +272,36 @@ impl Repository {
         }
     }
 
-    /// Load the most recent `limit` request log entries (oldest-first).
-    pub fn load_recent_request_logs(&self, limit: usize) -> Vec<crate::metrics::RequestLogEntry> {
+    /// Load request-log rows newer than `after_id`, oldest-first; `after_id = 0`
+    /// loads the newest `limit` rows.
+    pub fn load_request_logs_after(
+        &self,
+        after_id: u64,
+        limit: usize,
+    ) -> Vec<crate::metrics::RequestLogEntry> {
         match self.0.lock() {
-            Ok(conn) => db::load_recent_request_logs(&conn, limit),
+            Ok(conn) => db::load_request_logs_after(&conn, after_id, limit),
             Err(_) => {
-                tracing::warn!("DB mutex poisoned in load_recent_request_logs");
+                tracing::warn!("DB mutex poisoned in load_request_logs_after");
+                vec![]
+            }
+        }
+    }
+
+    /// Id of the newest stored request-log row, or 0 when the table is empty.
+    pub fn newest_request_log_id(&self) -> u64 {
+        match self.0.lock() {
+            Ok(conn) => db::max_request_log_id(&conn),
+            Err(_) => 0,
+        }
+    }
+
+    /// Token/model values of the newest `rows` request-log rows, bodies excluded.
+    pub fn load_request_log_usage(&self, rows: usize) -> Vec<crate::metrics::LogUsage> {
+        match self.0.lock() {
+            Ok(conn) => db::load_request_log_usage(&conn, rows),
+            Err(_) => {
+                tracing::warn!("DB mutex poisoned in load_request_log_usage");
                 vec![]
             }
         }

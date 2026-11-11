@@ -53,12 +53,11 @@ fn user_input_step(parts: &[Value]) -> Value {
     json!({"type": "user_input", "content": parts})
 }
 
-/// Convert an Anthropic-canonical request body (model already resolved via
-/// routes/mappings where applicable) into a Gemini Interactions request.
+/// Convert an Anthropic-canonical request body into a Gemini Interactions
+/// request.
 ///
-/// The request may be either the original client JSON or a model-rewritten
-/// copy — the provider's routes/model_map are applied here exactly once,
-/// mirroring `transform::to_openai`'s responsibility for OpenAI providers.
+/// The provider's routes/model_map are applied here exactly once, mirroring
+/// `transform::to_openai`'s responsibility for OpenAI providers.
 pub fn anthropic_to_gemini_request(req: &Value, provider: &Provider) -> Result<Value> {
     // Blocks of one kind gather until a different-kind block or the end of
     // the message forces them out as a single step.
@@ -902,7 +901,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::config::{ApiFormat, Provider};
+    use crate::config::{ApiFormat, Provider, RouteRule};
 
     fn provider(format: ApiFormat) -> Provider {
         Provider {
@@ -923,6 +922,30 @@ mod tests {
             max_tokens_cap: None,
             extra_headers: Default::default(),
         }
+    }
+
+    #[test]
+    fn routes_and_model_map_apply_exactly_once() {
+        // A chained model_map (a→b, b→c) exposes double application: the
+        // executor must not rewrite the model before this translation runs.
+        let mut p = g_provider();
+        p.model_map.insert("hop-one".into(), "hop-two".into());
+        p.model_map.insert("hop-two".into(), "hop-three".into());
+        p.routes = vec![RouteRule {
+            id: "r".into(),
+            pattern: "req-*".into(),
+            target: "hop-one".into(),
+            enabled: true,
+        }];
+        let req = json!({
+            "model": "req-x",
+            "max_tokens": 10,
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+
+        let out = anthropic_to_gemini_request(&req, &p).unwrap();
+
+        assert_eq!(out["model"], "hop-two", "route + one map hop, not two");
     }
 
     fn g_provider() -> Provider {

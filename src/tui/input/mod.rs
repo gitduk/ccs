@@ -38,6 +38,7 @@ pub(super) fn handle_key(
         }
         Mode::Logs => super::logs::handle_key(app, code, modifiers),
         Mode::Models => super::models::handle_key(app, code, modifiers),
+        Mode::GlobalRoutes => super::global_routes::handle_key(app, code, modifiers, server),
     }
 }
 
@@ -46,6 +47,7 @@ pub(super) fn handle_paste(app: &mut App, text: &str) -> crate::error::Result<()
         Mode::QuotaConfig => super::quota_panel::handle_paste(app, text),
         Mode::Editing => super::editor::handle_paste(app, text),
         Mode::QuickInput => super::quick_panel::handle_paste(app, text),
+        Mode::GlobalRoutes => super::global_routes::handle_paste(app, text),
         Mode::Models => {
             super::models::handle_paste(app, text);
             Ok(())

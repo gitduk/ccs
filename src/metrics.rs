@@ -88,6 +88,16 @@ pub struct RequestLogEntry {
     pub response_body: Option<Arc<str>>,
 }
 
+/// Token/model values of one stored request, read back after a stream patched
+/// its usage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogUsage {
+    pub id: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub model: String,
+}
+
 #[derive(Debug, Default)]
 pub struct RequestLog {
     entries: VecDeque<RequestLogEntry>,
@@ -125,22 +135,76 @@ impl RequestLog {
         &mut self.entries
     }
 
-    /// Replace all in-memory entries, keeping only the newest `REQUEST_LOG_CAPACITY`.
-    pub fn replace(&mut self, entries: Vec<RequestLogEntry>) {
-        if let Some(max_id) = entries.iter().map(|e| e.id).max() {
-            sync_next_request_log_id(max_id.saturating_add(1));
-        }
-        let mut deque = VecDeque::from(entries);
-        while deque.len() > REQUEST_LOG_CAPACITY {
-            deque.pop_front();
-        }
-        self.entries = deque;
+    /// Id of the newest entry held, or 0 when the log is empty.
+    pub fn newest_id(&self) -> u64 {
+        self.entries.back().map(|e| e.id).unwrap_or(0)
     }
 
-    pub fn from_entries(entries: Vec<RequestLogEntry>) -> Self {
-        let mut log = Self::default();
-        log.replace(entries);
-        log
+    /// Merge rows in by id, keeping the newest `keep`. Returns true when any row
+    /// was added.
+    ///
+    /// Ids are assigned before the row is written, so a lower id can reach the
+    /// database after a higher one; inserting in order (instead of appending)
+    /// keeps a late row from being skipped forever.
+    pub fn merge(&mut self, mut rows: Vec<RequestLogEntry>, keep: usize) -> bool {
+        rows.sort_unstable_by_key(|e| e.id);
+        let mut added = false;
+        for row in rows {
+            if let Err(pos) = self.entries.binary_search_by(|e| e.id.cmp(&row.id)) {
+                self.entries.insert(pos, row);
+                added = true;
+            }
+        }
+        if !added {
+            return false;
+        }
+        self.sync_id_past_newest();
+        self.trim_to(keep);
+        true
+    }
+
+    /// Patch token/model values of entries already held: a streamed request is
+    /// stored with zero usage and patched once the stream ends. Returns true when
+    /// any value changed.
+    pub fn apply_usage(&mut self, usage: &[LogUsage]) -> bool {
+        let mut changed = false;
+        for u in usage {
+            let Ok(pos) = self.entries.binary_search_by(|e| e.id.cmp(&u.id)) else {
+                continue;
+            };
+            let entry = &mut self.entries[pos];
+            if entry.input_tokens == u.input_tokens
+                && entry.output_tokens == u.output_tokens
+                && entry.model == u.model
+            {
+                continue;
+            }
+            entry.input_tokens = u.input_tokens;
+            entry.output_tokens = u.output_tokens;
+            entry.model.clone_from(&u.model);
+            changed = true;
+        }
+        changed
+    }
+
+    /// Replace all in-memory entries with `entries`, keeping the newest `keep`.
+    pub fn replace(&mut self, entries: Vec<RequestLogEntry>, keep: usize) {
+        self.entries.clear();
+        self.entries.extend(entries);
+        self.sync_id_past_newest();
+        self.trim_to(keep);
+    }
+
+    fn sync_id_past_newest(&mut self) {
+        if let Some(max_id) = self.entries.back().map(|e| e.id) {
+            sync_next_request_log_id(max_id.saturating_add(1));
+        }
+    }
+
+    fn trim_to(&mut self, keep: usize) {
+        while self.entries.len() > keep.max(1) {
+            self.entries.pop_front();
+        }
     }
 }
 
@@ -203,9 +267,63 @@ mod tests {
     #[test]
     fn replace_advances_next_id_past_loaded_history() {
         let mut log = RequestLog::default();
-        log.replace(vec![entry_with_id(1_000_000)]);
+        log.replace(vec![entry_with_id(1_000_000)], 200);
 
         let next_id = log.push(entry_with_id(0));
         assert!(next_id > 1_000_000);
+    }
+
+    #[test]
+    fn merge_keeps_a_row_that_reaches_the_db_after_a_higher_id() {
+        let mut log = RequestLog::default();
+        log.merge(vec![entry_with_id(11)], 10); // id 10 is still being written
+
+        assert!(
+            log.merge(vec![entry_with_id(10)], 10),
+            "the late row must still be merged"
+        );
+
+        let ids: Vec<u64> = log.entries().iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec![10, 11], "inserted in id order, not appended");
+        assert_eq!(log.newest_id(), 11);
+    }
+
+    #[test]
+    fn apply_usage_patches_tokens_written_after_the_row_was_logged() {
+        let mut log = RequestLog::default();
+        log.merge(vec![entry_with_id(7), entry_with_id(8)], 10);
+        let usage = vec![LogUsage {
+            id: 8,
+            input_tokens: 120,
+            output_tokens: 45,
+            model: "served-model".into(),
+        }];
+
+        assert!(log.apply_usage(&usage));
+        let entry = log.entries().iter().find(|e| e.id == 8).unwrap();
+        assert_eq!(entry.input_tokens, 120);
+        assert_eq!(entry.output_tokens, 45);
+        assert_eq!(entry.model, "served-model");
+
+        assert!(
+            !log.apply_usage(&usage),
+            "an unchanged patch redraws nothing"
+        );
+    }
+
+    #[test]
+    fn merge_skips_rows_already_held_and_keeps_the_newest() {
+        let mut log = RequestLog::default();
+        log.replace(vec![entry_with_id(10), entry_with_id(11)], 10);
+
+        assert!(!log.merge(vec![entry_with_id(11)], 10), "nothing new");
+        assert!(log.merge(vec![entry_with_id(12), entry_with_id(13)], 10));
+
+        let ids: Vec<u64> = log.entries().iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec![10, 11, 12, 13]);
+
+        log.merge(vec![entry_with_id(14)], 2);
+        let ids: Vec<u64> = log.entries().iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec![13, 14], "trimmed to the newest rows");
     }
 }

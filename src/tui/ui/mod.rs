@@ -28,6 +28,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Mode::Logs => super::logs::draw_popup(f, app),
         Mode::QuotaConfig => super::quota_panel::draw_popup(f, app),
         Mode::QuickInput => super::quick_panel::draw_popup(f, app),
+        Mode::GlobalRoutes => super::global_routes::draw_popup(f, app),
         Mode::Normal => {}
     }
 }

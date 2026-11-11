@@ -14,7 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::state::{App, LogsState, MessageKind, Mode};
+use super::state::{App, LogsState, MessageKind, Mode, list_move, step};
 use super::theme::{self as t};
 use super::ui::format::{fmt_latency, format_tokens, shorten_model_name, truncate_width};
 use super::ui::layout::{BORDER_INNER_DIVIDER, DASH, TITLE_SIDE, centered_rect};
@@ -25,7 +25,7 @@ const TRUNCATED_BODY_MARKER: &str = "…[truncated]";
 pub(super) fn handle_key(
     app: &mut App,
     code: KeyCode,
-    _modifiers: KeyModifiers,
+    modifiers: KeyModifiers,
 ) -> crate::error::Result<()> {
     let total = app
         .request_log
@@ -41,21 +41,18 @@ pub(super) fn handle_key(
         return Ok(());
     }
 
+    if let Some(dir) = list_move(code, modifiers.contains(KeyModifiers::CONTROL), false) {
+        let next = step(app.logs.selected, dir.delta(), total);
+        if next != app.logs.selected {
+            app.logs.selected = next;
+            app.logs.detail_scroll = 0;
+        }
+        return Ok(());
+    }
+
     match code {
         KeyCode::Esc | KeyCode::Char('q') => {
             app.mode = Mode::Normal;
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            if app.logs.selected > 0 {
-                app.logs.selected -= 1;
-                app.logs.detail_scroll = 0;
-            }
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            if total > 0 && app.logs.selected < total - 1 {
-                app.logs.selected += 1;
-                app.logs.detail_scroll = 0;
-            }
         }
         KeyCode::Char('G') => {
             app.logs.detail_scroll = u16::MAX;
