@@ -328,10 +328,12 @@ fn persist(app: &mut App, server: &mut Option<ServerHandle>, next: AppConfig) {
 
 // ─── Validation & suggestions ───────────────────────────────────────────────
 
-/// Reject a row that would never match or could not be served:
-/// unknown/disabled provider, empty target, a target the provider's own catalog
-/// does not list (when that catalog is known), and a pattern no provider model
-/// contains (when any catalog is known).
+/// Reject a row that could not be served: empty pattern or target,
+/// unknown/disabled provider, and a target the provider's own catalog does not
+/// list (when that catalog is known).
+///
+/// The pattern is never checked against a catalog: it matches the model name a
+/// client sends, and the upstream only ever sees the target.
 ///
 /// A row that already exists skips the provider check: an existing rule on a
 /// since-disabled provider must stay editable, and the panel marks it with ⚠.
@@ -366,18 +368,6 @@ fn validate(app: &App, rule: &GlobalRoute, is_new: bool) -> Result<(), String> {
         return Err(format!(
             "Target '{}' is not in {provider}'s model list",
             rule.rule.target
-        ));
-    }
-
-    let known = all_models(&app.models.provider_models);
-    if !known.is_empty()
-        && !known
-            .iter()
-            .any(|m| config::glob_match(&rule.rule.pattern, m))
-    {
-        return Err(format!(
-            "Pattern '{}' matches no known model",
-            rule.rule.pattern
         ));
     }
     Ok(())
@@ -734,17 +724,21 @@ mod tests {
     }
 
     #[test]
-    fn commit_rejects_a_pattern_that_matches_no_known_model() {
+    fn a_pattern_no_model_carries_is_saved_as_written() {
         let (_guard, mut app) = open_panel();
         key(&mut app, KeyCode::Char('a'));
-        type_text(&mut app, "typo-model");
+        type_text(&mut app, "client-alias");
         key(&mut app, KeyCode::Tab);
         set_text(&mut app, "first/first-model");
 
         key(&mut app, KeyCode::Enter);
 
-        assert!(app.global_routes.editing.is_some());
-        assert!(app.global_routes.error.unwrap().contains("no known model"));
+        assert!(
+            app.global_routes.editing.is_none(),
+            "{:?}",
+            app.global_routes.error
+        );
+        assert_eq!(app.config.global_routes[0].rule.pattern, "client-alias");
     }
 
     #[test]

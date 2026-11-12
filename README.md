@@ -191,6 +191,7 @@ Edit them in the TUI editor's **Routes** section (`e` on a provider, then Tab do
 ]
 ```
 
+- The left-hand pattern is whatever model name the client sends — any name, `*` included, with no need to exist in a catalog; the right-hand target must be a model the provider lists (checked once that catalog has been fetched), since an unknown name fails upstream.
 - A global rule outranks that provider's own `routes`; `model_map` still applies afterwards, so exact-name prefixes keep working.
 - The named provider must exist and be enabled — otherwise the request fails instead of falling back elsewhere.
 - Pinned ports win: a request arriving on a pinned listener still goes only to that listener's provider.
