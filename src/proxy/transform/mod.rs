@@ -26,20 +26,6 @@ pub use stream::{anthropic_stream_to_openai, openai_stream_to_anthropic, rewrite
 use crate::error::{AppError, Result};
 use serde_json::Value;
 
-/// Extract `(input, output)` token counts from a response's `usage` object,
-/// using the given key names (`input_tokens`/`output_tokens` for Anthropic,
-/// `prompt_tokens`/`completion_tokens` for OpenAI chat). Missing keys read 0.
-fn usage_tokens(resp: &Value, input_key: &str, output_key: &str) -> (u64, u64) {
-    let usage = resp.get("usage");
-    let get = |key: &str| {
-        usage
-            .and_then(|u| u.get(key))
-            .and_then(|t| t.as_u64())
-            .unwrap_or(0)
-    };
-    (get(input_key), get(output_key))
-}
-
 /// Extract `(id, name, serialized arguments)` from an Anthropic `tool_use`
 /// content block, ready to embed in an OpenAI tool/function call.
 fn tool_use_parts(block: &Value) -> Result<(&str, &str, String)> {

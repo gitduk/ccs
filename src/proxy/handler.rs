@@ -731,7 +731,7 @@ async fn handle_buffered_response(
 
     let (input, output) = if let Some(ref json) = usage_json {
         (
-            json["usage"]["input_tokens"].as_u64().unwrap_or(0),
+            prompt_tokens(&json["usage"]),
             json["usage"]["output_tokens"].as_u64().unwrap_or(0),
         )
     } else {
@@ -1039,6 +1039,13 @@ fn track_tokens_in_stream(
     }
 }
 
+/// Prompt tokens as providers bill them, read from a wire `usage` object.
+fn prompt_tokens(usage: &serde_json::Value) -> u64 {
+    transform::CanonicalUsage::try_from(transform::WirePayload::Anthropic(usage))
+        .map(|u| u.prompt_tokens())
+        .unwrap_or(0)
+}
+
 /// Extract usage from Anthropic `message_start` / `message_delta` events.
 /// A cheap substring check skips the JSON parse for the many
 /// `content_block_delta` lines in between (which never carry usage).
@@ -1051,16 +1058,14 @@ fn extract_anthropic_usage(finalizer: &mut StreamFinalizer, data: &str) {
     };
     match json["type"].as_str() {
         Some("message_start") => {
-            finalizer.input_tokens = json["message"]["usage"]["input_tokens"]
-                .as_u64()
-                .unwrap_or(0);
+            finalizer.input_tokens = prompt_tokens(&json["message"]["usage"]);
             if let Some(m) = non_empty_model(json["message"]["model"].as_str()) {
                 finalizer.model = Some(m.to_string());
             }
         }
         Some("message_delta") => {
-            if let Some(it) = json["usage"]["input_tokens"].as_u64() {
-                finalizer.input_tokens = it;
+            if json["usage"].get("input_tokens").is_some() {
+                finalizer.input_tokens = prompt_tokens(&json["usage"]);
             }
             finalizer.output_tokens = json["usage"]["output_tokens"].as_u64().unwrap_or(0);
         }
@@ -1132,6 +1137,52 @@ mod tests {
             max_tokens_cap: None,
             extra_headers: HashMap::new(),
         }
+    }
+
+    /// Logged input counts the cache-read prefix; a `message_delta` without
+    /// input must not zero what `message_start` reported.
+    #[test]
+    fn anthropic_stream_usage_counts_cache_read_as_input() {
+        let path = format!("/tmp/ccs-handler-test-{}.db", uuid::Uuid::new_v4());
+        let mut finalizer = StreamFinalizer {
+            db: Repository::open(&path),
+            provider_id: "prov".into(),
+            provider_name: "prov".into(),
+            request_log: Arc::new(Mutex::new(RequestLog::default())),
+            entry_id: 0,
+            latency: 0,
+            request_log_limit: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            model: None,
+            finished: true, // parsing only: skip the stats write on drop
+        };
+
+        extract_anthropic_usage(
+            &mut finalizer,
+            &serde_json::json!({
+                "type": "message_start",
+                "message": {
+                    "model": "upstream-model",
+                    "usage": {"input_tokens": 30, "cache_read_input_tokens": 70}
+                }
+            })
+            .to_string(),
+        );
+        assert_eq!(finalizer.input_tokens, 100);
+        assert_eq!(finalizer.model.as_deref(), Some("upstream-model"));
+
+        extract_anthropic_usage(
+            &mut finalizer,
+            &serde_json::json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"output_tokens": 8}
+            })
+            .to_string(),
+        );
+        assert_eq!(finalizer.input_tokens, 100);
+        assert_eq!(finalizer.output_tokens, 8);
     }
 
     fn make_state(config: AppConfig) -> SharedState {

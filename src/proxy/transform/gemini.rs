@@ -589,7 +589,8 @@ impl GeminiStreamState {
                 if let Some(model) = interaction.get("model").and_then(|m| m.as_str()) {
                     self.model = model.to_string();
                 }
-                self.usage_from(interaction);
+                self.usage
+                    .absorb_wire(super::canonical::WirePayload::Gemini(interaction));
                 self.stop_reason = Some(self.final_stop_reason().to_string());
                 self.finalize()
             }
@@ -823,17 +824,6 @@ impl GeminiStreamState {
 
     fn on_step_stop(&mut self) -> Vec<String> {
         self.close_open_block()
-    }
-
-    fn usage_from(&mut self, interaction: &Value) {
-        let Some(usage) = interaction.get("usage") else {
-            return;
-        };
-        if let Ok(u) =
-            super::canonical::Usage::try_from(super::canonical::WirePayload::Gemini(usage))
-        {
-            self.usage = u;
-        }
     }
 
     fn final_stop_reason(&self) -> &'static str {

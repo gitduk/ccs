@@ -5,6 +5,8 @@ use uuid::Uuid;
 
 use crate::config::OpenAiApiVersion;
 
+use super::canonical::{Usage, WirePayload};
+
 /// Convert an OpenAI SSE stream to Anthropic SSE stream.
 ///
 /// `model_override` — when `Some`, replaces the upstream `model` field in the
@@ -94,8 +96,7 @@ struct StreamState {
     message_id: String,
     model: String,
     model_override: Option<String>,
-    input_tokens: u64,
-    output_tokens: u64,
+    usage: Usage,
     content_index: usize,
     started: bool,
     finalized: bool,
@@ -127,8 +128,7 @@ impl StreamState {
             message_id: format!("msg_{}", Uuid::new_v4()),
             model: String::new(),
             model_override,
-            input_tokens: 0,
-            output_tokens: 0,
+            usage: Usage::default(),
             content_index: 0,
             started: false,
             finalized: false,
@@ -158,15 +158,10 @@ impl StreamState {
             self.model = model.to_string();
         }
 
-        // Extract usage from chunk
-        if let Some(usage) = chunk.get("usage") {
-            if let Some(pt) = usage.get("prompt_tokens").and_then(|t| t.as_u64()) {
-                self.input_tokens = pt;
-            }
-            if let Some(ct) = usage.get("completion_tokens").and_then(|t| t.as_u64()) {
-                self.output_tokens = ct;
-            }
-        }
+        self.usage.absorb_wire(WirePayload::OpenAi(
+            chunk,
+            OpenAiApiVersion::ChatCompletions,
+        ));
 
         if let Some(start) = self.emit_message_start() {
             events.push(start);
@@ -300,14 +295,8 @@ impl StreamState {
         {
             self.model = model.to_string();
         }
-        if let Some(usage) = response.get("usage") {
-            if let Some(it) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
-                self.input_tokens = it;
-            }
-            if let Some(ot) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
-                self.output_tokens = ot;
-            }
-        }
+        self.usage
+            .absorb_wire(WirePayload::OpenAi(response, OpenAiApiVersion::Responses));
 
         match event_type {
             "response.created" | "response.in_progress" => {
@@ -482,10 +471,7 @@ impl StreamState {
                     "content": [],
                     "stop_reason": null,
                     "stop_sequence": null,
-                    "usage": {
-                        "input_tokens": self.input_tokens,
-                        "output_tokens": 0,
-                    }
+                    "usage": self.usage.to_anthropic(),
                 }
             }),
         ))
@@ -571,10 +557,7 @@ impl StreamState {
                     "stop_reason": stop_reason,
                     "stop_sequence": null,
                 },
-                "usage": {
-                    "input_tokens": self.input_tokens,
-                    "output_tokens": self.output_tokens,
-                }
+                "usage": self.usage.to_anthropic(),
             }),
         ));
 
@@ -666,8 +649,7 @@ struct AnthropicToOpenAiState {
     id: String,
     model: String,
     created: u64,
-    input_tokens: u64,
-    output_tokens: u64,
+    usage: Usage,
     stop_reason: Option<String>,
     role_emitted: bool,
     finalized: bool,
@@ -700,8 +682,7 @@ impl AnthropicToOpenAiState {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
-            input_tokens: 0,
-            output_tokens: 0,
+            usage: Usage::default(),
             stop_reason: None,
             role_emitted: false,
             finalized: false,
@@ -741,14 +722,7 @@ impl AnthropicToOpenAiState {
             if let Some(model) = msg.get("model").and_then(|v| v.as_str()) {
                 self.model = model.to_string();
             }
-            if let Some(usage) = msg.get("usage") {
-                if let Some(it) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
-                    self.input_tokens = it;
-                }
-                if let Some(ot) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
-                    self.output_tokens = ot;
-                }
-            }
+            self.usage.absorb_wire(WirePayload::Anthropic(msg));
         }
         if self.id.is_empty() {
             self.id = if self.is_chat() {
@@ -877,14 +851,7 @@ impl AnthropicToOpenAiState {
         {
             self.stop_reason = Some(reason.to_string());
         }
-        if let Some(usage) = ev.get("usage") {
-            if let Some(it) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
-                self.input_tokens = it;
-            }
-            if let Some(ot) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
-                self.output_tokens = ot;
-            }
-        }
+        self.usage.absorb_wire(WirePayload::Anthropic(ev));
         Vec::new()
     }
 
@@ -960,11 +927,7 @@ impl AnthropicToOpenAiState {
             "created": self.created,
             "model": self.model,
             "choices": [],
-            "usage": {
-                "prompt_tokens": self.input_tokens,
-                "completion_tokens": self.output_tokens,
-                "total_tokens": self.input_tokens + self.output_tokens,
-            }
+            "usage": self.usage.to_openai(OpenAiApiVersion::ChatCompletions),
         });
         format!(
             "data: {}\n\n",
@@ -1213,11 +1176,7 @@ impl AnthropicToOpenAiState {
                 "created_at": self.created,
                 "model": self.model,
                 "status": self.response_status(),
-                "usage": {
-                    "input_tokens": self.input_tokens,
-                    "output_tokens": self.output_tokens,
-                    "total_tokens": self.input_tokens + self.output_tokens,
-                },
+                "usage": self.usage.to_openai(OpenAiApiVersion::Responses),
             });
             out.push(sse_event(
                 "response.completed",
@@ -1776,6 +1735,27 @@ mod tests {
         assert_eq!(delta["usage"]["output_tokens"], 17);
     }
 
+    #[test]
+    fn finalize_carries_cached_prompt_tokens_as_cache_read() {
+        // Upstream prompt_tokens includes the cached prefix; Anthropic
+        // `input_tokens` counts only the miss, `cache_read_input_tokens` the hit.
+        let mut state = StreamState::new(None);
+        let chunk = json!({
+            "model": "m",
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 10,
+                "prompt_tokens_details": {"cached_tokens": 70},
+            },
+            "choices": [{"delta": {}, "finish_reason": "stop"}]
+        });
+        state.process_chunk(&chunk);
+        let events = parse_events(&state.finalize());
+        let (_, delta) = events.iter().find(|(t, _)| t == "message_delta").unwrap();
+        assert_eq!(delta["usage"]["input_tokens"], 30);
+        assert_eq!(delta["usage"]["cache_read_input_tokens"], 70);
+    }
+
     // ─── anthropic_stream_to_openai tests ────────────────────────────────────
     //
     // We exercise the state machine directly (parsing + emission) instead of
@@ -1835,6 +1815,26 @@ mod tests {
             frames.iter().any(|f| f.contains("data: [DONE]")),
             "chat stream must terminate with [DONE]"
         );
+    }
+
+    #[test]
+    fn anthropic_to_chat_usage_chunk_carries_cache_read_and_extras() {
+        let events = vec![
+            json!({"type": "message_start", "message": {"id": "msg_x", "model": "m", "usage": {"input_tokens": 30, "output_tokens": 0, "cache_read_input_tokens": 70, "cost": 0.01}}}),
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "hi"}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 2}}),
+        ];
+        let data = extract_data_json(&drive_anthropic_events(
+            OpenAiApiVersion::ChatCompletions,
+            &events,
+        ));
+        let usage = &data.last().unwrap()["usage"];
+        assert_eq!(usage["prompt_tokens"], 100);
+        assert_eq!(usage["completion_tokens"], 2);
+        assert_eq!(usage["prompt_tokens_details"]["cached_tokens"], 70);
+        assert_eq!(usage["cost"], 0.01);
     }
 
     #[test]

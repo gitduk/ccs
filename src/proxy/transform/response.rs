@@ -84,9 +84,11 @@ fn openai_chat_to_anthropic(resp: &Value) -> Result<Value> {
         .unwrap_or("stop");
     let stop_reason = super::chat_finish_to_anthropic_stop(finish_reason);
 
-    // Usage
-    let (input_tokens, output_tokens) =
-        super::usage_tokens(resp, "prompt_tokens", "completion_tokens");
+    let usage = super::CanonicalUsage::try_from(super::WirePayload::OpenAi(
+        resp,
+        OpenAiApiVersion::ChatCompletions,
+    ))?
+    .to_anthropic();
 
     let model = resp
         .get("model")
@@ -106,10 +108,7 @@ fn openai_chat_to_anthropic(resp: &Value) -> Result<Value> {
         "content": content_blocks,
         "stop_reason": stop_reason,
         "stop_sequence": null,
-        "usage": {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-        }
+        "usage": usage,
     }))
 }
 
@@ -177,7 +176,11 @@ fn openai_responses_to_anthropic(resp: &Value) -> Result<Value> {
         .unwrap_or("completed");
     let stop_reason = super::response_status_to_anthropic_stop(status);
 
-    let (input_tokens, output_tokens) = super::usage_tokens(resp, "input_tokens", "output_tokens");
+    let usage = super::CanonicalUsage::try_from(super::WirePayload::OpenAi(
+        resp,
+        OpenAiApiVersion::Responses,
+    ))?
+    .to_anthropic();
 
     let model = resp
         .get("model")
@@ -197,10 +200,7 @@ fn openai_responses_to_anthropic(resp: &Value) -> Result<Value> {
         "content": content_blocks,
         "stop_reason": stop_reason,
         "stop_sequence": null,
-        "usage": {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-        }
+        "usage": usage,
     }))
 }
 
@@ -267,7 +267,8 @@ fn anthropic_to_openai_chat(resp: &Value) -> Result<Value> {
     let stop_reason = resp.get("stop_reason").and_then(|s| s.as_str());
     let finish_reason = super::anthropic_stop_to_chat_finish(stop_reason);
 
-    let (input_tokens, output_tokens) = super::usage_tokens(resp, "input_tokens", "output_tokens");
+    let usage = super::CanonicalUsage::try_from(super::WirePayload::Anthropic(resp))?
+        .to_openai(OpenAiApiVersion::ChatCompletions);
 
     let model = resp
         .get("model")
@@ -293,11 +294,7 @@ fn anthropic_to_openai_chat(resp: &Value) -> Result<Value> {
             "message": message,
             "finish_reason": finish_reason,
         }],
-        "usage": {
-            "prompt_tokens": input_tokens,
-            "completion_tokens": output_tokens,
-            "total_tokens": input_tokens + output_tokens,
-        }
+        "usage": usage,
     }))
 }
 
@@ -369,7 +366,8 @@ fn anthropic_to_openai_responses(resp: &Value) -> Result<Value> {
     let stop_reason = resp.get("stop_reason").and_then(|s| s.as_str());
     let status = super::anthropic_stop_to_response_status(stop_reason);
 
-    let (input_tokens, output_tokens) = super::usage_tokens(resp, "input_tokens", "output_tokens");
+    let usage = super::CanonicalUsage::try_from(super::WirePayload::Anthropic(resp))?
+        .to_openai(OpenAiApiVersion::Responses);
 
     let model = resp
         .get("model")
@@ -392,11 +390,7 @@ fn anthropic_to_openai_responses(resp: &Value) -> Result<Value> {
         "model": model,
         "status": status,
         "output": output_items,
-        "usage": {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "total_tokens": input_tokens + output_tokens,
-        }
+        "usage": usage,
     }))
 }
 
@@ -603,11 +597,52 @@ mod tests {
     // ─── usage ───────────────────────────────────────────────────────────────
 
     #[test]
-    fn usage_tokens_mapped_correctly() {
+    fn chat_usage_maps_to_anthropic_tokens() {
         let resp = simple_text_response("Hi", "stop");
         let out = openai_to_anthropic_response(&resp).unwrap();
         assert_eq!(out["usage"]["input_tokens"], 10);
         assert_eq!(out["usage"]["output_tokens"], 20);
+    }
+
+    #[test]
+    fn chat_cached_and_reasoning_tokens_survive_the_transform_round_trip() {
+        let mut resp = simple_text_response("Hi", "stop");
+        resp["usage"] = json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "prompt_tokens_details": {"cached_tokens": 70},
+            "completion_tokens_details": {"reasoning_tokens": 4},
+        });
+        let canonical = openai_to_anthropic_response(&resp).unwrap();
+        assert_eq!(canonical["usage"]["input_tokens"], 30);
+        assert_eq!(canonical["usage"]["cache_read_input_tokens"], 70);
+
+        let back =
+            anthropic_to_openai_response(&canonical, OpenAiApiVersion::ChatCompletions).unwrap();
+        assert_eq!(back["usage"]["prompt_tokens"], 100);
+        assert_eq!(back["usage"]["completion_tokens"], 10);
+        assert_eq!(back["usage"]["prompt_tokens_details"]["cached_tokens"], 70);
+        assert_eq!(
+            back["usage"]["completion_tokens_details"]["reasoning_tokens"],
+            4
+        );
+    }
+
+    #[test]
+    fn response_without_usage_leaks_no_body_keys_into_usage() {
+        let resp = json!({
+            "id": "id",
+            "model": "m",
+            "choices": [{"message": {"content": "Hi"}, "finish_reason": "stop"}]
+        });
+        let out = openai_to_anthropic_response(&resp).unwrap();
+        let usage = out["usage"].as_object().unwrap();
+        assert_eq!(
+            usage.len(),
+            4,
+            "usage must carry token counts only: {usage:?}"
+        );
+        assert!(usage.get("choices").is_none());
     }
 
     #[test]
@@ -735,6 +770,24 @@ mod tests {
         assert_eq!(out["usage"]["prompt_tokens"], 5);
         assert_eq!(out["usage"]["completion_tokens"], 7);
         assert_eq!(out["usage"]["total_tokens"], 12);
+    }
+
+    #[test]
+    fn anthropic_to_chat_usage_carries_cache_read_and_extras() {
+        let mut resp = simple_anthropic_response("hello", "end_turn");
+        resp["usage"] = json!({
+            "input_tokens": 30,
+            "output_tokens": 7,
+            "cache_read_input_tokens": 70,
+            "cost": 0.01,
+        });
+        let out = anthropic_to_openai_response(&resp, OpenAiApiVersion::ChatCompletions).unwrap();
+        let usage = &out["usage"];
+        assert_eq!(usage["prompt_tokens"], 100);
+        assert_eq!(usage["completion_tokens"], 7);
+        assert_eq!(usage["total_tokens"], 107);
+        assert_eq!(usage["prompt_tokens_details"]["cached_tokens"], 70);
+        assert_eq!(usage["cost"], 0.01);
     }
 
     #[test]

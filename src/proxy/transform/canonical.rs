@@ -45,13 +45,17 @@ fn reasoning_text(item: &Value) -> String {
         .unwrap_or_default()
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_write_tokens: u64,
     pub thought_tokens: u64,
+    /// Usage keys this proxy does not interpret (`cost`, `opencode`, …),
+    /// carried through to the client untouched.
+    #[serde(default, flatten)]
+    pub extra: Map<String, Value>,
 }
 
 impl Usage {
@@ -63,19 +67,57 @@ impl Usage {
             + self.thought_tokens
     }
 
+    /// Prompt tokens as bills count them: uncached input plus both cache
+    /// buckets (reads and writes are parts of the same prompt).
+    pub fn prompt_tokens(&self) -> u64 {
+        self.input_tokens + self.cache_read_tokens + self.cache_write_tokens
+    }
+
+    /// Fold a later usage report into this one, taking the larger count per
+    /// field; `input_tokens` stays `prompt - cached` when cache detail is late.
+    fn absorb(&mut self, mut other: Usage) {
+        let prompt = self.prompt_tokens().max(other.prompt_tokens());
+        self.cache_read_tokens = self.cache_read_tokens.max(other.cache_read_tokens);
+        self.cache_write_tokens = self.cache_write_tokens.max(other.cache_write_tokens);
+        self.input_tokens = prompt
+            .saturating_sub(self.cache_read_tokens)
+            .saturating_sub(self.cache_write_tokens);
+        self.output_tokens = self.output_tokens.max(other.output_tokens);
+        self.thought_tokens = self.thought_tokens.max(other.thought_tokens);
+        self.extra.append(&mut other.extra);
+    }
+
+    /// Fold in the usage `payload` reports; a payload carrying none leaves
+    /// this untouched.
+    pub fn absorb_wire(&mut self, payload: WirePayload<'_>) {
+        if let Ok(other) = Self::try_from(payload) {
+            self.absorb(other);
+        }
+    }
+
+    fn with_extra(&self, mut out: Value) -> Value {
+        if let Some(obj) = out.as_object_mut() {
+            for (k, v) in &self.extra {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+        out
+    }
+
     pub fn to_anthropic(&self) -> Value {
-        json!({
+        let out = json!({
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens + self.thought_tokens,
             "cache_read_input_tokens": self.cache_read_tokens,
             "cache_creation_input_tokens": self.cache_write_tokens,
-        })
+        });
+        self.with_extra(out)
     }
 
     pub fn to_openai(&self, version: OpenAiApiVersion) -> Value {
-        match version {
+        let out = match version {
             OpenAiApiVersion::ChatCompletions => {
-                let prompt = self.input_tokens + self.cache_read_tokens;
+                let prompt = self.prompt_tokens();
                 let completion = self.output_tokens + self.thought_tokens;
                 json!({
                     "prompt_tokens": prompt,
@@ -90,7 +132,7 @@ impl Usage {
                 })
             }
             OpenAiApiVersion::Responses => {
-                let input = self.input_tokens + self.cache_read_tokens;
+                let input = self.prompt_tokens();
                 let output = self.output_tokens + self.thought_tokens;
                 json!({
                     "input_tokens": input,
@@ -104,17 +146,31 @@ impl Usage {
                     }
                 })
             }
-        }
+        };
+        self.with_extra(out)
     }
 
     pub fn to_gemini(&self) -> Value {
-        json!({
+        let out = json!({
             "total_input_tokens": self.input_tokens,
             "total_output_tokens": self.output_tokens,
             "total_thought_tokens": self.thought_tokens,
             "total_cached_tokens": self.cache_read_tokens,
             "total_tokens": self.total_tokens(),
-        })
+        });
+        self.with_extra(out)
+    }
+}
+
+/// The `usage` object `payload` carries, or `payload` itself when it is one
+/// (callers pass a response, an SSE event or a bare map); else `None`.
+fn usage_object<'v>(payload: &'v Value, known: &[&str]) -> Option<&'v Value> {
+    match payload.get("usage") {
+        Some(usage) => Some(usage),
+        None => payload
+            .as_object()
+            .is_some_and(|obj| known.iter().any(|k| obj.contains_key(*k)))
+            .then_some(payload),
     }
 }
 
@@ -124,29 +180,47 @@ impl<'a> TryFrom<WirePayload<'a>> for Usage {
     fn try_from(payload: WirePayload<'a>) -> Result<Self> {
         match payload {
             WirePayload::Anthropic(val) => {
-                let usage = val.get("usage").unwrap_or(val);
-                let get = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+                let known = [
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_read_input_tokens",
+                    "cache_creation_input_tokens",
+                    "total_tokens",
+                ];
+                let usage = usage_object(val, &known);
+                let get = |k: &str| {
+                    usage
+                        .and_then(|u| u.get(k))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
+                };
                 Ok(Self {
                     input_tokens: get("input_tokens"),
                     output_tokens: get("output_tokens"),
                     cache_read_tokens: get("cache_read_input_tokens"),
                     cache_write_tokens: get("cache_creation_input_tokens"),
                     thought_tokens: 0,
+                    extra: usage.map(|u| extract_extra(u, &known)).unwrap_or_default(),
                 })
             }
             WirePayload::OpenAi(val, OpenAiApiVersion::ChatCompletions) => {
-                let usage = val.get("usage").unwrap_or(val);
-                let get = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-                let cached = usage
-                    .get("prompt_tokens_details")
-                    .and_then(|d| d.get("cached_tokens"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let reasoning = usage
-                    .get("completion_tokens_details")
-                    .and_then(|d| d.get("reasoning_tokens"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
+                let known = ["prompt_tokens", "completion_tokens", "total_tokens"];
+                let usage = usage_object(val, &known);
+                let get = |k: &str| {
+                    usage
+                        .and_then(|u| u.get(k))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
+                };
+                let detail = |obj: &str, key: &str| {
+                    usage
+                        .and_then(|u| u.get(obj))
+                        .and_then(|d| d.get(key))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
+                };
+                let cached = detail("prompt_tokens_details", "cached_tokens");
+                let reasoning = detail("completion_tokens_details", "reasoning_tokens");
 
                 let raw_prompt = get("prompt_tokens");
                 let raw_completion = get("completion_tokens");
@@ -157,21 +231,27 @@ impl<'a> TryFrom<WirePayload<'a>> for Usage {
                     cache_read_tokens: cached,
                     cache_write_tokens: 0,
                     thought_tokens: reasoning,
+                    extra: usage.map(|u| extract_extra(u, &known)).unwrap_or_default(),
                 })
             }
             WirePayload::OpenAi(val, OpenAiApiVersion::Responses) => {
-                let usage = val.get("usage").unwrap_or(val);
-                let get = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-                let cached = usage
-                    .get("input_tokens_details")
-                    .and_then(|d| d.get("cached_tokens"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let reasoning = usage
-                    .get("output_tokens_details")
-                    .and_then(|d| d.get("reasoning_tokens"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
+                let known = ["input_tokens", "output_tokens", "total_tokens"];
+                let usage = usage_object(val, &known);
+                let get = |k: &str| {
+                    usage
+                        .and_then(|u| u.get(k))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
+                };
+                let detail = |obj: &str, key: &str| {
+                    usage
+                        .and_then(|u| u.get(obj))
+                        .and_then(|d| d.get(key))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
+                };
+                let cached = detail("input_tokens_details", "cached_tokens");
+                let reasoning = detail("output_tokens_details", "reasoning_tokens");
 
                 let raw_input = get("input_tokens");
                 let raw_output = get("output_tokens");
@@ -182,15 +262,30 @@ impl<'a> TryFrom<WirePayload<'a>> for Usage {
                     cache_read_tokens: cached,
                     cache_write_tokens: 0,
                     thought_tokens: reasoning,
+                    extra: usage.map(|u| extract_extra(u, &known)).unwrap_or_default(),
                 })
             }
             WirePayload::Gemini(val) => {
-                let usage = val.get("usage").unwrap_or(val);
-                let get = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+                let known = [
+                    "total_input_tokens",
+                    "total_output_tokens",
+                    "total_thought_tokens",
+                    "total_cached_tokens",
+                    "total_tokens",
+                ];
+                let usage = usage_object(val, &known);
+                let get = |k: &str| {
+                    usage
+                        .and_then(|u| u.get(k))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
+                };
                 let input = get("total_input_tokens");
                 let output = get("total_output_tokens");
                 let thoughts = get("total_thought_tokens");
                 let cached = get("total_cached_tokens");
+
+                let extra = usage.map(|u| extract_extra(u, &known)).unwrap_or_default();
 
                 if input != 0 || output != 0 || thoughts != 0 {
                     Ok(Self {
@@ -199,6 +294,7 @@ impl<'a> TryFrom<WirePayload<'a>> for Usage {
                         cache_read_tokens: cached,
                         cache_write_tokens: 0,
                         thought_tokens: thoughts,
+                        extra,
                     })
                 } else {
                     let total = get("total_tokens");
@@ -208,6 +304,7 @@ impl<'a> TryFrom<WirePayload<'a>> for Usage {
                         cache_read_tokens: cached,
                         cache_write_tokens: 0,
                         thought_tokens: 0,
+                        extra,
                     })
                 }
             }
@@ -1828,6 +1925,63 @@ impl<'a> TryFrom<WirePayload<'a>> for Request {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn absorb_keeps_the_prompt_whole_when_cache_detail_arrives_late() {
+        let total_only = json!({"prompt_tokens": 100, "completion_tokens": 4});
+        let mut usage = Usage::try_from(WirePayload::OpenAi(
+            &total_only,
+            OpenAiApiVersion::ChatCompletions,
+        ))
+        .unwrap();
+        assert_eq!(usage.input_tokens, 100);
+
+        usage.absorb_wire(WirePayload::OpenAi(
+            &json!({
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 8,
+                    "prompt_tokens_details": {"cached_tokens": 70},
+                }
+            }),
+            OpenAiApiVersion::ChatCompletions,
+        ));
+        assert_eq!(usage.prompt_tokens(), 100);
+        assert_eq!(usage.cache_read_tokens, 70);
+        assert_eq!(usage.input_tokens, 30);
+        assert_eq!(usage.output_tokens, 8);
+    }
+
+    #[test]
+    fn prompt_tokens_include_both_cache_buckets() {
+        let anthropic = json!({
+            "input_tokens": 50,
+            "output_tokens": 10,
+            "cache_read_input_tokens": 1000,
+            "cache_creation_input_tokens": 20000,
+        });
+        let usage = Usage::try_from(WirePayload::Anthropic(&anthropic)).unwrap();
+        assert_eq!(usage.prompt_tokens(), 21050);
+        assert_eq!(
+            usage.to_openai(OpenAiApiVersion::ChatCompletions)["prompt_tokens"],
+            21050
+        );
+    }
+
+    #[test]
+    fn payload_without_usage_yields_no_extra_keys() {
+        let resp = json!({
+            "id": "chatcmpl-1",
+            "model": "gpt-4o",
+            "choices": [{"message": {"content": "Hi"}}],
+        });
+        let usage = Usage::try_from(WirePayload::OpenAi(
+            &resp,
+            OpenAiApiVersion::ChatCompletions,
+        ))
+        .unwrap();
+        assert_eq!(usage, Usage::default());
+    }
 
     #[test]
     fn openai_prompt_deducts_cached_tokens() {
