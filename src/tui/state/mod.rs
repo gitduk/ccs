@@ -241,8 +241,6 @@ pub struct ModelAttrsState {
 #[derive(Debug, Clone)]
 pub struct AttrPath {
     pub path: String,
-    /// How many of the provider's models carry it (0 = configured but gone).
-    pub models: usize,
     /// One model's value there, so the path is recognizable by content.
     pub sample: String,
 }

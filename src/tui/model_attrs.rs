@@ -216,19 +216,16 @@ fn discover_paths(app: &App, provider: &str) -> Vec<AttrPath> {
     let mut found: BTreeMap<String, AttrPath> = BTreeMap::new();
     for model in app.models.catalog.get(provider).into_iter().flatten() {
         for (path, value) in &model.attrs {
-            let entry = found.entry(path.clone()).or_insert_with(|| AttrPath {
+            found.entry(path.clone()).or_insert_with(|| AttrPath {
                 path: path.clone(),
-                models: 0,
                 sample: sample_text(value),
             });
-            entry.models += 1;
         }
     }
     for attr in app.models.attrs.get(provider).into_iter().flatten() {
         for path in &attr.paths {
             found.entry(path.clone()).or_insert_with(|| AttrPath {
                 path: path.clone(),
-                models: 0,
                 sample: "(no longer in the catalog)".to_string(),
             });
         }
@@ -636,13 +633,7 @@ fn draw_list(f: &mut Frame, app: &App, provider: &str, state: &ModelAttrsState) 
     // Columns are sized from the content so a deep path list uses the width the
     // dialog has instead of stacking everything at the left edge.
     let inner_w = inner.width as usize;
-    let count_w = visible
-        .iter()
-        .map(|&idx| count_text(state.paths[idx].models).width())
-        .max()
-        .unwrap_or(0)
-        .max("models".len());
-    let fixed = ROW_MARKER_W + COL_GAP + count_w + COL_GAP;
+    let fixed = ROW_MARKER_W + COL_GAP;
     let path_w = visible
         .iter()
         .map(|&idx| state.paths[idx].path.width())
@@ -666,11 +657,11 @@ fn draw_list(f: &mut Frame, app: &App, provider: &str, state: &ModelAttrsState) 
         } else {
             Style::default().fg(t::TEXT)
         };
+        // The cursor sits inside the padding: both prefixes stay 3 columns so
+        // the marker column never shifts with the selection.
+        let cursor = if is_selected { "  ▶" } else { "   " };
         lines.push(Line::from(vec![
-            Span::styled(
-                format!("{} {marker} ", if is_selected { "  ▶" } else { "    " }),
-                style,
-            ),
+            Span::styled(format!("{cursor} {marker} "), style),
             Span::styled(
                 format!(
                     "{}{}",
@@ -680,14 +671,6 @@ fn draw_list(f: &mut Frame, app: &App, provider: &str, state: &ModelAttrsState) 
                 style,
             ),
             Span::styled(
-                format!(
-                    "{:>count_w$}{}",
-                    count_text(path.models),
-                    " ".repeat(COL_GAP)
-                ),
-                Style::default().fg(t::MUTED),
-            ),
-            Span::styled(
                 truncate_width(&path.sample, sample_w),
                 Style::default().fg(t::MUTED),
             ),
@@ -695,14 +678,6 @@ fn draw_list(f: &mut Frame, app: &App, provider: &str, state: &ModelAttrsState) 
     }
 
     f.render_widget(Paragraph::new(lines), inner);
-}
-
-fn count_text(models: usize) -> String {
-    if models == 0 {
-        "gone".to_string()
-    } else {
-        format!("{models} models")
-    }
 }
 
 fn draw_edit(f: &mut Frame, app: &App, provider: &str, edit: &AttrEdit) {
@@ -833,12 +808,6 @@ mod tests {
             path_names(state),
             vec!["context_length", "pricing.completion", "pricing.prompt"]
         );
-        let context = state
-            .paths
-            .iter()
-            .find(|p| p.path == "context_length")
-            .unwrap();
-        assert_eq!(context.models, 2, "both models carry it");
         assert_eq!(app.mode, Mode::ModelAttrs);
     }
 
@@ -866,7 +835,7 @@ mod tests {
             .iter()
             .find(|p| p.path == "cost.text.input.price")
             .expect("a configured path must stay removable");
-        assert_eq!(gone.models, 0);
+        assert_eq!(gone.sample, "(no longer in the catalog)");
     }
 
     #[test]
