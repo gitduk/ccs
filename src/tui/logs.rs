@@ -117,14 +117,12 @@ pub(super) fn draw_popup(f: &mut Frame, app: &mut App) {
     app.logs.selected = selected;
 
     let viewport_height = inner.height.saturating_sub(1) as usize;
-    let scroll = if selected < app.logs.scroll as usize {
-        selected
-    } else if selected >= app.logs.scroll as usize + viewport_height {
-        selected + 1 - viewport_height
-    } else {
-        app.logs.scroll as usize
+    let scroll = {
+        let mut scroll = app.logs.scroll;
+        crate::tui::state::keep_visible(selected, &mut scroll, viewport_height);
+        app.logs.scroll = scroll;
+        scroll as usize
     };
-    app.logs.scroll = scroll as u16;
 
     // Require at least 10 cols for the detail pane; fall back to list-only below that.
     const LIST_WIDTH: u16 = 37;

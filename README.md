@@ -378,7 +378,19 @@ Fields: Name, Base URL, API Key, Format, then the Routes section. The Format fie
 | `q` / `Esc` / `Ctrl-C` | Back to the provider list |
 | `t` | Test the highlighted model (result shown after its name) |
 | `p` | Set/clear the provider's Test Model |
+| `a` | Choose attribute columns (price, context length, …) shown on the right of each row |
 | `r` | Reload this provider's model list from upstream |
+
+`a` lists every field the provider's `/models` response carries for its models,
+flattened to dotted paths (`pricing.prompt`, `cost.text.input.price`,
+`limit.context`). Pick one, then set the paths — one value, or two rendered
+`in/out` — plus a scale and prefix; for OpenRouter-style catalogs the scale is
+`1000000` (the price is quoted per token) and the prefix `$`. The result is a
+left-aligned column (`$0.15` / `$0.6`, the currency sign lining up): `$0.15/$0.6`. `i` filters the path list while typing
+(`Esc` leaves the filter, `Enter` configures the highlighted match). Columns
+persist per provider in the DB, and `x` in the same dialog removes the selected
+one. Attributes arrive with the
+catalog, so columns fill in after `r` (or a provider test) has fetched it.
 
 ### Quota panel (`U`)
 

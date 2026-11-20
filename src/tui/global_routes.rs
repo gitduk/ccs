@@ -358,12 +358,8 @@ fn validate(app: &App, rule: &GlobalRoute, is_new: bool) -> Result<(), String> {
         return Err("Target model cannot be empty".into());
     }
 
-    if let Some(models) = app
-        .models
-        .provider_models
-        .get(provider)
-        .filter(|m| !m.is_empty())
-        && !models.contains(&rule.rule.target)
+    if let Some(models) = app.models.catalog.get(provider).filter(|m| !m.is_empty())
+        && !models.iter().any(|m| m.name == rule.rule.target)
     {
         return Err(format!(
             "Target '{}' is not in {provider}'s model list",
@@ -377,10 +373,9 @@ fn validate(app: &App, rule: &GlobalRoute, is_new: bool) -> Result<(), String> {
 fn suggestions(app: &App, edit: &GlobalRouteEdit) -> Vec<String> {
     let filter = edit.text.value.as_str();
     match edit.field {
-        GlobalRouteField::Pattern => owned_matches(filter_suggestions(
-            &all_models(&app.models.provider_models),
-            filter,
-        )),
+        GlobalRouteField::Pattern => {
+            owned_matches(filter_suggestions(&all_models(&app.models.catalog), filter))
+        }
         GlobalRouteField::Target => {
             owned_matches(filter_suggestions(&provider_model_pairs(app), filter))
         }
@@ -396,11 +391,11 @@ fn provider_model_pairs(app: &App) -> Vec<String> {
         .filter(|(_, p)| p.enabled)
         .flat_map(|(name, _)| {
             app.models
-                .provider_models
+                .catalog
                 .get(name)
                 .into_iter()
                 .flatten()
-                .map(move |model| format!("{name}/{model}"))
+                .map(move |model| format!("{name}/{}", model.name))
         })
         .collect();
     pairs.sort_unstable();

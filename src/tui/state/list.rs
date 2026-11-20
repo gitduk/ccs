@@ -53,6 +53,31 @@ pub fn step(selected: usize, delta: isize, len: usize) -> usize {
     (selected as isize + delta).clamp(0, len as isize - 1) as usize
 }
 
+/// Scroll `scroll` so a selection that moved or jumped stays inside a
+/// `viewport`-row window starting there. Shared by the panels that scroll a
+/// `u16` offset (models, request log, attribute columns).
+pub fn keep_visible(selected: usize, scroll: &mut u16, viewport: usize) {
+    let bottom = *scroll as usize + viewport;
+    if selected >= bottom {
+        *scroll = (selected + 1).saturating_sub(viewport) as u16;
+    } else if selected < *scroll as usize {
+        *scroll = selected as u16;
+    }
+}
+
+/// Move a selection by `rows` in `dir`, clamped to `len`, and keep it visible.
+pub fn nav(
+    selected: &mut usize,
+    scroll: &mut u16,
+    dir: ListMove,
+    rows: isize,
+    len: usize,
+    viewport: usize,
+) {
+    *selected = step(*selected, dir.delta() * rows, len);
+    keep_visible(*selected, scroll, viewport);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,6 +89,24 @@ mod tests {
         assert_eq!(step(1, 1, 3), 2);
         assert_eq!(step(1, -1, 3), 0);
         assert_eq!(step(1, 5, 3), 2);
+    }
+
+    #[test]
+    fn keep_visible_scrolls_only_when_the_highlight_leaves_the_window() {
+        let mut scroll = 0u16;
+        keep_visible(7, &mut scroll, 8);
+        assert_eq!(scroll, 0, "still inside the window");
+
+        keep_visible(8, &mut scroll, 8);
+        assert_eq!(scroll, 1, "one past the window bottom scrolls by one");
+
+        let mut scroll = 5u16;
+        keep_visible(4, &mut scroll, 8);
+        assert_eq!(scroll, 4, "above the window top pulls the top down");
+
+        let mut scroll = 0u16;
+        keep_visible(99, &mut scroll, 8);
+        assert_eq!(scroll, 92);
     }
 
     #[test]

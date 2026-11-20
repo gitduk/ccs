@@ -24,6 +24,28 @@ pub(crate) fn cursor_split_spans(text: &str, cursor: usize, color: Color) -> Vec
     ]
 }
 
+/// The search/filter row shared by every panel list: label, then the value
+/// with the caret shown while the box has focus, plain muted text otherwise.
+pub(crate) fn search_line(
+    label: &str,
+    field: &super::super::state::FormField,
+    active: bool,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        format!("{label}  "),
+        Style::default().fg(t::MUTED),
+    )];
+    if active {
+        spans.extend(cursor_split_spans(&field.value, field.cursor, t::PRIMARY));
+    } else {
+        spans.push(Span::styled(
+            field.value.clone(),
+            Style::default().fg(t::MUTED),
+        ));
+    }
+    Line::from(spans)
+}
+
 /// Dropdown list presentation.
 pub(crate) enum SuggestionStyle {
     /// Routes target: titled list with (n/m) counter, indented, ▶ highlight.
@@ -105,6 +127,12 @@ pub(crate) fn truncate_width(s: &str, max: usize) -> String {
     format!("{}…", &s[..end])
 }
 
+/// Pad a string on the right to `width` display columns (wide chars count 2).
+pub(crate) fn pad_width(s: &str, width: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+    format!("{s}{}", " ".repeat(width.saturating_sub(s.width())))
+}
+
 /// Truncate a string to `max` characters, appending `…` if truncated.
 pub(crate) fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -153,6 +181,92 @@ pub(crate) fn truncate_error_width(e: &str, max: usize) -> String {
         .unwrap_or(e);
 
     truncate_width(msg, max)
+}
+
+/// Widest a rendered attribute value may grow in a row.
+pub(crate) const MAX_CELL_W: usize = 24;
+
+/// Format a catalog attribute number for a column: thousands compact to `k`/`M`/`G`
+/// (`1M`, `384k`), ordinary fractions keep up to three decimals without trailing
+/// zeros (`0.15`), and values too small for that keep their exact form
+/// (`0.000002` — per-token prices live down there).
+pub(crate) fn fmt_number(v: f64) -> String {
+    if !v.is_finite() {
+        return "-".to_string();
+    }
+    let abs = v.abs();
+    let compact = if abs >= 1e9 {
+        Some((v / 1e9, "G"))
+    } else if abs >= 1e6 {
+        Some((v / 1e6, "M"))
+    } else if abs >= 1e3 {
+        Some((v / 1e3, "k"))
+    } else {
+        None
+    };
+    if let Some((scaled, suffix)) = compact {
+        let text = format!("{scaled:.1}");
+        let text = text.strip_suffix(".0").unwrap_or(&text);
+        return format!("{text}{suffix}");
+    }
+    if v == 0.0 {
+        return "0".to_string();
+    }
+    if abs < 0.001 {
+        return format!("{v}");
+    }
+    let text = format!("{v:.3}");
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// One attribute's value for a model: `scale` and `prefix` applied to each path,
+/// paths joined with `/` (`$0.15/$0.6`). `None` when no path carries a value.
+pub(crate) fn fmt_attr_value(
+    attr: &crate::catalog::ModelAttr,
+    model: &crate::catalog::CatalogModel,
+) -> Option<String> {
+    let values: Vec<String> = attr
+        .paths
+        .iter()
+        .filter_map(|path| model.attr(path).map(|raw| scaled_text(attr, raw)))
+        .collect();
+    (!values.is_empty()).then(|| values.join("/"))
+}
+
+/// A catalog value as a number. Prices arrive as strings (`"0.000002"`) as
+/// often as numbers, so both forms go through the same numeric path.
+pub(crate) fn attr_number(raw: &serde_json::Value) -> Option<f64> {
+    match raw {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn scaled_text(attr: &crate::catalog::ModelAttr, raw: &serde_json::Value) -> String {
+    let text = match attr_number(raw) {
+        Some(v) => fmt_number(v * attr.scale),
+        // A string attribute is its own text: `to_string` on the JSON value
+        // would render the quotes and escapes.
+        None => match raw {
+            serde_json::Value::String(s) => truncate_width(s, MAX_CELL_W),
+            other => truncate_width(&other.to_string(), MAX_CELL_W),
+        },
+    };
+    format!("{}{text}", attr.prefix)
+}
+
+/// Every attribute column's text for one model, joined for the row's right side.
+/// One cell per configured column, in column order; a model without a value
+/// there gets `-` so every row keeps the same number of columns.
+pub(crate) fn fmt_model_cells(
+    attrs: &[crate::catalog::ModelAttr],
+    model: &crate::catalog::CatalogModel,
+) -> Vec<String> {
+    attrs
+        .iter()
+        .map(|attr| fmt_attr_value(attr, model).unwrap_or_else(|| "-".to_string()))
+        .collect()
 }
 
 pub(crate) fn fmt_latency(ms: u64) -> String {
@@ -283,6 +397,81 @@ mod tests {
 
         assert_eq!(lines.len(), 1 + 2, "header plus every remaining row");
         assert!(lines.len() <= 1 + SUGGEST_WINDOW_ROWS);
+    }
+
+    #[test]
+    fn fmt_number_keeps_small_prices_and_compacts_counts() {
+        assert_eq!(super::fmt_number(0.15), "0.15");
+        assert_eq!(super::fmt_number(0.6), "0.6");
+        assert_eq!(super::fmt_number(2.0), "2");
+        assert_eq!(super::fmt_number(0.000002), "0.000002");
+        assert_eq!(super::fmt_number(1_000_000.0), "1M");
+        assert_eq!(super::fmt_number(384_000.0), "384k");
+        assert_eq!(super::fmt_number(0.0), "0");
+    }
+
+    #[test]
+    fn an_attribute_renders_each_path_scaled_and_prefixed() {
+        use crate::catalog::{CatalogModel, ModelAttr};
+        use serde_json::json;
+
+        let mut model = CatalogModel::name_only("m");
+        // Per-token prices arrive as strings as often as numbers.
+        model
+            .attrs
+            .insert("pricing.prompt".into(), json!("0.00000015"));
+        model
+            .attrs
+            .insert("pricing.completion".into(), json!("0.0000006"));
+        let price = ModelAttr {
+            label: "price".into(),
+            paths: vec!["pricing.prompt".into(), "pricing.completion".into()],
+            scale: 1e6,
+            prefix: "$".into(),
+        };
+
+        assert_eq!(
+            super::fmt_attr_value(&price, &model).as_deref(),
+            Some("$0.15/$0.6")
+        );
+
+        // A value already in the display unit needs no scaling.
+        let mut ctx_model = CatalogModel::name_only("m");
+        ctx_model
+            .attrs
+            .insert("limit.context".into(), json!(1000000));
+        let context = ModelAttr {
+            label: "ctx".into(),
+            paths: vec!["limit.context".into()],
+            scale: 1.0,
+            prefix: String::new(),
+        };
+        assert_eq!(
+            super::fmt_attr_value(&context, &ctx_model).as_deref(),
+            Some("1M")
+        );
+
+        // A string attribute renders as its text, not as quoted JSON.
+        let mut text_model = CatalogModel::name_only("m");
+        text_model
+            .attrs
+            .insert("api.base_url".into(), json!("https://opencode.ai/v1"));
+        let text = ModelAttr {
+            label: "url".into(),
+            paths: vec!["api.base_url".into()],
+            scale: 1.0,
+            prefix: String::new(),
+        };
+        assert_eq!(
+            super::fmt_attr_value(&text, &text_model).as_deref(),
+            Some("https://opencode.ai/v1")
+        );
+
+        // No path carries a value → no column text, but the cell stays so the
+        // row keeps its column count.
+        let empty = CatalogModel::name_only("bare");
+        assert_eq!(super::fmt_attr_value(&price, &empty), None);
+        assert_eq!(super::fmt_model_cells(&[price], &empty), vec!["-"]);
     }
 
     #[test]

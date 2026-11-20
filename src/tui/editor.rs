@@ -173,10 +173,12 @@ pub(super) fn handle_key(
     if in_routes {
         let provider_models: Vec<String> = app
             .models
-            .provider_models
+            .catalog
             .get(form.prov_key())
-            .cloned()
-            .unwrap_or_default();
+            .into_iter()
+            .flatten()
+            .map(|m| m.name.clone())
+            .collect();
         handle_routes_key(form, code, ctrl, &provider_models);
         if !form.in_routes() {
             form.routes.retain(|r| r.is_valid(&provider_models));
@@ -809,7 +811,7 @@ fn get_route_suggestions<'a>(form: &ProviderForm, app: &'a App) -> Vec<&'a str> 
             .get(form.route_cursor)
             .map(|r| r.target.as_str())
             .unwrap_or("");
-        provider_model_suggestions(&app.models.provider_models, form.prov_key(), tgt_filter)
+        provider_model_suggestions(&app.models.catalog, form.prov_key(), tgt_filter)
     } else {
         vec![]
     }

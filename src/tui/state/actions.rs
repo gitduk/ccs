@@ -143,10 +143,12 @@ impl App {
             .unwrap_or_else(|| form.fields[NAME_FIELD_IDX].value.trim());
         let known_models: Vec<String> = self
             .models
-            .provider_models
+            .catalog
             .get(models_key)
-            .cloned()
-            .unwrap_or_default();
+            .into_iter()
+            .flatten()
+            .map(|m| m.name.clone())
+            .collect();
 
         // One-shot: consume the explicit a/o/g format choice (if any) on this
         // save attempt, so a later `q` re-runs detection instead of a stale
@@ -303,10 +305,11 @@ impl App {
 
             self.db.rename_provider(&provider_id, &fields.name);
 
-            if let Some(models) = self.models.provider_models.remove(old_name) {
-                self.models
-                    .provider_models
-                    .insert(fields.name.clone(), models);
+            if let Some(models) = self.models.catalog.remove(old_name) {
+                self.models.catalog.insert(fields.name.clone(), models);
+            }
+            if let Some(attrs) = self.models.attrs.remove(old_name) {
+                self.models.attrs.insert(fields.name.clone(), attrs);
             }
             if let Some(result) = self.tests.results.remove(old_name) {
                 self.tests.results.insert(fields.name.clone(), result);
@@ -402,7 +405,7 @@ impl App {
         let client = self.tests.client.clone();
         let provider_name = name.to_string();
         tokio::spawn(async move {
-            let models = crate::tester::fetch_provider_models(&client, &p).await;
+            let models = crate::catalog::fetch(&client, &p).await.unwrap_or_default();
             let _ = tx.send(if models.is_empty() {
                 super::TestEvent::ModelsRefreshFailed {
                     provider: provider_name,
@@ -421,17 +424,17 @@ impl App {
     /// An empty list means the fetch came back with nothing — keep the last
     /// known catalog rather than blanking the provider's model list.
     /// Returns whether anything was written.
-    pub(crate) fn store_provider_models(
+    pub(crate) fn store_catalog(
         &mut self,
         provider_id: &str,
         name: &str,
-        models: Vec<String>,
+        models: Vec<crate::catalog::CatalogModel>,
     ) -> bool {
         if models.is_empty() {
             return false;
         }
-        self.db.replace_provider_models(provider_id, name, &models);
-        self.models.provider_models.insert(name.to_string(), models);
+        self.db.replace_catalog(provider_id, name, &models);
+        self.models.catalog.insert(name.to_string(), models);
         true
     }
 
@@ -502,7 +505,8 @@ impl App {
         if let Ok(mut m) = self.metrics.lock() {
             m.clear_error(name);
         }
-        self.models.provider_models.remove(name);
+        self.models.catalog.remove(name);
+        self.models.attrs.remove(name);
         self.tests.results.remove(name);
         crate::test_store::save(&self.tests.results);
         self.tests.pending.remove(name);
@@ -669,18 +673,19 @@ impl App {
                         .get(&name)
                         .map(|p| p.id.clone())
                         .unwrap_or_else(|| name.clone());
-                    if let Some(mut models) = result.model_names.clone() {
+                    if let Some(mut models) = result.catalog.clone() {
                         // The refreshed catalog may omit the just-tested model
                         // (e.g. a search-box name): keep it so the row and its
                         // result stay visible instead of vanishing on completion.
                         if !result.used_model.is_empty()
                             && !models
                                 .iter()
-                                .any(|m| m.eq_ignore_ascii_case(&result.used_model))
+                                .any(|m| m.name.eq_ignore_ascii_case(&result.used_model))
                         {
-                            models.push(result.used_model.clone());
+                            models
+                                .push(crate::catalog::CatalogModel::name_only(&result.used_model));
                         }
-                        self.store_provider_models(&provider_id, &name, models);
+                        self.store_catalog(&provider_id, &name, models);
                     }
                     // Record the test request in provider stats so it appears in By Provider.
                     let failed = !matches!(result.status, crate::tester::TestStatus::Ok);
@@ -725,7 +730,7 @@ impl App {
                         .get(&name)
                         .map(|p| p.id.clone())
                         .unwrap_or_else(|| name.clone());
-                    self.store_provider_models(&provider_id, &name, models.clone());
+                    self.store_catalog(&provider_id, &name, models.clone());
                     if manual_refresh {
                         self.set_message(
                             format!("Refreshed {} models for '{name}'", models.len()),
@@ -833,8 +838,7 @@ impl App {
                                 self.config.current = name.clone();
                             }
                             self.config.sort_providers_by_enabled();
-                            let wrote_models =
-                                self.store_provider_models(&provider_id, &name, d.models);
+                            let wrote_models = self.store_catalog(&provider_id, &name, d.models);
                             match config::save_config(&self.config) {
                                 Ok(()) => {
                                     if self.config.providers.contains_key(&name) {
@@ -854,7 +858,7 @@ impl App {
                                     self.config.providers.shift_remove(&name);
                                     // DB row orphaned (harmless); drop the in-memory copy validation reads.
                                     if wrote_models {
-                                        self.models.provider_models.remove(&name);
+                                        self.models.catalog.remove(&name);
                                     }
                                     if let Some(f) = self.form.as_mut() {
                                         f.detect_token = None;
@@ -939,10 +943,41 @@ mod tests {
     }
 
     #[test]
+    fn deleting_a_provider_drops_its_attribute_columns() {
+        let _guard = ConfigDirGuard::new();
+        let mut app = app_with_current("first");
+        app.models.attrs.insert(
+            "second".to_string(),
+            vec![crate::catalog::ModelAttr {
+                label: "price".into(),
+                paths: vec!["pricing.prompt".into()],
+                scale: 1e6,
+                prefix: "$".into(),
+            }],
+        );
+
+        app.do_delete("second").unwrap();
+
+        assert!(
+            !app.models.attrs.contains_key("second"),
+            "a deleted provider leaves no column state behind"
+        );
+    }
+
+    #[test]
     fn renaming_a_provider_follows_into_the_global_routes() {
         let _guard = ConfigDirGuard::new();
         let mut app = app_with_current("first");
         app.config.global_routes = vec![GlobalRoute::for_test("second", "second-*", "m")];
+        app.models.attrs.insert(
+            "second".to_string(),
+            vec![crate::catalog::ModelAttr {
+                label: "price".into(),
+                paths: vec!["pricing.prompt".into()],
+                scale: 1e6,
+                prefix: "$".into(),
+            }],
+        );
 
         let provider = app.config.providers.get("second").unwrap().clone();
         let mut form = ProviderForm::new("second", Some(&provider));
@@ -953,6 +988,10 @@ mod tests {
 
         assert!(app.config.providers.contains_key("renamed"));
         assert_eq!(app.config.global_routes[0].provider, "renamed");
+        assert!(
+            app.models.attrs.contains_key("renamed") && !app.models.attrs.contains_key("second"),
+            "a renamed provider keeps its attribute columns"
+        );
         assert_eq!(
             crate::config::load_config().unwrap().global_routes[0].provider,
             "renamed",

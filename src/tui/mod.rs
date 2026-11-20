@@ -6,6 +6,7 @@
 mod editor;
 mod global_routes;
 mod logs;
+mod model_attrs;
 mod models;
 mod provider_stats;
 mod providers;
@@ -151,11 +152,8 @@ impl BgDbJobs {
         let tx = self.tx.clone();
         let db = app.db.clone();
         tokio::task::spawn_blocking(move || {
-            let (metrics, provider_models) = db.load_all();
-            let _ = tx.send(BgDbResult::Metrics(MetricsSnapshot {
-                metrics,
-                provider_models,
-            }));
+            let metrics = db.load_metrics();
+            let _ = tx.send(BgDbResult::Metrics(MetricsSnapshot { metrics }));
         });
     }
 

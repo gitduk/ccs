@@ -26,7 +26,9 @@ impl App {
             tracing::warn!("DB schema migration failed: {e}");
         }
 
-        let (metrics_data, provider_models) = db.load_all();
+        let metrics_data = db.load_metrics();
+        let catalog = db.load_catalog();
+        let model_attrs = db.load_model_attrs();
         let metrics = Arc::new(Mutex::new(metrics_data));
 
         // History loads in the first background sync: with bodies it is the
@@ -77,14 +79,11 @@ impl App {
             bg_proxy_pid,
             bg_proxy_stale_version: None,
             models: ModelsState {
-                provider_models,
-                search_field: super::FormField::search(),
-                search_active: true,
-                selected: 0,
-                scroll: 0,
-                pending_key: None,
-                refresh_inflight: false,
+                catalog,
+                attrs: model_attrs,
+                ..ModelsState::new()
             },
+            attrs_dialog: None,
             request_log,
             logs: LogsState {
                 selected: 0,
@@ -315,7 +314,8 @@ impl App {
                     self.providers.expanded = false;
                 }
 
-                self.models.provider_models = self.db.load_provider_models();
+                self.models.catalog = self.db.load_catalog();
+                self.models.attrs = self.db.load_model_attrs();
 
                 self.set_message("Configuration reloaded", MessageKind::Success);
                 Ok(())

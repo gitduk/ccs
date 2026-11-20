@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, Result, params};
+use serde_json::{Map, Value};
 
+use crate::catalog::{CatalogModel, ModelAttr};
 use crate::metrics::TokenMetrics;
 
 pub type SharedDb = Arc<Mutex<Connection>>;
@@ -59,7 +61,17 @@ fn init_schema(conn: &Connection) -> Result<()> {
             provider_id   TEXT NOT NULL,
             provider_name TEXT NOT NULL,
             model_name    TEXT NOT NULL,
+            attrs         TEXT,
             PRIMARY KEY (provider_id, model_name)
+        );
+        CREATE TABLE IF NOT EXISTS model_attrs (
+            provider_id   TEXT NOT NULL,
+            provider_name TEXT NOT NULL,
+            label         TEXT NOT NULL,
+            paths         TEXT NOT NULL,
+            scale         REAL NOT NULL DEFAULT 1,
+            prefix        TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (provider_id, label)
         );
         CREATE TABLE IF NOT EXISTS request_log (
             id            INTEGER PRIMARY KEY,
@@ -89,6 +101,28 @@ fn init_schema(conn: &Connection) -> Result<()> {
     // Add last-quota snapshot column to existing DBs that predate it.
     conn.execute_batch("ALTER TABLE provider_stats ADD COLUMN quota_output TEXT")
         .ok(); // Ignore error — column already exists on fresh DBs.
+    // Add flattened catalog attributes to DBs that predate them. Unlike the
+    // older columns above, a failure here must surface: every catalog write
+    // names `attrs`, so a silently missing column breaks discovery for good.
+    ensure_column(
+        conn,
+        "provider_models",
+        "attrs",
+        "ALTER TABLE provider_models ADD COLUMN attrs TEXT",
+    )?;
+    Ok(())
+}
+
+/// Add `column` to `table` when this DB predates it.
+fn ensure_column(conn: &Connection, table: &str, column: &str, ddl: &str) -> Result<()> {
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+        params![table, column],
+        |row| row.get(0),
+    )?;
+    if exists == 0 {
+        conn.execute_batch(ddl)?;
+    }
     Ok(())
 }
 
@@ -371,45 +405,68 @@ pub fn upsert_model(
     Ok(())
 }
 
+/// Tables holding a provider's usage counters.
+const USAGE_TABLES: &[&str] = &["provider_stats", "model_stats"];
+/// Tables holding a provider's catalog and its attribute columns.
+const CATALOG_TABLES: &[&str] = &["provider_models", "model_attrs"];
+
 /// Rename a provider: updates provider_name in all rows with the given provider_id.
 pub fn rename_provider(conn: &Connection, provider_id: &str, new_name: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE provider_stats SET provider_name = ?1 WHERE provider_id = ?2",
-        params![new_name, provider_id],
-    )?;
-    conn.execute(
-        "UPDATE model_stats SET provider_name = ?1 WHERE provider_id = ?2",
-        params![new_name, provider_id],
-    )?;
-    conn.execute(
-        "UPDATE provider_models SET provider_name = ?1 WHERE provider_id = ?2",
-        params![new_name, provider_id],
-    )?;
+    for table in USAGE_TABLES.iter().chain(CATALOG_TABLES) {
+        conn.execute(
+            &format!("UPDATE {table} SET provider_name = ?1 WHERE provider_id = ?2"),
+            params![new_name, provider_id],
+        )?;
+    }
     Ok(())
 }
 
-pub fn load_provider_models(conn: &Connection) -> HashMap<String, Vec<String>> {
-    let mut map: HashMap<String, Vec<String>> = HashMap::new();
-    if let Ok(mut stmt) = conn.prepare(
-        "SELECT provider_name, model_name FROM provider_models ORDER BY provider_name, model_name",
-    ) && let Ok(rows) = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    }) {
-        for (provider, model) in rows.flatten() {
-            map.entry(provider).or_default().push(model);
+/// Rows of `sql` grouped by the provider name in column 0, keeping query order.
+fn load_by_provider<T>(
+    conn: &Connection,
+    sql: &str,
+    row_of: impl Fn(&rusqlite::Row<'_>) -> Result<T>,
+) -> HashMap<String, Vec<T>> {
+    let mut map: HashMap<String, Vec<T>> = HashMap::new();
+    if let Ok(mut stmt) = conn.prepare(sql)
+        && let Ok(rows) = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row_of(row)?)))
+    {
+        for (provider, item) in rows.flatten() {
+            map.entry(provider).or_default().push(item);
         }
     }
     map
 }
 
+pub fn load_catalog(conn: &Connection) -> HashMap<String, Vec<CatalogModel>> {
+    load_by_provider(
+        conn,
+        "SELECT provider_name, model_name, attrs FROM provider_models
+         ORDER BY provider_name, model_name",
+        |row| {
+            Ok(CatalogModel {
+                name: row.get(1)?,
+                attrs: parse_attrs(row.get(2)?),
+            })
+        },
+    )
+}
+
+/// Attributes as stored: a JSON object of flattened dotted paths. A missing or
+/// unreadable column yields no attributes — the model still lists by name.
+fn parse_attrs(raw: Option<String>) -> Map<String, Value> {
+    raw.and_then(|s| serde_json::from_str::<Map<String, Value>>(&s).ok())
+        .unwrap_or_default()
+}
+
 /// Overwrite a provider's model catalog with what discovery just returned.
 /// Replaces rather than merges, so a model the upstream dropped disappears.
 /// An empty list is a no-op: a failed fetch must not erase a known catalog.
-pub fn replace_provider_models(
+pub fn replace_catalog(
     conn: &mut Connection,
     provider_id: &str,
     provider_name: &str,
-    models: &[String],
+    models: &[CatalogModel],
 ) -> Result<()> {
     if models.is_empty() {
         return Ok(());
@@ -421,11 +478,68 @@ pub fn replace_provider_models(
     )?;
     {
         let mut stmt = tx.prepare(
-            "INSERT OR IGNORE INTO provider_models (provider_id, provider_name, model_name)
-             VALUES (?1, ?2, ?3)",
+            "INSERT OR IGNORE INTO provider_models (provider_id, provider_name, model_name, attrs)
+             VALUES (?1, ?2, ?3, ?4)",
         )?;
         for model in models {
-            stmt.execute(params![provider_id, provider_name, model])?;
+            let attrs =
+                (!model.attrs.is_empty()).then(|| Value::Object(model.attrs.clone()).to_string());
+            stmt.execute(params![provider_id, provider_name, model.name, attrs])?;
+        }
+    }
+    tx.commit()
+}
+
+/// Attribute columns configured for each provider, in the order they were added.
+pub fn load_model_attrs(conn: &Connection) -> HashMap<String, Vec<ModelAttr>> {
+    load_by_provider(
+        conn,
+        "SELECT provider_name, label, paths, scale, prefix FROM model_attrs
+         ORDER BY provider_name, rowid",
+        |row| {
+            Ok(ModelAttr {
+                label: row.get(1)?,
+                paths: parse_paths(row.get(2)?),
+                scale: row.get(3)?,
+                prefix: row.get(4)?,
+            })
+        },
+    )
+}
+
+/// Stored paths: a JSON array, or the comma-joined form written before it — a
+/// path typed by hand may itself contain a comma.
+fn parse_paths(raw: String) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(&raw)
+        .unwrap_or_else(|_| raw.split(',').map(str::to_string).collect())
+}
+
+/// Overwrite a provider's attribute columns. An empty list clears them.
+pub fn replace_model_attrs(
+    conn: &mut Connection,
+    provider_id: &str,
+    provider_name: &str,
+    attrs: &[ModelAttr],
+) -> Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute(
+        "DELETE FROM model_attrs WHERE provider_id = ?1",
+        [provider_id],
+    )?;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT INTO model_attrs (provider_id, provider_name, label, paths, scale, prefix)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+        for attr in attrs {
+            stmt.execute(params![
+                provider_id,
+                provider_name,
+                attr.label,
+                Value::Array(attr.paths.iter().cloned().map(Value::String).collect()).to_string(),
+                attr.scale,
+                attr.prefix
+            ])?;
         }
     }
     tx.commit()
@@ -439,16 +553,19 @@ pub fn clear_all(conn: &mut Connection) -> Result<()> {
     tx.commit()
 }
 
-fn delete_provider_usage(conn: &Connection, provider_id: &str) -> Result<()> {
-    conn.execute(
-        "DELETE FROM provider_stats WHERE provider_id = ?1",
-        [provider_id],
-    )?;
-    conn.execute(
-        "DELETE FROM model_stats WHERE provider_id = ?1",
-        [provider_id],
-    )?;
+/// Delete this provider's rows from each of `tables`.
+fn delete_provider_rows(conn: &Connection, provider_id: &str, tables: &[&str]) -> Result<()> {
+    for table in tables {
+        conn.execute(
+            &format!("DELETE FROM {table} WHERE provider_id = ?1"),
+            [provider_id],
+        )?;
+    }
     Ok(())
+}
+
+fn delete_provider_usage(conn: &Connection, provider_id: &str) -> Result<()> {
+    delete_provider_rows(conn, provider_id, USAGE_TABLES)
 }
 
 pub fn clear_provider(conn: &mut Connection, provider_id: &str) -> Result<()> {
@@ -457,15 +574,12 @@ pub fn clear_provider(conn: &mut Connection, provider_id: &str) -> Result<()> {
     tx.commit()
 }
 
-/// Remove every trace of a provider — usage stats plus model catalog.
-/// Distinct from `clear_provider`, which resets usage but keeps the catalog.
+/// Remove every trace of a provider — usage stats, model catalog and its
+/// attribute columns. Distinct from `clear_provider`, which resets usage only.
 pub fn delete_provider(conn: &mut Connection, provider_id: &str) -> Result<()> {
     let tx = conn.transaction()?;
     delete_provider_usage(&tx, provider_id)?;
-    tx.execute(
-        "DELETE FROM provider_models WHERE provider_id = ?1",
-        [provider_id],
-    )?;
+    delete_provider_rows(&tx, provider_id, CATALOG_TABLES)?;
     tx.commit()
 }
 
@@ -638,6 +752,7 @@ pub fn max_request_log_id(conn: &Connection) -> u64 {
     .unwrap_or(0)
 }
 
+#[cfg(test)]
 mod tests {
     #[allow(unused_imports)]
     use super::*;
@@ -668,6 +783,11 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// Catalog rows for tests, built from bare names.
+    fn catalog_of(names: &[&str]) -> Vec<CatalogModel> {
+        names.iter().map(|n| CatalogModel::name_only(n)).collect()
+    }
+
     /// Traffic records the *client-requested* model name (an alias the provider
     /// may never serve), so it must never leak into the discovered catalog.
     #[test]
@@ -675,25 +795,19 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         init_schema(&conn).unwrap();
 
-        replace_provider_models(
+        replace_catalog(
             &mut conn,
             "ds-id",
             "ds",
-            &[
-                "deepseek-v4-flash".to_string(),
-                "deepseek-v4-pro".to_string(),
-            ],
+            &catalog_of(&["deepseek-v4-flash", "deepseek-v4-pro"]),
         )
         .unwrap();
         upsert_model(&conn, "ds-id", "ds", "claude-opus-5", 100, 20).unwrap();
 
-        let catalog = load_provider_models(&conn);
+        let catalog = load_catalog(&conn);
         assert_eq!(
             catalog.get("ds").unwrap(),
-            &[
-                "deepseek-v4-flash".to_string(),
-                "deepseek-v4-pro".to_string()
-            ]
+            &catalog_of(&["deepseek-v4-flash", "deepseek-v4-pro"])
         );
         let metrics = load_metrics(&conn);
         assert_eq!(metrics.by_model["claude-opus-5"].input, 100);
@@ -704,37 +818,99 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         init_schema(&conn).unwrap();
 
-        replace_provider_models(&mut conn, "id", "p", &["a".to_string(), "b".to_string()]).unwrap();
-        replace_provider_models(&mut conn, "id", "p", &["b".to_string()]).unwrap();
-        assert_eq!(
-            load_provider_models(&conn).get("p").unwrap(),
-            &["b".to_string()]
-        );
+        replace_catalog(&mut conn, "id", "p", &catalog_of(&["a", "b"])).unwrap();
+        replace_catalog(&mut conn, "id", "p", &catalog_of(&["b"])).unwrap();
+        assert_eq!(load_catalog(&conn).get("p").unwrap(), &catalog_of(&["b"]));
 
         // A failed fetch (empty list) must not erase the known catalog.
-        replace_provider_models(&mut conn, "id", "p", &[]).unwrap();
-        assert_eq!(
-            load_provider_models(&conn).get("p").unwrap(),
-            &["b".to_string()]
-        );
+        replace_catalog(&mut conn, "id", "p", &[]).unwrap();
+        assert_eq!(load_catalog(&conn).get("p").unwrap(), &catalog_of(&["b"]));
+    }
+
+    #[test]
+    fn catalog_attributes_survive_a_round_trip() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        let mut model = CatalogModel::name_only("m");
+        model
+            .attrs
+            .insert("pricing.prompt".into(), serde_json::json!("0.000002"));
+        model
+            .attrs
+            .insert("limit.context".into(), serde_json::json!(200000));
+        replace_catalog(&mut conn, "id", "p", &[model.clone()]).unwrap();
+
+        let loaded = load_catalog(&conn);
+        assert_eq!(loaded.get("p").unwrap(), &[model]);
+
+        // A row without attributes must stay readable, not parse to garbage.
+        replace_catalog(&mut conn, "id", "p", &catalog_of(&["bare"])).unwrap();
+        assert_eq!(load_catalog(&conn).get("p").unwrap()[0].attrs.len(), 0);
+    }
+
+    /// Paths are user-typed text: one containing a comma must not split in two.
+    #[test]
+    fn a_path_containing_a_comma_round_trips() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let attr = ModelAttr {
+            label: "odd".into(),
+            paths: vec!["a,b".into(), "c".into()],
+            scale: 1.0,
+            prefix: String::new(),
+        };
+        replace_model_attrs(&mut conn, "id", "p", std::slice::from_ref(&attr)).unwrap();
+
+        assert_eq!(load_model_attrs(&conn).get("p").unwrap(), &[attr]);
+    }
+
+    #[test]
+    fn attribute_columns_load_in_the_order_they_were_added() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        let price = ModelAttr {
+            label: "price".into(),
+            paths: vec!["pricing.prompt".into(), "pricing.completion".into()],
+            scale: 1e6,
+            prefix: "$".into(),
+        };
+        let context = ModelAttr {
+            label: "ctx".into(),
+            paths: vec!["limit.context".into()],
+            scale: 1.0,
+            prefix: String::new(),
+        };
+        replace_model_attrs(&mut conn, "id", "p", &[price.clone(), context.clone()]).unwrap();
+
+        assert_eq!(load_model_attrs(&conn).get("p").unwrap(), &[price, context]);
+
+        // Clearing one provider must leave the others alone.
+        replace_model_attrs(&mut conn, "other-id", "other", &[]).unwrap();
+        assert!(load_model_attrs(&conn).contains_key("p"));
+
+        rename_provider(&conn, "id", "renamed").unwrap();
+        assert!(!load_model_attrs(&conn).contains_key("p"));
+        assert_eq!(load_model_attrs(&conn)["renamed"].len(), 2);
+
+        delete_provider(&mut conn, "id").unwrap();
+        assert!(!load_model_attrs(&conn).contains_key("renamed"));
     }
 
     #[test]
     fn clear_keeps_the_catalog_but_delete_removes_it() {
         let mut conn = Connection::open_in_memory().unwrap();
         init_schema(&conn).unwrap();
-        replace_provider_models(&mut conn, "id", "p", &["a".to_string()]).unwrap();
+        replace_catalog(&mut conn, "id", "p", &catalog_of(&["a"])).unwrap();
         upsert_model(&conn, "id", "p", "a", 5, 5).unwrap();
 
         clear_provider(&mut conn, "id").unwrap();
-        assert_eq!(
-            load_provider_models(&conn).get("p").unwrap(),
-            &["a".to_string()]
-        );
+        assert_eq!(load_catalog(&conn).get("p").unwrap(), &catalog_of(&["a"]));
         assert!(load_metrics(&conn).by_model.is_empty());
 
         delete_provider(&mut conn, "id").unwrap();
-        assert!(load_provider_models(&conn).is_empty());
+        assert!(load_catalog(&conn).is_empty());
     }
 
     /// The seed runs once. A later catalog wipe must stay wiped instead of
@@ -747,13 +923,13 @@ mod tests {
 
         backfill_provider_models(&mut conn).unwrap();
         assert_eq!(
-            load_provider_models(&conn).get("p").unwrap(),
-            &["legacy-model".to_string()]
+            load_catalog(&conn).get("p").unwrap(),
+            &catalog_of(&["legacy-model"])
         );
 
         conn.execute("DELETE FROM provider_models", []).unwrap();
         backfill_provider_models(&mut conn).unwrap();
-        assert!(load_provider_models(&conn).is_empty());
+        assert!(load_catalog(&conn).is_empty());
     }
 
     #[test]

@@ -3,21 +3,16 @@ use super::{App, MessageKind, MetricsSnapshot};
 impl App {
     /// Load a metrics snapshot from the DB without holding any locks longer than needed.
     pub(crate) fn load_metrics_snapshot(&self) -> MetricsSnapshot {
-        let (metrics, provider_models) = self.db.load_all();
         MetricsSnapshot {
-            metrics,
-            provider_models,
+            metrics: self.db.load_metrics(),
         }
     }
 
     /// Apply a previously loaded snapshot: merge DB metrics into the in-memory
-    /// `SharedMetrics`, log newly appearing provider errors, and refresh
-    /// `models.provider_models`. Returns `true` if anything changed.
+    /// `SharedMetrics` and log newly appearing provider errors. Returns `true`
+    /// if anything changed.
     pub(crate) fn apply_metrics_snapshot(&mut self, snapshot: MetricsSnapshot) -> bool {
-        let MetricsSnapshot {
-            metrics,
-            provider_models,
-        } = snapshot;
+        let MetricsSnapshot { metrics } = snapshot;
 
         let error_snapshot: Vec<(String, u16, String)> = if let Ok(mut m) = self.metrics.lock() {
             let saved_errors = std::mem::take(&mut m.last_error);
@@ -53,10 +48,6 @@ impl App {
             }
         }
 
-        if self.models.provider_models != provider_models {
-            self.models.provider_models = provider_models;
-            dirty = true;
-        }
         dirty
     }
 

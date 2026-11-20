@@ -54,8 +54,7 @@ mod tests {
         TestResult {
             status: TestStatus::Ok,
             latency_ms: 42,
-            model_count: Some(1),
-            model_names: Some(vec![used_model.to_string()]),
+            catalog: Some(vec![crate::catalog::CatalogModel::name_only(used_model)]),
             tested_at: std::time::Instant::now(),
             used_model: used_model.to_string(),
             tools_supported: Some(true),

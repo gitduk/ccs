@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::catalog::{CatalogModel, ModelAttr};
 use crate::db::{self, SharedDb};
 use crate::metrics::{TokenMetrics, sync_next_request_log_id};
 
@@ -137,40 +138,48 @@ impl Repository {
         }
     }
 
-    pub fn load_provider_models(&self) -> HashMap<String, Vec<String>> {
+    pub fn load_catalog(&self) -> HashMap<String, Vec<CatalogModel>> {
         match self.0.lock() {
-            Ok(conn) => db::load_provider_models(&conn),
+            Ok(conn) => db::load_catalog(&conn),
             Err(_) => {
-                tracing::warn!("DB mutex poisoned in load_provider_models; returning empty map");
+                tracing::warn!("DB mutex poisoned in load_catalog; returning empty map");
                 HashMap::new()
             }
         }
     }
 
-    /// Load both metrics and provider models in a single lock acquisition.
-    pub fn load_all(&self) -> (TokenMetrics, HashMap<String, Vec<String>>) {
+    pub fn load_model_attrs(&self) -> HashMap<String, Vec<ModelAttr>> {
         match self.0.lock() {
-            Ok(conn) => (db::load_metrics(&conn), db::load_provider_models(&conn)),
+            Ok(conn) => db::load_model_attrs(&conn),
             Err(_) => {
-                tracing::warn!("DB mutex poisoned in load_all; returning empty state");
-                (TokenMetrics::default(), HashMap::new())
+                tracing::warn!("DB mutex poisoned in load_model_attrs; returning empty map");
+                HashMap::new()
             }
         }
     }
 
     /// Overwrite a provider's model catalog with a freshly discovered list.
-    pub fn replace_provider_models(
+    pub fn replace_catalog(&self, provider_id: &str, provider_name: &str, models: &[CatalogModel]) {
+        if let Ok(mut conn) = self.0.lock()
+            && let Err(e) = db::replace_catalog(&mut conn, provider_id, provider_name, models)
+        {
+            tracing::warn!("Failed to replace the catalog for {provider_name}: {e}");
+        }
+    }
+
+    /// Overwrite a provider's attribute columns; an empty list clears them.
+    /// Errors reach the caller: a column the DB refused must not be reported
+    /// as saved.
+    pub fn replace_model_attrs(
         &self,
         provider_id: &str,
         provider_name: &str,
-        models: &[String],
-    ) {
-        if let Ok(mut conn) = self.0.lock()
-            && let Err(e) =
-                db::replace_provider_models(&mut conn, provider_id, provider_name, models)
-        {
-            tracing::warn!("Failed to replace provider models for {provider_name}: {e}");
-        }
+        attrs: &[ModelAttr],
+    ) -> rusqlite::Result<()> {
+        let Ok(mut conn) = self.0.lock() else {
+            return Ok(());
+        };
+        db::replace_model_attrs(&mut conn, provider_id, provider_name, attrs)
     }
 
     pub fn rename_provider(&self, provider_id: &str, new_name: &str) {

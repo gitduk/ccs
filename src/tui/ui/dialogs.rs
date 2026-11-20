@@ -99,6 +99,7 @@ pub(super) fn draw_help(f: &mut Frame, scroll: &mut u16) {
                 ("j / k", "Navigate models"),
                 ("t", "Test highlighted model"),
                 ("p", "Set/clear this provider's Test Model"),
+                ("a", "Choose attribute columns"),
                 ("C-d / C-u", "Jump 10 entries"),
                 ("gg / G", "Go to top / bottom"),
                 ("i", "Filter models (Insert)"),

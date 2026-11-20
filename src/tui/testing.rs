@@ -31,8 +31,7 @@ pub(super) fn test_specific_model(app: &mut App, provider_name: &str, model: &st
             Err(_) => crate::tester::TestResult {
                 status: crate::tester::TestStatus::Error("Connection error".to_string()),
                 latency_ms: 0,
-                model_count: None,
-                model_names: None,
+                catalog: None,
                 tested_at: std::time::Instant::now(),
                 used_model: model.clone(),
                 tools_supported: None,
@@ -89,9 +88,10 @@ pub(super) fn start_quota_query(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::catalog::CatalogModel;
     use crate::config::{ApiFormat, AppConfig, Provider};
     use crate::tui::state::{
-        App, FormField, LogsState, Mode, ModelsState, ProviderList, ServerStatus, TestState,
+        App, LogsState, Mode, ModelsState, ProviderList, ServerStatus, TestState,
     };
     use indexmap::IndexMap;
     use ratatui::widgets::TableState;
@@ -102,21 +102,9 @@ pub(crate) mod tests {
     pub(crate) fn provider(id: &str) -> Provider {
         Provider {
             id: id.to_string(),
-            base_url: "http://127.0.0.1:9".to_string(),
             api_key: "sk-test".to_string(),
             api_format: ApiFormat::Anthropic,
-            model_map: Default::default(),
-            routes: vec![],
-            enabled: true,
-            fallback: true,
-            api_version: None,
-            inject_thinking_history: true,
-            strict_thinking_history: false,
-            quota_command: None,
-            port: None,
-            test_model: None,
-            max_tokens_cap: None,
-            extra_headers: Default::default(),
+            ..crate::config::test_support::provider("http://127.0.0.1:9")
         }
     }
 
@@ -157,17 +145,19 @@ pub(crate) mod tests {
             bg_proxy_pid: None,
             bg_proxy_stale_version: None,
             models: ModelsState {
-                provider_models: std::collections::HashMap::from([
-                    ("first".to_string(), vec!["first-model".to_string()]),
-                    ("second".to_string(), vec!["second-model".to_string()]),
+                catalog: std::collections::HashMap::from([
+                    (
+                        "first".to_string(),
+                        vec![CatalogModel::name_only("first-model")],
+                    ),
+                    (
+                        "second".to_string(),
+                        vec![CatalogModel::name_only("second-model")],
+                    ),
                 ]),
-                search_field: FormField::search(),
-                search_active: true,
-                selected: 0,
-                scroll: 0,
-                pending_key: None,
-                refresh_inflight: false,
+                ..ModelsState::new()
             },
+            attrs_dialog: None,
             request_log: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::metrics::RequestLog::default(),
             )),

@@ -728,6 +728,30 @@ pub(crate) mod test_support {
             unsafe { std::env::remove_var("CCS_CONFIG_DIR") };
         }
     }
+
+    /// A provider for tests that exercise catalog, transform or proxy code and
+    /// don't care about its fields. The one place this fixture is spelled out —
+    /// inline `Provider { .. }` literals drift apart on every new field.
+    pub fn provider(base_url: &str) -> super::Provider {
+        super::Provider {
+            id: "test-id".into(),
+            base_url: base_url.to_string(),
+            api_key: "test-key".into(),
+            api_format: super::ApiFormat::OpenAI,
+            model_map: Default::default(),
+            routes: vec![],
+            enabled: true,
+            fallback: true,
+            api_version: None,
+            inject_thinking_history: true,
+            strict_thinking_history: false,
+            quota_command: None,
+            port: None,
+            test_model: None,
+            max_tokens_cap: None,
+            extra_headers: Default::default(),
+        }
+    }
 }
 
 #[cfg(test)]

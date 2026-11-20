@@ -2,17 +2,22 @@
 //!
 //! This module owns the searchable models dialog, its navigation, clipboard
 //! actions for the currently highlighted model, testing it (`t`), and pinning
-//! it as the provider's Test Model (`p`). Test results render after each model
+//! it as the provider's Test Model (`p`), and the attribute columns drawn on the
+//! right of each row (`a` configures them). Test results render after each model
 //! name.
 
 use std::time::Instant;
 
 use unicode_width::UnicodeWidthStr;
 
-use super::state::{App, ListMove, MessageKind, Mode, list_move, step};
+use super::state::{self, App, ListMove, MessageKind, Mode, list_move};
 use super::theme::{self as t};
-use super::ui::format::{fmt_latency, truncate_error_width};
+use super::ui::format::{
+    MAX_CELL_W, fmt_latency, fmt_model_cells, max_content_width, search_line, truncate_error_width,
+    truncate_width,
+};
 use super::ui::layout::centered_fixed;
+use crate::catalog::CatalogModel;
 use crate::tester::TestStatus;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Frame;
@@ -21,17 +26,22 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 
-/// Estimated visible rows used for scroll look-ahead in nav and 'G' jump.
-/// Matches the viewport assumption in draw_popup's dialog_height calculation.
-const SCROLL_LOOKAHEAD: usize = 8;
+/// Blank columns between two value columns.
+const CELL_GAP: usize = 2;
+/// Model names keep at least this much room before a column is dropped.
+const MIN_NAME_W: usize = 16;
+
+/// Viewport assumed before the first frame has reported the real list height.
+const FALLBACK_VIEWPORT: usize = 8;
 
 pub(super) fn handle_key(
     app: &mut App,
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> crate::error::Result<()> {
-    let models = build_models(app);
-    let refs: Vec<&str> = models.iter().map(|s| s.as_str()).collect();
+    // Only the names outlive this borrow: every arm below mutates `app`.
+    let names: Vec<String> = build_models(app).iter().map(|m| m.name.clone()).collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
     app.models.selected = app.models.selected.min(refs.len().saturating_sub(1));
 
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
@@ -107,17 +117,12 @@ pub(super) fn handle_key(
                         && let Some(prov) = current_provider(app).map(str::to_string)
                     {
                         app.models.search_field.value = name.clone();
-                        // Persist too: the periodic metrics sync replaces
-                        // provider_models from the DB, so a memory-only row
-                        // would vanish before the test ends.
-                        let mut models = app
-                            .models
-                            .provider_models
-                            .get(&prov)
-                            .cloned()
-                            .unwrap_or_default();
-                        if !models.contains(&name) {
-                            models.push(name.clone());
+                        // Persist too: the DB is the catalog's source at
+                        // startup, so a memory-only row would not survive a
+                        // restart.
+                        let mut models = app.models.catalog.get(&prov).cloned().unwrap_or_default();
+                        if !models.iter().any(|m| m.name == name) {
+                            models.push(CatalogModel::name_only(&name));
                         }
                         let provider_id = app
                             .config
@@ -125,7 +130,7 @@ pub(super) fn handle_key(
                             .get(&prov)
                             .map(|p| p.id.clone())
                             .unwrap_or_else(|| prov.clone());
-                        app.store_provider_models(&provider_id, &prov, models);
+                        app.store_catalog(&provider_id, &prov, models);
                         super::testing::test_specific_model(app, &prov, &name);
                     }
                 }
@@ -135,6 +140,7 @@ pub(super) fn handle_key(
                     set_test_model(app, &prov, name);
                 }
             }
+            KeyCode::Char('a') => super::model_attrs::open(app),
 
             KeyCode::Char('r') => {
                 // Reload the current provider's model catalog from upstream.
@@ -160,8 +166,9 @@ pub(super) fn handle_key(
             }
             KeyCode::Char('G') => {
                 if total > 0 {
+                    let viewport = viewport(app);
                     app.models.selected = total - 1;
-                    app.models.scroll = total.saturating_sub(SCROLL_LOOKAHEAD) as u16;
+                    state::keep_visible(app.models.selected, &mut app.models.scroll, viewport);
                 }
             }
             KeyCode::PageDown | KeyCode::Char('d') if ctrl => nav(app, total, ListMove::Down, 10),
@@ -187,12 +194,11 @@ pub(super) fn handle_paste(app: &mut App, text: &str) {
     app.models.scroll = 0;
 }
 
-pub(super) fn draw_popup(f: &mut Frame, app: &App) {
-    let models = build_models(app);
-    let prov_name = current_provider(app).unwrap_or("—");
+pub(super) fn draw_popup(f: &mut Frame, app: &mut App) {
+    let prov_name = current_provider(app).unwrap_or("—").to_string();
     let prov_color = t::PRIMARY;
 
-    let content_lines = models.len().min(u16::MAX as usize) as u16;
+    let content_lines = build_models(app).len().min(u16::MAX as usize) as u16;
     let dialog_height = (content_lines + 4).min(f.area().height * 4 / 5).max(6);
     let area = centered_fixed(80, dialog_height, f.area());
     f.render_widget(Clear, area);
@@ -219,43 +225,14 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
         ])
         .split(inner);
 
-    let search_line = if app.models.search_active {
-        let val = &app.models.search_field.value;
-        let cur = app.models.search_field.cursor.min(val.len());
-        let before = &val[..cur];
-        let cursor_ch = val[cur..].chars().next().unwrap_or(' ');
-        let after_start = cur
-            + if cur < val.len() {
-                cursor_ch.len_utf8()
-            } else {
-                0
-            };
-        let after = if after_start <= val.len() {
-            &val[after_start..]
-        } else {
-            ""
-        };
-        Line::from(vec![
-            Span::styled("Search  ", Style::default().fg(t::MUTED)),
-            Span::raw(before.to_string()),
-            Span::styled(
-                cursor_ch.to_string(),
-                Style::default()
-                    .fg(t::PRIMARY)
-                    .add_modifier(Modifier::REVERSED),
-            ),
-            Span::raw(after.to_string()),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled("Search  ", Style::default().fg(t::MUTED)),
-            Span::styled(
-                &app.models.search_field.value,
-                Style::default().fg(t::MUTED),
-            ),
-        ])
-    };
-    f.render_widget(Paragraph::new(search_line), chunks[0]);
+    f.render_widget(
+        Paragraph::new(search_line(
+            "Search",
+            &app.models.search_field,
+            app.models.search_active,
+        )),
+        chunks[0],
+    );
 
     let divider = Block::default()
         .borders(Borders::TOP)
@@ -263,6 +240,10 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
     f.render_widget(divider, chunks[1]);
 
     let list_height = chunks[2].height;
+    // `nav` and the `G` jump keep the highlight inside what was really drawn:
+    // on a short terminal the dialog shrinks well below the fallback viewport.
+    app.models.list_height = list_height;
+    let models = build_models(app);
     let mut lines: Vec<Line> = Vec::new();
 
     if models.is_empty() {
@@ -272,23 +253,78 @@ pub(super) fn draw_popup(f: &mut Frame, app: &App) {
         )));
     } else {
         let list_width = chunks[2].width as usize;
+        let attrs = app
+            .models
+            .attrs
+            .get(&prov_name)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        // Every configured column gets its own width, so `$0` and `$150k` line
+        // up instead of shifting the column beside them. Columns past the ones
+        // that fit are dropped rather than clipped off the row.
+        let cells: Vec<Vec<String>> = if attrs.is_empty() {
+            Vec::new()
+        } else {
+            models
+                .iter()
+                .map(|model| fmt_model_cells(attrs, model))
+                .collect()
+        };
+        let all_widths = column_widths(&cells, attrs.len());
+        let shown = columns_that_fit(&all_widths, list_width);
+        let widths = &all_widths[..shown];
+        let columns_w: usize =
+            widths.iter().sum::<usize>() + CELL_GAP * widths.len().saturating_sub(1);
         for (i, model) in models.iter().enumerate() {
             let is_selected = i == app.models.selected;
-            let mut spans = if is_selected {
-                vec![
-                    Span::styled("  ▶ ", Style::default().fg(prov_color)),
-                    Span::styled(
-                        model.to_string(),
-                        Style::default().fg(prov_color).add_modifier(Modifier::BOLD),
-                    ),
-                ]
+            let marker = if is_selected { "  ▶ " } else { "    " };
+            let name_style = if is_selected {
+                Style::default().fg(prov_color).add_modifier(Modifier::BOLD)
             } else {
-                vec![
-                    Span::raw("    "),
-                    Span::styled(model.to_string(), Style::default().fg(t::TEXT)),
-                ]
+                Style::default().fg(t::TEXT)
             };
-            spans.extend(model_result_suffix(app, prov_name, model, list_width));
+            let budget = list_width.saturating_sub(marker.width() + columns_w + 2);
+            let name = truncate_width(&model.name, budget.max(8));
+            let mut spans = vec![
+                Span::styled(marker, Style::default().fg(prov_color)),
+                Span::styled(name, name_style),
+            ];
+            // Error detail stops where the column starts.
+            let suffix = model_result_suffix(
+                app,
+                &prov_name,
+                &model.name,
+                list_width.saturating_sub(columns_w),
+            );
+            let mut used: usize = spans.iter().map(Span::width).sum();
+            used += suffix.iter().map(Span::width).sum::<usize>();
+            spans.extend(suffix);
+            if !widths.is_empty() {
+                let pad = list_width.saturating_sub(used + columns_w + 1);
+                spans.push(Span::raw(" ".repeat(pad.max(1))));
+                for (col, width) in widths.iter().enumerate() {
+                    if col > 0 {
+                        spans.push(Span::raw(" ".repeat(CELL_GAP)));
+                    }
+                    let cell = cells
+                        .get(i)
+                        .and_then(|row| row.get(col))
+                        .map(|text| truncate_width(text, *width))
+                        .unwrap_or_default();
+                    // Left-aligned: with a `$` prefix the currency sign is the
+                    // column's visible anchor, and `$2` under `$0.15` keeps it.
+                    let right = width.saturating_sub(cell.width());
+                    // The highlight covers the value columns too; the test
+                    // result keeps its own colour so a failure stays visible.
+                    let style = if is_selected {
+                        Style::default().fg(prov_color)
+                    } else {
+                        Style::default().fg(t::MUTED)
+                    };
+                    spans.push(Span::styled(cell, style));
+                    spans.push(Span::raw(" ".repeat(right)));
+                }
+            }
             lines.push(Line::from(spans));
         }
     }
@@ -382,27 +418,58 @@ fn model_result_suffix(
     }
 }
 
-fn build_models(app: &App) -> Vec<String> {
+/// The selected provider's models that match the search box, sorted by name.
+/// Borrowed: a redraw must not clone every model's attribute map.
+fn build_models(app: &App) -> Vec<&CatalogModel> {
     let Some(prov) = current_provider(app) else {
         return vec![];
     };
     let filter = app.models.search_field.value.to_lowercase();
-    let models = app
+    let mut matched: Vec<&CatalogModel> = app
         .models
-        .provider_models
+        .catalog
         .get(prov)
-        .map(|v| v.as_slice())
-        .unwrap_or(&[]);
-    let mut matched: Vec<String> = models
-        .iter()
-        .filter(|m| filter.is_empty() || m.to_lowercase().contains(&filter))
-        .cloned()
+        .into_iter()
+        .flatten()
+        .filter(|m| state::matches_filter(&m.name, &filter))
         .collect();
-    matched.sort_unstable();
+    matched.sort_unstable_by(|a, b| a.name.cmp(&b.name));
     matched
 }
 
-fn current_provider(app: &App) -> Option<&str> {
+/// Width of each value column: the widest cell in that column, so `$0` and
+/// `$150k` sharing a column cannot shift the column beside them.
+fn column_widths(cells: &[Vec<String>], columns: usize) -> Vec<usize> {
+    (0..columns)
+        .map(|col| {
+            max_content_width(
+                cells
+                    .iter()
+                    .filter_map(|row| row.get(col))
+                    .map(|cell| cell.width()),
+                0,
+                MAX_CELL_W,
+            )
+        })
+        .collect()
+}
+
+/// How many of `widths` fit beside the model name; the rest go unrendered.
+fn columns_that_fit(widths: &[usize], list_width: usize) -> usize {
+    let mut used = 0;
+    let mut shown = 0;
+    for width in widths {
+        let gap = if shown == 0 { 0 } else { CELL_GAP };
+        if used + gap + width + MIN_NAME_W > list_width {
+            break;
+        }
+        used += gap + width;
+        shown += 1;
+    }
+    shown
+}
+
+pub(super) fn current_provider(app: &App) -> Option<&str> {
     app.providers
         .table_state
         .selected()
@@ -416,15 +483,25 @@ fn selected_model<'a>(app: &App, refs: &'a [&str]) -> Option<(String, &'a str)> 
     Some((prov, model))
 }
 
-/// Move the models selection `rows` rows and keep it inside the 8-row viewport.
-fn nav(app: &mut App, total: usize, dir: ListMove, rows: isize) {
-    app.models.selected = step(app.models.selected, dir.delta() * rows, total);
-    let bottom = app.models.scroll as usize + SCROLL_LOOKAHEAD;
-    if app.models.selected >= bottom {
-        app.models.scroll = (app.models.selected + 1).saturating_sub(SCROLL_LOOKAHEAD) as u16;
-    } else if app.models.selected < app.models.scroll as usize {
-        app.models.scroll = app.models.selected as u16;
+/// Rows the models list draws; the draw stores the real height each frame.
+fn viewport(app: &App) -> usize {
+    match app.models.list_height {
+        0 => FALLBACK_VIEWPORT,
+        height => height as usize,
     }
+}
+
+/// Move the models selection `rows` rows, keeping it inside the viewport.
+fn nav(app: &mut App, total: usize, dir: ListMove, rows: isize) {
+    let viewport = viewport(app);
+    state::nav(
+        &mut app.models.selected,
+        &mut app.models.scroll,
+        dir,
+        rows,
+        total,
+        viewport,
+    );
 }
 
 fn copy_selected(app: &mut App, flat: &[&str]) {
@@ -444,9 +521,7 @@ mod tests {
 
     fn app_with_no_models(search: &str) -> App {
         let mut app = app_with_current("first");
-        app.models
-            .provider_models
-            .insert("first".to_string(), vec![]);
+        app.models.catalog.insert("first".to_string(), vec![]);
         app.models.search_field.value = search.to_string();
         app.models.search_active = false;
         app
@@ -465,17 +540,13 @@ mod tests {
         );
         // The name is registered so the panel has a row to render the result.
         assert_eq!(
-            app.models.provider_models.get("first").map(Vec::as_slice),
-            Some(&["deepseek-v4-flash".to_string()][..])
+            app.models.catalog.get("first").map(Vec::as_slice),
+            Some(&[CatalogModel::name_only("deepseek-v4-flash")][..])
         );
-        // Registered in the DB too — the periodic metrics sync replaces
-        // provider_models from the DB, so a memory-only row would vanish.
+        // Registered in the DB too: the next start reads the catalog from there.
         assert_eq!(
-            app.db
-                .load_provider_models()
-                .get("first")
-                .map(Vec::as_slice),
-            Some(&["deepseek-v4-flash".to_string()][..])
+            app.db.load_catalog().get("first").map(Vec::as_slice),
+            Some(&[CatalogModel::name_only("deepseek-v4-flash")][..])
         );
     }
 
@@ -500,7 +571,7 @@ mod tests {
         handle_key(&mut app, KeyCode::Char('t'), KeyModifiers::NONE).unwrap();
 
         assert!(!app.tests.pending.contains("first"));
-        assert!(app.models.provider_models.get("first").unwrap().is_empty());
+        assert!(app.models.catalog.get("first").unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -541,7 +612,7 @@ mod tests {
 
         // The refreshed catalog omits the tested model; the row must survive so
         // the result stays visible (regression: it used to vanish on completion).
-        assert!(build_models(&app).iter().any(|m| m == "first-model"));
+        assert!(build_models(&app).iter().any(|m| m.name == "first-model"));
         assert!(
             app.tests
                 .results
@@ -586,5 +657,153 @@ mod tests {
         // The in-flight marker survives and no misleading message is shown.
         assert!(app.models.refresh_inflight);
         assert!(app.message.is_none());
+    }
+}
+
+#[cfg(test)]
+mod column_layout {
+    use super::*;
+
+    /// Each configured column is as wide as its own widest value. Collapsing
+    /// them into one width (or one joined string) is what made two price
+    /// columns ragged.
+    #[test]
+    fn every_column_takes_its_own_widest_cell() {
+        let cells = vec![
+            vec!["$0".to_string(), "$0".to_string()],
+            vec!["$0.15".to_string(), "$0.6".to_string()],
+            vec!["$150k".to_string(), "$2M".to_string()],
+        ];
+
+        assert_eq!(column_widths(&cells, 2), vec![5, 4]);
+    }
+
+    /// On a short terminal the dialog draws fewer rows than the fallback
+    /// viewport; navigation must follow what is really on screen.
+    #[test]
+    fn navigation_keeps_the_highlight_inside_the_drawn_rows() {
+        use crate::config::test_support::ConfigDirGuard;
+        use crate::tui::testing::tests::app_with_current;
+
+        let _guard = ConfigDirGuard::new();
+        let mut app = app_with_current("first");
+        let catalog: Vec<CatalogModel> = (0..20)
+            .map(|i| CatalogModel::name_only(&format!("m{i:02}")))
+            .collect();
+        app.models.catalog.insert("first".to_string(), catalog);
+        app.models.search_active = false;
+        app.models.list_height = 3;
+
+        for _ in 0..6 {
+            nav(&mut app, 20, ListMove::Down, 1);
+        }
+
+        assert_eq!(app.models.selected, 6);
+        let top = app.models.scroll as usize;
+        assert!(
+            (top..top + 3).contains(&app.models.selected),
+            "highlight {} outside the drawn rows {top}..{}",
+            app.models.selected,
+            top + 3
+        );
+    }
+
+    /// The draw is what tells navigation how many rows it actually has.
+    #[test]
+    fn the_draw_records_the_real_list_height() {
+        use crate::config::test_support::ConfigDirGuard;
+        use crate::tui::testing::tests::app_with_current;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let _guard = ConfigDirGuard::new();
+        let mut app = app_with_current("first");
+        let catalog: Vec<CatalogModel> = (0..20)
+            .map(|i| CatalogModel::name_only(&format!("m{i:02}")))
+            .collect();
+        app.models.catalog.insert("first".to_string(), catalog);
+        app.models.search_active = false;
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 14)).unwrap();
+        terminal.draw(|f| draw_popup(f, &mut app)).unwrap();
+
+        let height = app.models.list_height as usize;
+        assert!(
+            height > 0 && height < FALLBACK_VIEWPORT,
+            "a 14-row terminal draws {height} rows, not the {FALLBACK_VIEWPORT}-row fallback"
+        );
+    }
+
+    /// Columns past what fits are dropped, never clipped off the row.
+    #[test]
+    fn only_the_columns_that_fit_are_shown() {
+        assert_eq!(columns_that_fit(&[6, 6, 6], 60), 3);
+        assert_eq!(columns_that_fit(&[6, 6, 6], 16 + 6 + 2 + 6), 2);
+        assert_eq!(columns_that_fit(&[40], 30), 0, "not even one fits");
+        assert_eq!(columns_that_fit(&[], 30), 0);
+    }
+
+    #[test]
+    fn a_column_with_no_values_anywhere_is_empty() {
+        let cells = vec![vec!["$1".to_string(), "-".to_string()]];
+
+        assert_eq!(column_widths(&cells, 2), vec![2, 1]);
+    }
+
+    /// The highlight has to reach the value columns: only the name turning
+    /// primary leaves a selected row looking half-selected.
+    #[test]
+    fn the_selected_row_highlights_its_value_columns() {
+        use crate::catalog::{CatalogModel, ModelAttr};
+        use crate::config::test_support::ConfigDirGuard;
+        use crate::tui::testing::tests::app_with_current;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use serde_json::json;
+
+        let _guard = ConfigDirGuard::new();
+        let mut app = app_with_current("first");
+        let model = |name: &str, price: f64| {
+            let mut m = CatalogModel::name_only(name);
+            m.attrs.insert("pric".into(), json!(price));
+            m
+        };
+        app.models.catalog.insert(
+            "first".to_string(),
+            vec![model("a-first", 0.15), model("z-second", 2.0)],
+        );
+        app.models.attrs.insert(
+            "first".to_string(),
+            vec![ModelAttr {
+                label: "price".into(),
+                paths: vec!["pric".into()],
+                scale: 1.0,
+                prefix: "$".into(),
+            }],
+        );
+        app.mode = Mode::Models;
+        app.models.search_active = false;
+        app.models.selected = 0;
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 10)).unwrap();
+        terminal.draw(|f| draw_popup(f, &mut app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let dollar = |needle: &str| {
+            let y = (0..buf.area.height)
+                .find(|&y| {
+                    let line: String = (0..buf.area.width)
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect();
+                    line.contains(needle)
+                })
+                .expect("row rendered");
+            let x = (0..buf.area.width)
+                .find(|&x| buf[(x, y)].symbol() == "$")
+                .expect("value column rendered");
+            buf[(x, y)].style().fg
+        };
+
+        assert_eq!(dollar("a-first"), Some(t::PRIMARY), "selected row");
+        assert_eq!(dollar("z-second"), Some(t::MUTED), "other rows");
     }
 }

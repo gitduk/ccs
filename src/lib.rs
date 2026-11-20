@@ -1,3 +1,4 @@
+pub mod catalog;
 pub mod cli;
 pub mod config;
 pub(crate) mod db;

@@ -1,13 +1,12 @@
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde_json::json;
 
+use crate::catalog::CatalogModel;
 use crate::config::{ApiFormat, OpenAiApiVersion, Provider};
 use crate::proxy::executor::{
     extract_error_message, probe_provider_message, probe_provider_message_with_body,
 };
-
-const TEST_TIMEOUT_SECS: u64 = 10;
 
 /// Result of successful API format auto-detection.
 #[derive(Debug, Clone)]
@@ -16,7 +15,7 @@ pub struct DetectedFormat {
     pub api_version: Option<OpenAiApiVersion>,
     /// Model list discovered while detecting, if any — reused by the caller
     /// so it doesn't need a redundant `/models` round trip after saving.
-    pub models: Vec<String>,
+    pub models: Vec<CatalogModel>,
 }
 
 /// Build a throwaway probe `Provider` sharing only the fields format
@@ -62,7 +61,7 @@ pub async fn detect_api_format(
     test_model: Option<&str>,
 ) -> Option<DetectedFormat> {
     let (model, models) = match test_model {
-        Some(m) => (m.to_string(), vec![m.to_string()]),
+        Some(m) => (m.to_string(), vec![CatalogModel::name_only(m)]),
         None => {
             // Side-effect-free GETs, unlike the completion probes below — run
             // the candidates concurrently instead of paying full latency each.
@@ -70,21 +69,21 @@ pub async fn detect_api_format(
             let anthropic_probe = probe_provider(base_url, api_key, ApiFormat::Anthropic);
             let gemini_probe = probe_provider(base_url, api_key, ApiFormat::Gemini);
             let (openai_models, anthropic_models, gemini_models) = tokio::join!(
-                fetch_provider_models(client, &openai_probe),
-                fetch_provider_models(client, &anthropic_probe),
-                fetch_provider_models(client, &gemini_probe),
+                crate::catalog::fetch(client, &openai_probe),
+                crate::catalog::fetch(client, &anthropic_probe),
+                crate::catalog::fetch(client, &gemini_probe),
             );
-            if !openai_models.is_empty() {
-                (openai_models[0].clone(), openai_models)
-            } else if !anthropic_models.is_empty() {
-                (anthropic_models[0].clone(), anthropic_models)
-            } else if !gemini_models.is_empty() {
+            if let Some(models) = openai_models.filter(|m| !m.is_empty()) {
+                (models[0].name.clone(), models)
+            } else if let Some(models) = anthropic_models.filter(|m| !m.is_empty()) {
+                (models[0].name.clone(), models)
+            } else if let Some(models) = gemini_models.filter(|m| !m.is_empty()) {
                 // The catalog is unordered and mixes text, image, TTS and
                 // embedding models; the probe needs a conversational one.
-                let model = first_text_model(&gemini_models)
-                    .unwrap_or(gemini_models[0].as_str())
+                let model = first_text_model(&models)
+                    .unwrap_or(models[0].name.as_str())
                     .to_string();
-                (model, gemini_models)
+                (model, models)
             } else {
                 return None;
             }
@@ -143,8 +142,12 @@ pub enum TestStatus {
 pub struct TestResult {
     pub status: TestStatus,
     pub latency_ms: u64,
-    pub model_count: Option<usize>,
-    pub model_names: Option<Vec<String>>,
+    /// Catalog discovered by the test's own fetch, handed to the caller so it
+    /// can persist both the names and their attributes. Not serialized: test
+    /// results reload only for status and latency, and the catalog lives in
+    /// the DB.
+    #[serde(skip, default)]
+    pub catalog: Option<Vec<CatalogModel>>,
     #[serde(skip, default = "Instant::now")]
     pub tested_at: Instant,
     /// The model name used for the connectivity test.
@@ -167,7 +170,7 @@ pub async fn test_latency(
     client: &reqwest::Client,
     provider: &Provider,
     model: String,
-    prefetched: Option<Vec<String>>,
+    prefetched: Option<Vec<CatalogModel>>,
 ) -> TestResult {
     // Record the start time before any fallible work so all early-return
     // paths share the same reference point.
@@ -187,8 +190,7 @@ pub async fn test_latency(
             return TestResult {
                 status: TestStatus::Error("Configuration error".to_string()),
                 latency_ms: 0,
-                model_count: prefetched.as_ref().map(|v| v.len()),
-                model_names: prefetched,
+                catalog: prefetched,
                 tested_at,
                 used_model: used_model.clone(),
                 tools_supported: None,
@@ -205,8 +207,7 @@ pub async fn test_latency(
                 return TestResult {
                     status: TestStatus::Error("Connection error".to_string()),
                     latency_ms: 0,
-                    model_count: prefetched.as_ref().map(|v| v.len()),
-                    model_names: prefetched,
+                    catalog: prefetched,
                     tested_at,
                     used_model: used_model.clone(),
                     tools_supported: None,
@@ -233,7 +234,7 @@ pub async fn test_latency(
     // Run models fetch and the capability probes concurrently.
     // All are best-effort and don't affect status or latency.
     let test_ok = matches!(msg_status, TestStatus::Ok);
-    let (tools_supported, images_supported, (model_count, model_names)) = tokio::join!(
+    let (tools_supported, images_supported, catalog) = tokio::join!(
         async {
             if test_ok {
                 check_tool_support(client, provider, &api_key, &used_model).await
@@ -249,10 +250,9 @@ pub async fn test_latency(
             }
         },
         async {
-            if let Some(models) = prefetched {
-                (Some(models.len()), Some(models))
-            } else {
-                fetch_models(client, provider, &api_key).await
+            match prefetched {
+                Some(models) => Some(models),
+                None => crate::catalog::fetch(client, provider).await,
             }
         }
     );
@@ -260,25 +260,12 @@ pub async fn test_latency(
     TestResult {
         status: msg_status,
         latency_ms,
-        model_count,
-        model_names,
+        catalog,
         tested_at,
         used_model: req_json["model"].as_str().unwrap_or_default().to_string(),
         tools_supported,
         images_supported,
     }
-}
-
-/// Fetch the model list for a provider. Returns an empty Vec on failure.
-pub async fn fetch_provider_models(client: &reqwest::Client, provider: &Provider) -> Vec<String> {
-    let api_key = match provider.resolve_api_key() {
-        Ok(k) => k,
-        Err(_) => return vec![],
-    };
-    fetch_models(client, provider, &api_key)
-        .await
-        .1
-        .unwrap_or_default()
 }
 
 /// Probe whether the provider supports tool calling by forcing a tool call and inspecting
@@ -426,72 +413,17 @@ fn response_body_has_tool_call(body: &[u8]) -> bool {
     false
 }
 
-async fn fetch_models(
-    client: &reqwest::Client,
-    provider: &Provider,
-    api_key: &str,
-) -> (Option<usize>, Option<Vec<String>>) {
-    let req = crate::proxy::forwarder::models_request(client, provider, api_key)
-        .timeout(Duration::from_secs(TEST_TIMEOUT_SECS));
-    let Ok(r) = req.send().await else {
-        return (None, None);
-    };
-
-    if r.status() == reqwest::StatusCode::NOT_FOUND
-        && let Some(root) = crate::proxy::forwarder::root_base_url(&provider.base_url)
-    {
-        let fallback_req =
-            crate::proxy::forwarder::models_request_at(client, provider, api_key, &root)
-                .timeout(Duration::from_secs(TEST_TIMEOUT_SECS));
-        if let Ok(r2) = fallback_req.send().await {
-            return parse_models_response(r2).await;
-        }
-    }
-
-    parse_models_response(r).await
-}
-
-async fn parse_models_response(r: reqwest::Response) -> (Option<usize>, Option<Vec<String>>) {
-    if !r.status().is_success() {
-        return (None, None);
-    }
-    let Ok(json) = r.json::<serde_json::Value>().await else {
-        return (None, None);
-    };
-    // OpenAI/Anthropic catalogs list `data[].id`; Gemini's catalog lists
-    // `models[].name` with a `models/` prefix.
-    if let Some(models) = json["models"].as_array() {
-        let names: Vec<String> = models
-            .iter()
-            .filter_map(|m| {
-                m["name"]
-                    .as_str()
-                    .map(|n| n.strip_prefix("models/").unwrap_or(n).to_string())
-            })
-            .collect();
-        return (Some(names.len()), Some(names));
-    }
-    let Some(arr) = json["data"].as_array() else {
-        return (None, None);
-    };
-    let names: Vec<String> = arr
-        .iter()
-        .filter_map(|v| v["id"].as_str().map(|s| s.to_string()))
-        .collect();
-    (Some(names.len()), Some(names))
-}
-
 /// First model in a Gemini catalog that a chat probe can use. The catalog is
 /// unordered and lists image, TTS, embedding and audio models too; a probe
 /// against one of those fails regardless of the key's validity. Falls back to
 /// the first entry when nothing looks conversational.
-fn first_text_model(models: &[String]) -> Option<&str> {
+fn first_text_model(models: &[CatalogModel]) -> Option<&str> {
     let non_chat = ["-image", "-tts", "embedding", "-audio", "-search"];
     models
         .iter()
+        .map(|m| m.name.as_str())
         .find(|m| !non_chat.iter().any(|s| m.contains(s)))
-        .map(|m| m.as_str())
-        .or_else(|| models.first().map(|m| m.as_str()))
+        .or_else(|| models.first().map(|m| m.name.as_str()))
 }
 
 #[cfg(test)]
@@ -501,27 +433,13 @@ pub(crate) mod tests {
     use axum::Router;
     use tokio::net::TcpListener;
 
-    use super::{TestStatus, check_tool_support, test_latency};
+    use super::{CatalogModel, TestStatus, check_tool_support, test_latency};
     use crate::config::{ApiFormat, Provider};
 
     fn test_provider(base_url: String) -> Provider {
         Provider {
-            id: "test-id".into(),
-            base_url,
-            api_key: "test-key".into(),
-            api_format: ApiFormat::OpenAI,
-            model_map: Default::default(),
-            routes: vec![],
-            enabled: true,
-            fallback: true,
             api_version: Some(crate::config::OpenAiApiVersion::ChatCompletions),
-            inject_thinking_history: true,
-            strict_thinking_history: false,
-            quota_command: None,
-            port: None,
-            test_model: None,
-            max_tokens_cap: None,
-            extra_headers: Default::default(),
+            ..crate::config::test_support::provider(&base_url)
         }
     }
 
@@ -571,48 +489,6 @@ pub(crate) mod tests {
         let provider = test_provider(format!("http://{addr}/v1"));
         let result = check_tool_support(&reqwest::Client::new(), &provider, "test-key", "m").await;
         assert_eq!(result, Some(true));
-    }
-
-    /// Regression test for the DeepSeek-style asymmetric gateway: `/models`
-    /// 404s under the provider's configured path (however deeply nested) but
-    /// is reachable at the bare scheme+host root. `fetch_models` must retry
-    /// there instead of reporting no models.
-    #[tokio::test]
-    async fn fetch_models_falls_back_to_root_domain_on_404() {
-        use axum::extract::Path;
-        use axum::http::StatusCode;
-        use axum::response::IntoResponse;
-        use axum::routing::get;
-
-        async fn nested_404(Path(_rest): Path<String>) -> impl IntoResponse {
-            StatusCode::NOT_FOUND
-        }
-        async fn root_models() -> impl IntoResponse {
-            axum::Json(serde_json::json!({
-                "data": [{"id": "deepseek-v4-flash"}, {"id": "deepseek-v4-pro"}]
-            }))
-        }
-
-        let addr = spawn_test_server(
-            Router::new()
-                // Two levels deep — proves the fallback goes straight to the
-                // root, not just one segment up.
-                .route("/{*rest}", get(nested_404))
-                .route("/models", get(root_models)),
-        )
-        .await;
-
-        let provider = test_provider(format!("http://{addr}/org123/anthropic/v1"));
-        let (count, names) = super::fetch_models(&reqwest::Client::new(), &provider, "key").await;
-
-        assert_eq!(count, Some(2));
-        assert_eq!(
-            names,
-            Some(vec![
-                "deepseek-v4-flash".to_string(),
-                "deepseek-v4-pro".to_string()
-            ])
-        );
     }
 
     #[tokio::test]
@@ -867,15 +743,18 @@ pub(crate) mod tests {
     fn first_text_model_skips_non_conversational_catalog_entries() {
         // A realistic Gemini catalog slice: image/TTS models come first, the
         // conversational model is buried further down.
-        let models = vec![
-            "gemini-3.1-flash-image".to_string(),
-            "gemini-2.5-flash-preview-tts".to_string(),
-            "gemini-2.5-flash".to_string(),
-            "gemini-2.5-pro".to_string(),
-        ];
+        let models: Vec<_> = [
+            "gemini-3.1-flash-image",
+            "gemini-2.5-flash-preview-tts",
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+        ]
+        .iter()
+        .map(|m| CatalogModel::name_only(m))
+        .collect();
         assert_eq!(super::first_text_model(&models), Some("gemini-2.5-flash"));
         // Falls back to the head when nothing looks conversational.
-        let only_image = vec!["gemini-3.1-flash-image".to_string()];
+        let only_image = [CatalogModel::name_only("gemini-3.1-flash-image")];
         assert_eq!(
             super::first_text_model(&only_image),
             Some("gemini-3.1-flash-image")

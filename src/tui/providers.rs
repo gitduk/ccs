@@ -65,7 +65,7 @@ pub(super) fn handle_key(
                 if let Some(name) = app.selected_name().map(|s| s.to_string())
                     && let Some(provider) = app.config.providers.get(&name)
                 {
-                    let supported = app.models.provider_models.get(&name);
+                    let supported = app.models.catalog.get(&name);
                     let model = supported
                         .filter(|s| !s.is_empty())
                         .and_then(|models| {
@@ -75,13 +75,14 @@ pub(super) fn handle_key(
                                 .and_then(|m| {
                                     models
                                         .iter()
-                                        .max_by_key(|mdl| {
-                                            m.by_model.get(*mdl).map_or(0, |s| s.input + s.output)
+                                        .map(|mdl| mdl.name.as_str())
+                                        .max_by_key(|name| {
+                                            m.by_model.get(*name).map_or(0, |s| s.input + s.output)
                                         })
                                         .filter(|mdl| m.by_model.contains_key(*mdl))
                                         .map(|s| s.to_string())
                                 })
-                                .or_else(|| models.first().map(|s| s.to_string()))
+                                .or_else(|| models.first().map(|m| m.name.clone()))
                         })
                         .unwrap_or_default();
 
@@ -548,15 +549,8 @@ mod tests {
             db,
             bg_proxy_pid: Some(123),
             bg_proxy_stale_version: None,
-            models: ModelsState {
-                provider_models: std::collections::HashMap::new(),
-                search_field: crate::tui::state::FormField::search(),
-                search_active: true,
-                selected: 0,
-                scroll: 0,
-                pending_key: None,
-                refresh_inflight: false,
-            },
+            models: ModelsState::new(),
+            attrs_dialog: None,
             request_log: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::metrics::RequestLog::default(),
             )),

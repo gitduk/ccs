@@ -12,6 +12,7 @@ pub(super) const FORMAT_FIELD_IDX: usize = 3;
 
 use ratatui::widgets::TableState;
 
+use crate::catalog::{CatalogModel, ModelAttr};
 use crate::config::{AppConfig, GlobalRoute, Provider, RouteRule};
 use crate::metrics::{SharedMetrics, SharedRequestLog};
 use crate::repo::Repository;
@@ -29,13 +30,15 @@ mod navigation;
 
 pub(crate) use bg_proxy::{bg_proxy_health_url, fetch_bg_proxy_version};
 pub use bg_proxy::{is_process_alive, send_sighup};
+pub(crate) use filter::matches_filter;
 pub use filter::{all_models, filter_suggestions, provider_model_suggestions};
-pub use list::{ListMove, list_move, step, suggest_move};
+pub use list::{ListMove, keep_visible, list_move, nav, step, suggest_move};
 
 /// Snapshot of DB-backed metrics loaded off the hot path for non-blocking TUI redraws.
+/// The model catalog is not part of it: only this process writes it, and every
+/// write already updates the in-memory copy.
 pub(crate) struct MetricsSnapshot {
     pub metrics: crate::metrics::TokenMetrics,
-    pub provider_models: std::collections::HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -46,6 +49,8 @@ pub enum Mode {
     Help,
     /// Models browser popup: search and browse all available models.
     Models,
+    /// Models panel's attribute-columns dialog (`a`), opened from `Models`.
+    ModelAttrs,
     /// Request log viewer: scrollable list of recent proxy requests.
     Logs,
     /// Quota configuration editor for the selected provider.
@@ -117,7 +122,7 @@ pub(super) enum TestEvent {
     /// Model list fetched silently (no test run, no stats recorded).
     ModelsOnly {
         provider: String,
-        models: Vec<String>,
+        models: Vec<CatalogModel>,
     },
     /// A manual model-list refresh came back empty (fetch or parse failed),
     /// so the caller can surface an error instead of silently keeping the
@@ -175,8 +180,9 @@ impl TestState {
 
 /// Models browser popup state.
 pub struct ModelsState {
-    /// Model names per provider, loaded from DB and updated on test.
-    pub provider_models: HashMap<String, Vec<String>>,
+    /// Each provider's catalog — model names plus the attributes the upstream
+    /// attached — loaded from DB and updated on fetch and test.
+    pub catalog: HashMap<String, Vec<CatalogModel>>,
     /// Search field (value + cursor).
     pub search_field: FormField,
     /// True = search box focused (Insert mode); false = list navigation (Normal mode).
@@ -185,11 +191,102 @@ pub struct ModelsState {
     pub selected: usize,
     /// Scroll offset (rows) for the models list.
     pub scroll: u16,
+    /// Rows the list actually had in the last draw — the viewport `nav` keeps
+    /// the highlight inside. Zero until the first frame.
+    pub list_height: u16,
     /// A manual catalog refresh (`r` in the Models panel) is in flight, so
     /// further presses are ignored until it lands.
     pub refresh_inflight: bool,
     /// Pending first key of a two-key sequence inside the Models panel.
     pub pending_key: Option<(char, std::time::Instant)>,
+    /// Attribute columns to render on the right of each row, per provider.
+    pub attrs: HashMap<String, Vec<ModelAttr>>,
+}
+
+impl ModelsState {
+    /// Empty panel: no catalog, empty search box, first row highlighted.
+    pub fn new() -> Self {
+        Self {
+            catalog: HashMap::new(),
+            search_field: FormField::search(),
+            search_active: true,
+            selected: 0,
+            scroll: 0,
+            list_height: 0,
+            pending_key: None,
+            refresh_inflight: false,
+            attrs: HashMap::new(),
+        }
+    }
+}
+
+/// Attribute-columns dialog (`a`): which upstream fields the models list shows.
+pub struct ModelAttrsState {
+    /// Paths discovered in the current provider's catalog plus any configured
+    /// path the catalog no longer carries, sorted. The filter narrows the view;
+    /// this stays complete so clearing it restores every path.
+    pub paths: Vec<AttrPath>,
+    /// Path filter (value + cursor), same terms as the models panel's search.
+    pub search_field: FormField,
+    /// True = filter box focused; false = list navigation.
+    pub search_active: bool,
+    /// Index of the highlighted path in the filtered list.
+    pub selected: usize,
+    pub scroll: u16,
+    /// The edit step, when a path has been chosen.
+    pub edit: Option<AttrEdit>,
+}
+
+/// One selectable attribute path.
+#[derive(Debug, Clone)]
+pub struct AttrPath {
+    pub path: String,
+    /// How many of the provider's models carry it (0 = configured but gone).
+    pub models: usize,
+    /// One model's value there, so the path is recognizable by content.
+    pub sample: String,
+}
+
+/// The edit step: label, one or two paths, and the unit mapping.
+pub struct AttrEdit {
+    /// Column being edited; `None` while adding a new one.
+    pub index: Option<usize>,
+    pub fields: [FormField; ATTR_FIELD_COUNT],
+    pub focus: usize,
+    pub error: Option<String>,
+}
+
+/// Label, path 1, path 2, scale, prefix — in that order.
+pub const ATTR_FIELD_COUNT: usize = 5;
+pub const ATTR_LABEL_FIELD: usize = 0;
+pub const ATTR_PATH1_FIELD: usize = 1;
+pub const ATTR_PATH2_FIELD: usize = 2;
+pub const ATTR_SCALE_FIELD: usize = 3;
+pub const ATTR_PREFIX_FIELD: usize = 4;
+
+impl AttrEdit {
+    pub fn new(index: Option<usize>, attr: Option<&ModelAttr>) -> Self {
+        let mut edit = Self {
+            index,
+            fields: [
+                FormField::text("Label", ""),
+                FormField::text("Path 1", ""),
+                FormField::text("Path 2", ""),
+                FormField::text("Scale", "1"),
+                FormField::text("Prefix", ""),
+            ],
+            focus: ATTR_LABEL_FIELD,
+            error: None,
+        };
+        if let Some(attr) = attr {
+            edit.fields[ATTR_LABEL_FIELD].set_value(&attr.label);
+            edit.fields[ATTR_PATH1_FIELD].set_value(attr.paths.first().map_or("", |p| p));
+            edit.fields[ATTR_PATH2_FIELD].set_value(attr.paths.get(1).map_or("", |p| p));
+            edit.fields[ATTR_SCALE_FIELD].set_value(&format!("{}", attr.scale));
+            edit.fields[ATTR_PREFIX_FIELD].set_value(&attr.prefix);
+        }
+        edit
+    }
 }
 
 /// Request log viewer state.
@@ -239,6 +336,8 @@ pub struct App {
     /// binary's; shown next to the listen address. `Shift+S` restarts it.
     pub bg_proxy_stale_version: Option<String>,
     pub models: ModelsState,
+    /// Attribute-columns dialog (`a` in the Models panel), when open.
+    pub attrs_dialog: Option<ModelAttrsState>,
     pub request_log: SharedRequestLog,
     pub logs: LogsState,
     /// Chronological message log shown in the Messages panel (newest last).
@@ -444,6 +543,12 @@ impl FormField {
         }
     }
 
+    /// Replace the whole value and park the cursor at its end.
+    pub fn set_value(&mut self, value: &str) {
+        self.value = value.to_string();
+        self.cursor = value.len();
+    }
+
     pub fn insert_newline(&mut self) {
         self.value.insert(self.cursor, '\n');
         self.cursor += 1;
@@ -633,7 +738,7 @@ impl ProviderForm {
         self.focused == self.fields.len()
     }
 
-    /// The provider name to key `app.models.provider_models` lookups on: the
+    /// The provider name to key `app.models.catalog` lookups on: the
     /// original name being edited, or the in-progress Name field for a new provider.
     pub fn prov_key(&self) -> &str {
         self.original_name
@@ -773,7 +878,7 @@ mod tests {
 
     use super::{App, TestEvent};
     use crate::config::test_support::ConfigDirGuard;
-    use crate::config::{ApiFormat, AppConfig, Provider};
+    use crate::config::{AppConfig, Provider};
     use crate::tester::{TestResult, TestStatus};
 
     #[tokio::test]
@@ -784,21 +889,7 @@ mod tests {
             "vllm".to_string(),
             Provider {
                 id: "vllm-id".into(),
-                base_url: "http://127.0.0.1:1".into(),
-                api_key: "test-key".into(),
-                api_format: ApiFormat::OpenAI,
-                model_map: Default::default(),
-                routes: vec![],
-                enabled: true,
-                fallback: true,
-                api_version: None,
-                inject_thinking_history: true,
-                strict_thinking_history: false,
-                quota_command: None,
-                port: None,
-                test_model: None,
-                max_tokens_cap: None,
-                extra_headers: Default::default(),
+                ..crate::config::test_support::provider("http://127.0.0.1:1")
             },
         );
 
@@ -832,15 +923,8 @@ mod tests {
             db,
             bg_proxy_pid: None,
             bg_proxy_stale_version: None,
-            models: super::ModelsState {
-                provider_models: std::collections::HashMap::new(),
-                search_field: super::FormField::search(),
-                search_active: true,
-                selected: 0,
-                scroll: 0,
-                pending_key: None,
-                refresh_inflight: false,
-            },
+            models: super::ModelsState::new(),
+            attrs_dialog: None,
             request_log: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::metrics::RequestLog::default(),
             )),
@@ -873,8 +957,9 @@ mod tests {
                 result: TestResult {
                     status: TestStatus::Error("HTTP 502".into()),
                     latency_ms: 100,
-                    model_count: Some(1),
-                    model_names: Some(vec!["gemma-4-31b-it".into()]),
+                    catalog: Some(vec![crate::catalog::CatalogModel::name_only(
+                        "gemma-4-31b-it",
+                    )]),
                     tested_at: Instant::now(),
                     used_model: "sonnet-4-6".into(),
                     tools_supported: None,
@@ -942,21 +1027,7 @@ mod tests {
             "vllm".to_string(),
             Provider {
                 id: "vllm-id".into(),
-                base_url: "http://127.0.0.1:1".into(),
-                api_key: "test-key".into(),
-                api_format: ApiFormat::OpenAI,
-                model_map: Default::default(),
-                routes: vec![],
-                enabled: true,
-                fallback: true,
-                api_version: None,
-                inject_thinking_history: true,
-                strict_thinking_history: false,
-                quota_command: None,
-                port: None,
-                test_model: None,
-                max_tokens_cap: None,
-                extra_headers: Default::default(),
+                ..crate::config::test_support::provider("http://127.0.0.1:1")
             },
         );
         crate::config::save_config(&cfg).unwrap();
@@ -969,8 +1040,9 @@ mod tests {
                 result: TestResult {
                     status: TestStatus::Ok,
                     latency_ms: 55,
-                    model_count: Some(1),
-                    model_names: Some(vec!["gemma-4-31b-it".into()]),
+                    catalog: Some(vec![crate::catalog::CatalogModel::name_only(
+                        "gemma-4-31b-it",
+                    )]),
                     tested_at: Instant::now(),
                     used_model: "gemma-4-31b-it".into(),
                     tools_supported: Some(true),
@@ -1003,27 +1075,13 @@ mod tests {
             "vllm".to_string(),
             Provider {
                 id: "vllm-id".into(),
-                base_url: "http://127.0.0.1:1".into(),
-                api_key: "test-key".into(),
-                api_format: ApiFormat::OpenAI,
-                model_map: Default::default(),
-                routes: vec![],
-                enabled: true,
-                fallback: true,
-                api_version: None,
-                inject_thinking_history: true,
-                strict_thinking_history: false,
-                quota_command: None,
-                port: None,
-                test_model: None,
-                max_tokens_cap: None,
-                extra_headers: Default::default(),
+                ..crate::config::test_support::provider("http://127.0.0.1:1")
             },
         );
         crate::config::save_config(&cfg).unwrap();
 
         let mut app = App::new().unwrap();
-        let send = |app: &App, names: Option<Vec<String>>| {
+        let send = |app: &App, catalog: Option<Vec<crate::catalog::CatalogModel>>| {
             app.tests
                 .tx
                 .send(TestEvent::Completed {
@@ -1031,8 +1089,7 @@ mod tests {
                     result: TestResult {
                         status: TestStatus::Ok,
                         latency_ms: 1,
-                        model_count: names.as_ref().map(|v| v.len()),
-                        model_names: names,
+                        catalog,
                         tested_at: Instant::now(),
                         used_model: "gemma-4-31b-it".into(),
                         tools_supported: None,
@@ -1042,23 +1099,21 @@ mod tests {
                 .unwrap();
         };
 
-        send(&app, Some(vec!["gemma-4-31b-it".into()]));
+        let gemma = || crate::catalog::CatalogModel::name_only("gemma-4-31b-it");
+        send(&app, Some(vec![gemma()]));
         assert!(app.drain_test_results());
-        assert_eq!(
-            app.models.provider_models.get("vllm"),
-            Some(&vec!["gemma-4-31b-it".to_string()])
-        );
+        assert_eq!(app.models.catalog.get("vllm"), Some(&vec![gemma()]));
 
         send(&app, Some(vec![]));
         assert!(app.drain_test_results());
         assert_eq!(
-            app.models.provider_models.get("vllm"),
-            Some(&vec!["gemma-4-31b-it".to_string()]),
+            app.models.catalog.get("vllm"),
+            Some(&vec![gemma()]),
             "an empty fetch must not blank the in-memory catalog"
         );
         assert_eq!(
-            app.db.load_provider_models().get("vllm"),
-            Some(&vec!["gemma-4-31b-it".to_string()]),
+            app.db.load_catalog().get("vllm"),
+            Some(&vec![gemma()]),
             "an empty fetch must not blank the persisted catalog"
         );
     }
@@ -1075,21 +1130,7 @@ mod tests {
             "vllm".to_string(),
             Provider {
                 id: "vllm-id".into(),
-                base_url: "http://127.0.0.1:1".into(),
-                api_key: "test-key".into(),
-                api_format: ApiFormat::OpenAI,
-                model_map: Default::default(),
-                routes: vec![],
-                enabled: true,
-                fallback: true,
-                api_version: None,
-                inject_thinking_history: true,
-                strict_thinking_history: false,
-                quota_command: None,
-                port: None,
-                test_model: None,
-                max_tokens_cap: None,
-                extra_headers: Default::default(),
+                ..crate::config::test_support::provider("http://127.0.0.1:1")
             },
         );
         crate::config::save_config(&cfg).unwrap();
@@ -1102,8 +1143,9 @@ mod tests {
                 result: TestResult {
                     status: TestStatus::Ok,
                     latency_ms: 1,
-                    model_count: Some(1),
-                    model_names: Some(vec!["gemma-4-31b-it".into()]),
+                    catalog: Some(vec![crate::catalog::CatalogModel::name_only(
+                        "gemma-4-31b-it",
+                    )]),
                     tested_at: Instant::now(),
                     used_model: "GEMMA-4-31B-IT".into(),
                     tools_supported: None,
@@ -1114,8 +1156,10 @@ mod tests {
         assert!(app.drain_test_results());
 
         assert_eq!(
-            app.models.provider_models.get("vllm"),
-            Some(&vec!["gemma-4-31b-it".to_string()]),
+            app.models.catalog.get("vllm"),
+            Some(&vec![crate::catalog::CatalogModel::name_only(
+                "gemma-4-31b-it"
+            )]),
             "a case variant of a catalog entry must not be pushed as a duplicate"
         );
     }
