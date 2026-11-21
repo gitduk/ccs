@@ -16,8 +16,26 @@ use crate::proxy::executor::{
 use crate::proxy::metrics::{RequestLogEntry, SharedRequestLog};
 use crate::proxy::transform;
 
-fn body_to_string(bytes: &[u8]) -> Arc<str> {
-    Arc::from(String::from_utf8_lossy(bytes))
+/// Bytes of an upstream error body kept on the log entry: enough for the status
+/// line and the message an upstream puts first, small enough that a flood of
+/// failures cannot grow the DB.
+const ERROR_BODY_LIMIT: usize = 4 * 1024;
+
+/// Head of an upstream error body, capped at [`ERROR_BODY_LIMIT`] bytes and
+/// marked with an ellipsis when cut. Slicing first keeps an oversized body from
+/// being decoded in full just to throw most of it away.
+fn error_body_text(bytes: &[u8]) -> Arc<str> {
+    let head = &bytes[..bytes.len().min(ERROR_BODY_LIMIT)];
+    let mut text = String::from_utf8_lossy(head).into_owned();
+    if head.len() < bytes.len() {
+        // The slice can end mid-character, which decodes to U+FFFD; the marker
+        // takes its place.
+        if text.ends_with('\u{FFFD}') {
+            text.pop();
+        }
+        text.push('…');
+    }
+    Arc::from(text)
 }
 
 /// Wire format expected by the *client* (the caller of this proxy). The proxy
@@ -56,7 +74,6 @@ use crate::repo::{Repository, StatsDelta};
 struct RequestPipeline<'a> {
     state: &'a SharedState,
     req_model_hint: String,
-    request_body_str: Arc<str>,
     is_stream: bool,
     request_log_limit: usize,
 }
@@ -81,15 +98,15 @@ impl<'a> RequestPipeline<'a> {
         }
     }
 
-    /// Log a failed request. The request body is taken from `self`; only the
-    /// response body (if any) is supplied by the caller.
+    /// Log a failed request. The error body (if any) is supplied by the caller
+    /// already capped by [`error_body_text`].
     fn push_request_log(
         &self,
         provider: &str,
         status: u16,
         latency_ms: u64,
         error: String,
-        resp_body: Option<Arc<str>>,
+        error_body: Option<Arc<str>>,
     ) {
         let entry = RequestLogEntry {
             id: 0,
@@ -102,16 +119,13 @@ impl<'a> RequestPipeline<'a> {
             output_tokens: 0,
             is_stream: self.is_stream,
             error: Some(error),
-            request_body: Some(self.request_body_str.clone()),
-            response_body: resp_body,
+            error_body,
         };
         if let Ok(mut log) = self.state.request_log.lock() {
-            let id = log.push(entry.clone());
+            let id = log.push(entry.clone(), self.request_log_limit);
             let mut persisted = entry;
             persisted.id = id;
-            self.state
-                .db
-                .persist_request_log_async(persisted, self.request_log_limit);
+            self.state.db.persist_request_log_async(persisted);
         }
     }
 }
@@ -318,7 +332,6 @@ async fn try_providers(
     let pipeline = RequestPipeline {
         state,
         req_model_hint: requested_model(ctx.req_json).to_string(),
-        request_body_str: body_to_string(ctx.body),
         is_stream: ctx.is_stream,
         request_log_limit,
     };
@@ -448,7 +461,7 @@ async fn try_providers(
                         status_u16,
                         latency_ms,
                         preview,
-                        Some(body_to_string(&error_body)),
+                        Some(error_body_text(&error_body)),
                     );
                     return Ok((status, [("content-type", "application/json")], error_body)
                         .into_response());
@@ -477,19 +490,16 @@ async fn try_providers(
             output_tokens: 0,
             is_stream: ctx.is_stream,
             error: None,
-            request_body: Some(pipeline.request_body_str.clone()),
-            response_body: None,
+            error_body: None,
         };
         let entry_id = if let Ok(mut log) = state.request_log.lock() {
-            let id = log.push(initial_entry.clone());
+            let id = log.push(initial_entry.clone(), pipeline.request_log_limit);
             if ctx.is_stream {
                 // For streaming, persist now with zero tokens; tokens are back-filled
                 // via update_request_log_tokens_async once the stream ends.
                 let mut persisted = initial_entry.clone();
                 persisted.id = id;
-                state
-                    .db
-                    .persist_request_log_async(persisted, pipeline.request_log_limit);
+                state.db.persist_request_log_async(persisted);
             }
             // For buffered responses, the full entry (with tokens) is persisted inside
             // handle_buffered_response — no two-phase write needed.
@@ -529,7 +539,6 @@ async fn try_providers(
                     request_log: state.request_log.clone(),
                     entry_id,
                     latency: latency_ms,
-                    request_log_limit: pipeline.request_log_limit,
                     model_override,
                     upstream_model,
                 },
@@ -549,7 +558,6 @@ async fn try_providers(
                         id: entry_id,
                         ..initial_entry
                     },
-                    request_log_limit: pipeline.request_log_limit,
                     model_override,
                     upstream_model,
                 },
@@ -565,7 +573,7 @@ async fn try_providers(
         final_status.as_u16(),
         t0.elapsed().as_millis() as u64,
         "all providers failed".into(),
-        last_error_body.as_ref().map(|b| body_to_string(b)),
+        last_error_body.as_ref().map(|b| error_body_text(b)),
     );
 
     let body =
@@ -656,7 +664,6 @@ async fn handle_buffered_response(
         pkey,
         request_log,
         mut log_entry,
-        request_log_limit,
         model_override,
         upstream_model,
     } = bctx;
@@ -666,19 +673,6 @@ async fn handle_buffered_response(
         name: provider_name,
     } = pkey;
     let body = response.bytes().await?;
-
-    // Capture the raw upstream response for diagnostics.
-    let resp_body_str = body_to_string(&body);
-    log_entry.response_body = Some(resp_body_str.clone());
-    if let Ok(mut log) = request_log.lock()
-        && let Some(entry) = log
-            .entries_mut()
-            .iter_mut()
-            .rev()
-            .find(|e| e.id == entry_id)
-    {
-        entry.response_body = Some(resp_body_str);
-    }
 
     // Normalise provider response to the Anthropic canonical form for token
     // extraction. Keep the raw bytes around so the Anthropic→Anthropic
@@ -761,7 +755,7 @@ async fn handle_buffered_response(
         if let Some(ref m) = model {
             log_entry.model = m.clone();
         }
-        db.persist_request_log_async(log_entry, request_log_limit);
+        db.persist_request_log_async(log_entry);
     }
 
     Ok((
@@ -859,7 +853,6 @@ struct BufferedTrackingCtx {
     pkey: ProviderKey,
     request_log: crate::proxy::metrics::SharedRequestLog,
     log_entry: RequestLogEntry,
-    request_log_limit: usize,
     model_override: Option<String>,
     /// Model sent upstream after route resolution — recorded when the response
     /// itself carries no model name.
@@ -874,7 +867,6 @@ struct StreamTrackingCtx {
     request_log: SharedRequestLog,
     entry_id: u64,
     latency: u64,
-    request_log_limit: usize,
     model_override: Option<String>,
     /// Model sent upstream after route resolution — recorded when the response
     /// itself carries no model name.
@@ -888,7 +880,6 @@ struct StreamFinalizer {
     request_log: SharedRequestLog,
     entry_id: u64,
     latency: u64,
-    request_log_limit: usize,
     input_tokens: u64,
     output_tokens: u64,
     model: Option<String>,
@@ -929,7 +920,6 @@ impl StreamFinalizer {
                 self.input_tokens,
                 self.output_tokens,
                 self.model.clone(),
-                self.request_log_limit,
             );
         }
     }
@@ -997,7 +987,6 @@ fn track_tokens_in_stream(
             request_log: ctx.request_log,
             entry_id: ctx.entry_id,
             latency: ctx.latency,
-            request_log_limit: ctx.request_log_limit,
             input_tokens: 0,
             output_tokens: 0,
             // Falls back to the routed model when the stream carries no name.
@@ -1139,6 +1128,26 @@ mod tests {
         }
     }
 
+    /// A flood of failing requests must not grow the log: the kept head is the
+    /// status line and the upstream's first message, plus a marker when cut.
+    #[test]
+    fn an_error_body_is_capped_and_marked() {
+        let marker = '…'.len_utf8();
+        let long = vec![b'x'; ERROR_BODY_LIMIT * 2];
+        let capped = error_body_text(&long);
+        assert_eq!(capped.len(), ERROR_BODY_LIMIT + marker);
+        assert!(capped.ends_with('…'));
+
+        // A multi-byte char straddling the cut must not leak a replacement char.
+        let cjk = "错".repeat(ERROR_BODY_LIMIT);
+        let capped = error_body_text(cjk.as_bytes());
+        assert!(capped.len() <= ERROR_BODY_LIMIT + marker);
+        assert!(!capped.trim_end_matches('…').ends_with('\u{FFFD}'));
+
+        let short = error_body_text(br#"{"error":"model not found"}"#);
+        assert_eq!(&*short, r#"{"error":"model not found"}"#);
+    }
+
     /// Logged input counts the cache-read prefix; a `message_delta` without
     /// input must not zero what `message_start` reported.
     #[test]
@@ -1151,7 +1160,6 @@ mod tests {
             request_log: Arc::new(Mutex::new(RequestLog::default())),
             entry_id: 0,
             latency: 0,
-            request_log_limit: 0,
             input_tokens: 0,
             output_tokens: 0,
             model: None,

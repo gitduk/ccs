@@ -96,7 +96,7 @@ export OPENAI_API_KEY=any-value
 {
   "current": "anthropic-official",
   "listen": "127.0.0.1:7896",
-  "request_log_limit": 100,
+  "request_log_limit": 10000,
   "providers": {
     "anthropic-official": {
       "id": "0f0b1e9e-…",
@@ -140,7 +140,7 @@ export OPENAI_API_KEY=any-value
 | `listen` | `127.0.0.1:7896` | 全局监听地址 |
 | `providers` | — | 有序的「提供商名 → 提供商」映射 |
 | `db_path` | `~/.ccs/ccs.db` | 保存统计、请求日志、模型列表的 SQLite 文件 |
-| `request_log_limit` | `100` | TUI 保留的最近请求条数 |
+| `request_log_limit` | `10000` | TUI 请求日志窗口的条数（数据库保留全部请求） |
 | `global_routes` | `[]` | 全局模型路由（见下文「全局路由」） |
 
 ### 提供商字段

@@ -53,7 +53,37 @@ const BG_PROXY_LOG_SYNC_INTERVAL: Duration = Duration::from_millis(500);
 /// Newest rows whose usage is re-read on every sync: a stream patches its row
 /// after the fact, which an append-only sync cannot see.
 const LOG_USAGE_TAIL: usize = 50;
+/// Rows per statement on a cold load: the DB lock is shared with the proxy's
+/// inserts, so a full window is read in pages rather than one long query.
+const LOG_COLD_PAGE: usize = 500;
 const METRICS_RELOAD_INTERVAL: Duration = Duration::from_secs(5);
+
+/// The newest `limit` request-log rows, read from the tail in pages so no single
+/// statement holds the DB lock the proxy's inserts queue on. Ids can be sparse,
+/// so the walk stops on the row count, not on id arithmetic.
+fn load_log_tail(
+    db: &crate::repo::Repository,
+    newest: u64,
+    limit: usize,
+) -> Vec<crate::metrics::RequestLogEntry> {
+    let mut pages: Vec<Vec<crate::metrics::RequestLogEntry>> = Vec::new();
+    let mut collected = 0usize;
+    let mut cursor = newest;
+    while collected < limit && cursor > 0 {
+        let page = db.load_request_logs_before(cursor, LOG_COLD_PAGE);
+        let Some(older_than) = page.first().map(|e| e.id.saturating_sub(1)) else {
+            break;
+        };
+        collected += page.len();
+        cursor = older_than;
+        pages.push(page);
+    }
+
+    let mut rows: Vec<_> = pages.into_iter().rev().flatten().collect();
+    let excess = rows.len().saturating_sub(limit);
+    rows.drain(..excess);
+    rows
+}
 
 fn should_read_next_event(processed_events: usize, has_waiting_event: bool) -> bool {
     processed_events < MAX_EVENTS_PER_FRAME && has_waiting_event
@@ -178,9 +208,13 @@ impl BgDbJobs {
             let data_version = db.data_version();
             let patch = (data_version != last_version).then(|| {
                 // Rows deleted under us (clear usage) mean the whole window is gone.
-                let reset = db.newest_request_log_id() < after_id;
-                let from = if reset { 0 } else { after_id };
-                let rows = db.load_request_logs_after(from, limit);
+                let newest = db.newest_request_log_id();
+                let reset = newest < after_id;
+                let rows = if reset || after_id == 0 {
+                    load_log_tail(&db, newest, limit)
+                } else {
+                    db.load_request_logs_after(after_id, limit)
+                };
                 let usage = db.load_request_log_usage(LOG_USAGE_TAIL);
                 RequestLogPatch { reset, rows, usage }
             });

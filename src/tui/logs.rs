@@ -20,8 +20,6 @@ use super::ui::format::{fmt_latency, format_tokens, shorten_model_name, truncate
 use super::ui::layout::{BORDER_INNER_DIVIDER, DASH, TITLE_SIDE, centered_rect};
 use crate::metrics::RequestLogEntry;
 
-const TRUNCATED_BODY_MARKER: &str = "…[truncated]";
-
 pub(super) fn handle_key(
     app: &mut App,
     code: KeyCode,
@@ -96,12 +94,12 @@ pub(super) fn draw_popup(f: &mut Frame, app: &mut App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let entries = match app.request_log.lock() {
-        Ok(log) => log.entries().iter().rev().cloned().collect::<Vec<_>>(),
-        Err(_) => vec![],
+    let total = match app.request_log.lock() {
+        Ok(log) => log.entries().len(),
+        Err(_) => 0,
     };
 
-    if entries.is_empty() {
+    if total == 0 {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "  No requests yet",
@@ -112,7 +110,6 @@ pub(super) fn draw_popup(f: &mut Frame, app: &mut App) {
         return;
     }
 
-    let total = entries.len();
     let selected = app.logs.selected.min(total.saturating_sub(1));
     app.logs.selected = selected;
 
@@ -124,10 +121,24 @@ pub(super) fn draw_popup(f: &mut Frame, app: &mut App) {
         scroll as usize
     };
 
+    // The list paints [scroll, scroll + viewport) and the detail pane the
+    // selected row, so clone those rows only, not the whole window.
+    let rows = match app.request_log.lock() {
+        Ok(log) => log
+            .entries()
+            .iter()
+            .rev()
+            .skip(scroll)
+            .take(viewport_height)
+            .cloned()
+            .collect::<Vec<_>>(),
+        Err(_) => vec![],
+    };
+
     // Require at least 10 cols for the detail pane; fall back to list-only below that.
     const LIST_WIDTH: u16 = 37;
     if inner.width <= LIST_WIDTH + 10 {
-        render_log_list(f, &entries, selected, scroll, inner);
+        render_log_list(f, &rows, scroll, selected, inner);
         let footer = format!(" {} requests  [j/k] navigate  [q/Esc] close", total);
         draw_footer(f, area, &footer);
         return;
@@ -139,7 +150,7 @@ pub(super) fn draw_popup(f: &mut Frame, app: &mut App) {
     let list_area = chunks[0];
     let detail_area = chunks[1];
 
-    render_log_list(f, &entries, selected, scroll, list_area);
+    render_log_list(f, &rows, scroll, selected, list_area);
 
     let detail_block = Block::default()
         .borders(Borders::LEFT)
@@ -147,7 +158,9 @@ pub(super) fn draw_popup(f: &mut Frame, app: &mut App) {
         .padding(Padding::new(1, 0, 0, 0));
     let detail_inner = detail_block.inner(detail_area);
     f.render_widget(detail_block, detail_area);
-    draw_detail(f, &entries[selected], detail_inner, &mut app.logs);
+    if let Some(entry) = rows.get(selected.saturating_sub(scroll)) {
+        draw_detail(f, entry, detail_inner, &mut app.logs);
+    }
 
     let footer = format!(
         " {} requests  [j/k] navigate  [Shift+J/K] half-page detail  [gg/G] detail top/bottom  [q/Esc] close",
@@ -156,11 +169,13 @@ pub(super) fn draw_popup(f: &mut Frame, app: &mut App) {
     draw_footer(f, area, &footer);
 }
 
+/// Paint the visible page of the log list; `rows` starts at absolute index
+/// `first` in newest-first order.
 fn render_log_list(
     f: &mut Frame,
-    entries: &[RequestLogEntry],
+    rows: &[RequestLogEntry],
+    first: usize,
     selected: usize,
-    scroll: usize,
     area: Rect,
 ) {
     let viewport_height = area.height.saturating_sub(1) as usize;
@@ -170,13 +185,8 @@ fn render_log_list(
         Span::styled(format!("{:<22}", "Provider/Model"), hdr),
         Span::styled("Age", hdr),
     ])];
-    for (i, entry) in entries
-        .iter()
-        .enumerate()
-        .skip(scroll)
-        .take(viewport_height)
-    {
-        let is_selected = i == selected;
+    for (i, entry) in rows.iter().enumerate().take(viewport_height) {
+        let is_selected = first + i == selected;
         let base_status = entry_status_style(entry);
         let (status_style, row_style) = if is_selected {
             let rev = Modifier::REVERSED;
@@ -201,15 +211,53 @@ fn draw_detail(f: &mut Frame, entry: &RequestLogEntry, area: Rect, logs: &mut Lo
     logs.detail_view_height = area.height;
 
     let avail = area.width as usize;
+    let text = Style::default().fg(t::TEXT);
     let mut lines: Vec<Line> = Vec::new();
-    push_summary_line(&mut lines, entry, avail);
+    push_field(
+        &mut lines,
+        "Status",
+        &format!("{} {}", entry.status, fmt_latency(entry.latency_ms)),
+        avail,
+        entry_status_style(entry),
+    );
+    push_field(&mut lines, "Provider", &entry.provider, avail, text);
+    push_field(&mut lines, "Model", &entry.model, avail, text);
+    push_field(
+        &mut lines,
+        "Tokens",
+        &format!("{} in / {} out", entry.input_tokens, entry.output_tokens),
+        avail,
+        text,
+    );
+    push_field(
+        &mut lines,
+        "Stream",
+        if entry.is_stream { "yes" } else { "no" },
+        avail,
+        text,
+    );
+    push_field(
+        &mut lines,
+        "Age",
+        &format_time(entry.timestamp),
+        avail,
+        text,
+    );
 
-    if let Some(req_body) = &entry.request_body {
-        push_body_section(&mut lines, req_body, avail);
+    if let Some(error) = &entry.error {
+        lines.push(Line::raw(""));
+        push_field(
+            &mut lines,
+            "Error",
+            error,
+            avail,
+            Style::default().fg(t::ERROR),
+        );
     }
-
-    if let Some(resp_body) = &entry.response_body {
-        push_body_section(&mut lines, resp_body, avail);
+    // Upstream's own error text, capped when the row was written.
+    if let Some(body) = &entry.error_body {
+        lines.push(Line::raw(""));
+        push_wrapped_lines(&mut lines, body, avail, Style::default().fg(t::MUTED));
     }
 
     let max_scroll = lines.len().saturating_sub(area.height as usize) as u16;
@@ -218,341 +266,43 @@ fn draw_detail(f: &mut Frame, entry: &RequestLogEntry, area: Rect, logs: &mut Lo
     f.render_widget(Paragraph::new(lines).scroll((logs.detail_scroll, 0)), area);
 }
 
-/// Tokens and stream mode — the fields the list column beside us does not
-/// already carry. Two-tone while it fits, wrapped by the shared wrapper when
-/// the pane is too narrow for the layout.
-fn push_summary_line<'a>(lines: &mut Vec<Line<'a>>, entry: &RequestLogEntry, avail: usize) {
-    let label = Style::default().fg(t::MUTED);
-    let value = Style::default().fg(t::TEXT);
-    let tokens = format!("{} in / {} out", entry.input_tokens, entry.output_tokens);
-    let stream = if entry.is_stream { "yes" } else { "no" };
-    let summary = format!("Tokens  {tokens}   Stream  {stream}");
-
-    if summary.width() <= avail {
+/// One `label  value` line: two-tone while it fits, wrapped by the shared
+/// wrapper when the pane is too narrow for the layout.
+fn push_field<'a>(
+    lines: &mut Vec<Line<'a>>,
+    label: &'static str,
+    value: &str,
+    avail: usize,
+    value_style: Style,
+) {
+    let label = format!("{label:<10}");
+    let value = sanitize(value);
+    let text = format!("{label} {value}");
+    if text.width() <= avail {
         lines.push(Line::from(vec![
-            Span::styled("Tokens  ", label),
-            Span::styled(tokens, value),
-            Span::styled("   Stream  ", label),
-            Span::styled(stream, value),
+            Span::styled(label, Style::default().fg(t::MUTED)),
+            Span::styled(value.into_owned(), value_style),
         ]));
     } else {
-        push_wrapped_lines(lines, &summary, 0, avail, label);
+        push_wrapped_lines(lines, &text, avail, Style::default().fg(t::MUTED));
     }
 }
 
-fn push_body_section<'a>(lines: &mut Vec<Line<'a>>, body: &str, avail: usize) {
-    lines.push(Line::raw(""));
-    let body = body.strip_suffix(TRUNCATED_BODY_MARKER).unwrap_or(body);
-
-    match parse_log_json(body) {
-        Some(value) => push_json_summary(lines, &value, avail),
-        None => push_wrapped_lines(lines, body, 0, avail, Style::default().fg(t::MUTED)),
-    }
-}
-
-fn push_json_summary<'a>(lines: &mut Vec<Line<'a>>, value: &serde_json::Value, avail: usize) {
-    let Some(obj) = value.as_object() else {
-        push_wrapped_lines(
-            lines,
-            &compact_json(value),
-            2,
-            avail,
-            Style::default().fg(t::MUTED),
-        );
-        return;
-    };
-
-    push_scalar_field(lines, obj, "model", avail);
-    push_scalar_field(lines, obj, "stream", avail);
-    push_scalar_field(lines, obj, "max_tokens", avail);
-    push_scalar_field(lines, obj, "max_output_tokens", avail);
-
-    if let Some(error) = obj.get("error") {
-        push_section_header(lines, "error:", avail, t::ERROR);
-        push_json_value(lines, error, 2, avail, true);
-    }
-
-    if let Some(messages) = obj.get("messages").and_then(|v| v.as_array()) {
-        push_section_header(lines, "messages:", avail, t::TEXT);
-        for (idx, message) in messages.iter().enumerate() {
-            push_message(lines, idx, message, avail);
-        }
-    }
-
-    if let Some(content) = obj.get("content") {
-        push_section_header(lines, "content:", avail, t::TEXT);
-        push_content(lines, content, 2, avail);
-    }
-
-    if let Some(tools) = obj.get("tools").and_then(|v| v.as_array()) {
-        let names = tools
-            .iter()
-            .filter_map(|tool| tool.get("name").and_then(|v| v.as_str()))
-            .collect::<Vec<_>>()
-            .join(", ");
-        if !names.is_empty() {
-            push_key_value(lines, "tools", &names, avail);
-        }
-    }
-
-    let rendered = [
-        "model",
-        "stream",
-        "max_tokens",
-        "max_output_tokens",
-        "error",
-        "messages",
-        "content",
-        "tools",
-    ];
-    let rest = obj
-        .iter()
-        .filter(|(key, _)| !rendered.contains(&key.as_str()))
-        .collect::<Vec<_>>();
-    if !rest.is_empty() {
-        push_section_header(lines, "other:", avail, t::MUTED);
-        for (key, value) in rest {
-            push_key_value(lines, key, &compact_json(value), avail);
-        }
-    }
-}
-
-/// A `key:` line introducing a nested section of the body summary.
-fn push_section_header<'a>(
-    lines: &mut Vec<Line<'a>>,
-    label: &str,
-    avail: usize,
-    color: ratatui::style::Color,
-) {
-    push_wrapped_lines(
-        lines,
-        label,
-        0,
-        avail,
-        Style::default().fg(color).add_modifier(Modifier::BOLD),
-    );
-}
-
-fn push_scalar_field<'a>(
-    lines: &mut Vec<Line<'a>>,
-    obj: &serde_json::Map<String, serde_json::Value>,
-    key: &'static str,
-    avail: usize,
-) {
-    if let Some(value) = obj.get(key).filter(|v| !v.is_object() && !v.is_array()) {
-        push_key_value(lines, key, &scalar_text(value), avail);
-    }
-}
-
-/// A content block's one-line header: `[text]`, `[tool_use] read /some/path`.
-/// `None` for block types we don't know, which fall back to a raw JSON dump so
-/// an upstream addition never silently drops content.
-fn block_header(part: &serde_json::Value) -> Option<String> {
-    let kind = part.get("type").and_then(|v| v.as_str())?;
-    match kind {
-        "text" | "thinking" | "tool_result" => Some(format!("[{kind}]")),
-        "tool_use" => {
-            let name = part.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-            Some(match inline_input(part) {
-                Some(arg) => format!("[{kind}] {name} {arg}"),
-                None => format!("[{kind}] {name}"),
-            })
-        }
-        _ => None,
-    }
-}
-
-/// Most tool calls take a single scalar argument (`bash` a command, `read` a
-/// path); fold it into the header instead of spending two lines on it.
-fn inline_input(part: &serde_json::Value) -> Option<String> {
-    let input = part.get("input")?.as_object()?;
-    if input.len() != 1 {
-        return None;
-    }
-    let value = input.values().next()?;
-    if value.is_object() || value.is_array() {
-        return None;
-    }
-    let text = scalar_text(value);
-    (!text.contains('\n')).then_some(text)
-}
-
-/// The payload under a [`block_header`], minus the bookkeeping fields (`id`,
-/// `tool_use_id`, `type`) that only matter for wiring calls to results.
-fn push_block_body<'a>(
-    lines: &mut Vec<Line<'a>>,
-    part: &serde_json::Value,
-    indent: usize,
-    avail: usize,
-) {
-    match part
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-    {
-        // Both blocks name their payload field after their own type.
-        kind @ ("text" | "thinking") => {
-            if let Some(text) = part.get(kind).and_then(|v| v.as_str()) {
-                push_wrapped_lines(lines, text, indent, avail, Style::default().fg(t::TEXT));
-            }
-        }
-        "tool_result" => {
-            if let Some(content) = part.get("content") {
-                push_content(lines, content, indent, avail);
-            }
-        }
-        "tool_use" => {
-            if let Some(input) = part.get("input").filter(|_| inline_input(part).is_none()) {
-                push_json_value(lines, input, indent, avail, false);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn push_message<'a>(
-    lines: &mut Vec<Line<'a>>,
-    idx: usize,
-    message: &serde_json::Value,
-    avail: usize,
-) {
-    let role = message
-        .get("role")
-        .and_then(|v| v.as_str())
-        .unwrap_or("message");
-    let head = Style::default().fg(t::PRIMARY).add_modifier(Modifier::BOLD);
-
-    // A lone block folds onto the role line, saving a line and an indent level
-    // on the tool_result messages that dominate a transcript.
-    let lone =
-        message
-            .get("content")
-            .and_then(|v| v.as_array())
-            .and_then(|parts| match &parts[..] {
-                [part] => block_header(part).map(|header| (header, part)),
-                _ => None,
-            });
-    if let Some((header, part)) = lone {
-        push_wrapped_lines(lines, &format!("#{idx} {role} {header}"), 2, avail, head);
-        push_block_body(lines, part, 4, avail);
-        return;
-    }
-
-    push_wrapped_lines(lines, &format!("#{idx} {role}"), 2, avail, head);
-    match message.get("content") {
-        Some(content) => push_content(lines, content, 4, avail),
-        None => push_wrapped_lines(
-            lines,
-            &compact_json(message),
-            4,
-            avail,
-            Style::default().fg(t::MUTED),
-        ),
-    }
-}
-
-fn push_content<'a>(
-    lines: &mut Vec<Line<'a>>,
-    content: &serde_json::Value,
-    indent: usize,
-    avail: usize,
-) {
-    match content {
-        serde_json::Value::String(text) => {
-            push_wrapped_lines(lines, text, indent, avail, Style::default().fg(t::TEXT));
-        }
-        serde_json::Value::Array(parts) => {
-            for part in parts {
-                match block_header(part) {
-                    Some(header) => {
-                        push_wrapped_lines(
-                            lines,
-                            &header,
-                            indent,
-                            avail,
-                            Style::default().fg(t::MUTED),
-                        );
-                        push_block_body(lines, part, indent + 2, avail);
-                    }
-                    None => push_json_value(lines, part, indent, avail, false),
-                }
-            }
-        }
-        _ => push_json_value(lines, content, indent, avail, false),
-    }
-}
-
-fn push_json_value<'a>(
-    lines: &mut Vec<Line<'a>>,
-    value: &serde_json::Value,
-    indent: usize,
-    avail: usize,
-    error_style: bool,
-) {
-    let style = if error_style {
-        Style::default().fg(t::ERROR)
-    } else {
-        Style::default().fg(t::MUTED)
-    };
-    if let Some(obj) = value.as_object() {
-        for (key, value) in obj {
-            if value.is_object() || value.is_array() {
-                push_wrapped_lines(
-                    lines,
-                    &format!("{key}:"),
-                    indent,
-                    avail,
-                    style.add_modifier(Modifier::BOLD),
-                );
-                push_json_value(lines, value, indent + 2, avail, error_style);
-            } else {
-                push_wrapped_lines(
-                    lines,
-                    &format!("{key}: {}", scalar_text(value)),
-                    indent,
-                    avail,
-                    style,
-                );
-            }
-        }
-    } else {
-        push_wrapped_lines(lines, &compact_json(value), indent, avail, style);
-    }
-}
-
-fn push_key_value<'a>(lines: &mut Vec<Line<'a>>, key: &str, value: &str, avail: usize) {
-    push_wrapped_lines(
-        lines,
-        &format!("{key}: {value}"),
-        0,
-        avail,
-        Style::default().fg(t::MUTED),
-    );
-}
-
-fn push_wrapped_lines<'a>(
-    lines: &mut Vec<Line<'a>>,
-    text: &str,
-    indent: usize,
-    avail: usize,
-    style: Style,
-) {
-    let indent = indent.min(avail.saturating_sub(1));
-    let prefix = " ".repeat(indent);
-    let width = avail.saturating_sub(indent).max(1);
+fn push_wrapped_lines<'a>(lines: &mut Vec<Line<'a>>, text: &str, avail: usize, style: Style) {
+    let width = avail.max(1);
     for raw_line in text.lines() {
         let raw_line = sanitize(raw_line);
         if raw_line.is_empty() {
-            lines.push(Line::from(Span::raw(prefix.clone())));
+            lines.push(Line::raw(""));
             continue;
         }
         for chunk in wrap_text(&raw_line, width) {
-            lines.push(Line::from(Span::styled(format!("{prefix}{chunk}"), style)));
+            lines.push(Line::from(Span::styled(chunk, style)));
         }
     }
 }
 
-/// Logged bodies carry raw source text. Tabs and stray control characters
+/// Logged upstream error text is raw. Tabs and stray control characters
 /// measure as zero width but still move the cursor, blowing the wrap budget.
 fn sanitize(raw: &str) -> Cow<'_, str> {
     if !raw.contains(|c: char| c.is_control()) {
@@ -793,109 +543,37 @@ fn format_time(ts: std::time::SystemTime) -> String {
     }
 }
 
-fn parse_log_json(s: &str) -> Option<serde_json::Value> {
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
-        return Some(v);
-    }
-
-    // Request/response bodies are intentionally truncated before storage. Close
-    // the common dangling string/object/array shape so the detail view can still
-    // present the readable prefix as structured JSON.
-    let mut in_string = false;
-    let mut escape = false;
-    let mut brace_depth: i32 = 0;
-    let mut bracket_depth: i32 = 0;
-    for ch in s.chars() {
-        if escape {
-            escape = false;
-            continue;
-        }
-        if in_string {
-            match ch {
-                '\\' => escape = true,
-                '"' => in_string = false,
-                _ => {}
-            }
-        } else {
-            match ch {
-                '"' => in_string = true,
-                '{' => brace_depth += 1,
-                '}' => brace_depth -= 1,
-                '[' => bracket_depth += 1,
-                ']' => bracket_depth -= 1,
-                _ => {}
-            }
-        }
-    }
-    let mut repaired = s.to_string();
-    if in_string {
-        repaired.push('"');
-    }
-    for _ in 0..bracket_depth.max(0) {
-        repaired.push(']');
-    }
-    for _ in 0..brace_depth.max(0) {
-        repaired.push('}');
-    }
-    if repaired.len() > s.len()
-        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&repaired)
-    {
-        return Some(v);
-    }
-    None
-}
-
-fn scalar_text(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Null => "null".to_string(),
-        serde_json::Value::Bool(v) => v.to_string(),
-        serde_json::Value::Number(v) => v.to_string(),
-        _ => compact_json(value),
-    }
-}
-
-fn compact_json(value: &serde_json::Value) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{push_body_section, push_message, push_summary_line};
-    use serde_json::json;
+    use super::{push_field, push_wrapped_lines};
+    use ratatui::style::Style;
     use unicode_width::UnicodeWidthStr;
 
     /// Every rendered line must fit `width`; ratatui clips, it does not wrap.
     #[test]
-    fn body_lines_never_exceed_width() {
-        let body = json!({
-            "model": "m",
-            "error": {"a_rather_long_key_name": {"nested": 1}},
-            "messages": [
-                {"role": "user", "content": [
-                    {"type": "text", "text": "\tabc 中文 def\tghi jkl mno pqr stu"},
-                ]},
-                {"role": "user", "content": [
-                    {"type": "tool_result", "content": "line one\n\tline two indented"},
-                ]},
-            ],
-        })
-        .to_string();
+    fn detail_lines_never_exceed_width() {
+        let body = format!(
+            "\tupstream said:\u{7} rate limit exceeded {}…",
+            "more ".repeat(20)
+        );
 
         for width in [10usize, 12, 24, 60, 100] {
             let mut lines = Vec::new();
-            // The summary line is the one place still built span-by-span.
-            push_summary_line(
+            push_field(
                 &mut lines,
-                &crate::metrics::RequestLogEntry {
-                    input_tokens: 9_876_543,
-                    output_tokens: 2_109_876,
-                    is_stream: true,
-                    ..crate::metrics::entry_with_id(1)
-                },
+                "Model",
+                "deepseek\tv4.1-flash-an-unusually-long-alias",
                 width,
+                Style::default(),
             );
-            push_body_section(&mut lines, &body, width);
+            push_field(
+                &mut lines,
+                "Tokens",
+                "9876543 in / 2109876 out",
+                width,
+                Style::default(),
+            );
+            push_wrapped_lines(&mut lines, &body, width, Style::default());
             for line in &lines {
                 let text = line
                     .spans
@@ -909,103 +587,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    fn render(message: serde_json::Value, avail: usize) -> Vec<String> {
-        let mut lines = Vec::new();
-        push_message(&mut lines, 2, &message, avail);
-        lines
-            .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect()
-    }
-
-    #[test]
-    fn lone_block_folds_onto_the_role_line() {
-        assert_eq!(
-            render(
-                json!({"role": "user", "content": [{
-                    "type": "tool_result", "tool_use_id": "toolu_1", "content": "ok",
-                }]}),
-                60,
-            ),
-            ["  #2 user [tool_result]", "    ok"],
-        );
-    }
-
-    #[test]
-    fn single_scalar_tool_input_folds_into_the_header() {
-        assert_eq!(
-            render(
-                json!({"role": "assistant", "content": [{
-                    "type": "tool_use", "id": "toolu_1", "name": "read",
-                    "input": {"path": "/tmp/x.md"},
-                }]}),
-                60,
-            ),
-            ["  #2 assistant [tool_use] read /tmp/x.md"],
-        );
-    }
-
-    #[test]
-    fn multi_arg_and_multiline_inputs_stay_broken_out() {
-        assert_eq!(
-            render(
-                json!({"role": "assistant", "content": [{
-                    "type": "tool_use", "name": "edit",
-                    "input": {"path": "/tmp/x", "text": "y"},
-                }]}),
-                60,
-            ),
-            [
-                "  #2 assistant [tool_use] edit",
-                "    path: /tmp/x",
-                "    text: y",
-            ],
-        );
-        assert_eq!(
-            render(
-                json!({"role": "assistant", "content": [{
-                    "type": "tool_use", "name": "bash", "input": {"command": "a\nb"},
-                }]}),
-                60,
-            ),
-            ["  #2 assistant [tool_use] bash", "    command: a", "    b",],
-        );
-    }
-
-    #[test]
-    fn several_blocks_keep_their_own_header_lines() {
-        assert_eq!(
-            render(
-                json!({"role": "assistant", "content": [
-                    {"type": "thinking", "thinking": "hmm"},
-                    {"type": "tool_use", "name": "read", "input": {"path": "/tmp/x"}},
-                ]}),
-                60,
-            ),
-            [
-                "  #2 assistant",
-                "    [thinking]",
-                "      hmm",
-                "    [tool_use] read /tmp/x",
-            ],
-        );
-    }
-
-    #[test]
-    fn unknown_block_types_fall_back_to_a_raw_dump() {
-        assert_eq!(
-            render(
-                json!({"role": "user", "content": [{"type": "image", "source": "s"}]}),
-                60,
-            ),
-            ["  #2 user", "    source: s", "    type: image"],
-        );
     }
 }

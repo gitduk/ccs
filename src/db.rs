@@ -84,8 +84,7 @@ fn init_schema(conn: &Connection) -> Result<()> {
             output_tokens INTEGER NOT NULL DEFAULT 0,
             is_stream     INTEGER NOT NULL DEFAULT 0,
             error         TEXT,
-            request_body  TEXT,
-            response_body TEXT
+            error_body    TEXT
         );",
     )?;
     // Add latency_total column to existing DBs that predate this field.
@@ -93,11 +92,20 @@ fn init_schema(conn: &Connection) -> Result<()> {
         "ALTER TABLE provider_stats ADD COLUMN latency_total INTEGER NOT NULL DEFAULT 0",
     )
     .ok(); // Ignore error — column already exists on fresh DBs.
-    // Migrate older DBs that predate request/response body columns.
-    conn.execute_batch("ALTER TABLE request_log ADD COLUMN request_body TEXT")
-        .ok();
-    conn.execute_batch("ALTER TABLE request_log ADD COLUMN response_body TEXT")
-        .ok();
+    // Bodies are no longer stored. The add must surface — every log read and
+    // write names `error_body` — while a failed drop only costs its space.
+    ensure_column(
+        conn,
+        "request_log",
+        "error_body",
+        "ALTER TABLE request_log ADD COLUMN error_body TEXT",
+    )?;
+    for column in ["request_body", "response_body"] {
+        if has_column(conn, "request_log", column)? {
+            conn.execute_batch(&format!("ALTER TABLE request_log DROP COLUMN {column}"))
+                .ok(); // Best effort: the leftover column is unused, not wrong.
+        }
+    }
     // Add last-quota snapshot column to existing DBs that predate it.
     conn.execute_batch("ALTER TABLE provider_stats ADD COLUMN quota_output TEXT")
         .ok(); // Ignore error — column already exists on fresh DBs.
@@ -113,14 +121,19 @@ fn init_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Add `column` to `table` when this DB predates it.
-fn ensure_column(conn: &Connection, table: &str, column: &str, ddl: &str) -> Result<()> {
+/// True when `table` already carries `column`.
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     let exists: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
         params![table, column],
         |row| row.get(0),
     )?;
-    if exists == 0 {
+    Ok(exists > 0)
+}
+
+/// Add `column` to `table` when this DB predates it.
+fn ensure_column(conn: &Connection, table: &str, column: &str, ddl: &str) -> Result<()> {
+    if !has_column(conn, table, column)? {
         conn.execute_batch(ddl)?;
     }
     Ok(())
@@ -599,8 +612,8 @@ pub fn insert_request_log(
     conn.execute(
         "INSERT OR IGNORE INTO request_log
              (id, timestamp_ms, provider_name, model, status, latency_ms,
-              input_tokens, output_tokens, is_stream, error, request_body, response_body)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+              input_tokens, output_tokens, is_stream, error, error_body)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             entry.id,
             ts,
@@ -612,8 +625,7 @@ pub fn insert_request_log(
             entry.output_tokens,
             entry.is_stream as i64,
             entry.error.as_deref(),
-            entry.request_body.as_deref(),
-            entry.response_body.as_deref(),
+            entry.error_body.as_deref(),
         ],
     )?;
     Ok(())
@@ -640,14 +652,13 @@ pub fn update_request_log_tokens(
 /// column later cannot silently shift the fields.
 const REQUEST_LOG_COLUMNS: &str =
     "SELECT id, timestamp_ms, provider_name, model, status, latency_ms,
-            input_tokens, output_tokens, is_stream, error, request_body, response_body
+            input_tokens, output_tokens, is_stream, error, error_body
      FROM request_log";
 
 fn log_entry_from_row(row: &rusqlite::Row) -> Result<crate::metrics::RequestLogEntry> {
     let ts_ms: i64 = row.get("timestamp_ms")?;
     let is_stream: i64 = row.get("is_stream")?;
-    let request_body: Option<String> = row.get("request_body")?;
-    let response_body: Option<String> = row.get("response_body")?;
+    let error_body: Option<String> = row.get("error_body")?;
     Ok(crate::metrics::RequestLogEntry {
         id: row.get("id")?,
         timestamp: std::time::SystemTime::UNIX_EPOCH
@@ -660,8 +671,7 @@ fn log_entry_from_row(row: &rusqlite::Row) -> Result<crate::metrics::RequestLogE
         output_tokens: row.get("output_tokens")?,
         is_stream: is_stream != 0,
         error: row.get("error")?,
-        request_body: request_body.map(std::sync::Arc::from),
-        response_body: response_body.map(std::sync::Arc::from),
+        error_body: error_body.map(std::sync::Arc::from),
     })
 }
 
@@ -675,14 +685,35 @@ pub fn load_request_logs_after(
     after_id: u64,
     limit: usize,
 ) -> Vec<crate::metrics::RequestLogEntry> {
+    load_log_rows(conn, "id > ?1", after_id, limit)
+}
+
+/// The newest `limit` request-log rows with `id <= before_id`, oldest-first —
+/// the page a walk back from the tail takes at each step.
+pub fn load_request_logs_before(
+    conn: &Connection,
+    before_id: u64,
+    limit: usize,
+) -> Vec<crate::metrics::RequestLogEntry> {
+    load_log_rows(conn, "id <= ?1", before_id, limit)
+}
+
+/// `limit` rows matching `predicate` (which binds `?1`), taken from the newest
+/// end and returned oldest-first.
+fn load_log_rows(
+    conn: &Connection,
+    predicate: &str,
+    cursor: u64,
+    limit: usize,
+) -> Vec<crate::metrics::RequestLogEntry> {
     let Ok(mut stmt) = conn.prepare(&format!(
-        "{REQUEST_LOG_COLUMNS} WHERE id > ?1 ORDER BY id DESC LIMIT ?2"
+        "{REQUEST_LOG_COLUMNS} WHERE {predicate} ORDER BY id DESC LIMIT ?2"
     )) else {
         return vec![];
     };
 
     match stmt.query_map(
-        rusqlite::params![after_id as i64, limit as i64],
+        rusqlite::params![cursor as i64, limit as i64],
         log_entry_from_row,
     ) {
         Ok(iter) => {
@@ -722,20 +753,6 @@ pub fn load_request_log_usage(conn: &Connection, rows: usize) -> Vec<crate::metr
             vec![]
         }
     }
-}
-
-/// Remove old entries, keeping only the most recent `keep` rows.
-pub fn trim_request_log(conn: &Connection, keep: usize) -> Result<()> {
-    // Inner query walks the PK B-tree to find the cutoff id; outer DELETE uses a
-    // PK range scan — both index-only, no full table scan. If fewer than `keep`
-    // rows exist the inner query returns NULL and the DELETE is a no-op.
-    conn.execute(
-        "DELETE FROM request_log WHERE id < (
-             SELECT id FROM request_log ORDER BY id DESC LIMIT 1 OFFSET ?1
-         )",
-        [(keep as i64) - 1],
-    )?;
-    Ok(())
 }
 
 /// SQLite `PRAGMA data_version`: increments when *another* connection
@@ -1127,15 +1144,15 @@ mod tests {
 mod log_sync_tests {
     use super::*;
 
-    /// In-memory DB with `ids` as request-log rows (body = id, so a test can
-    /// tell which rows were read).
+    /// In-memory DB with `ids` as request-log rows; the row's timestamp is its
+    /// id, so a test can tell which rows a query read.
     fn log_db(ids: &[u64]) -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         init_schema(&conn).unwrap();
         for id in ids {
             conn.execute(
-                "INSERT INTO request_log (id, timestamp_ms, provider_name, model, status, request_body)
-                 VALUES (?1, ?1, 'p', 'm', 200, ?1)",
+                "INSERT INTO request_log (id, timestamp_ms, provider_name, model, status)
+                 VALUES (?1, ?1, 'p', 'm', 200)",
                 rusqlite::params![*id as i64],
             )
             .unwrap();
@@ -1177,11 +1194,86 @@ mod log_sync_tests {
     }
 
     #[test]
+    fn a_backwards_page_walks_sparse_ids() {
+        let conn = log_db(&[1, 2, 5, 9]);
+
+        let page = load_request_logs_before(&conn, 9, 2);
+        assert_eq!(ids(&page), vec![5, 9]);
+
+        let page = load_request_logs_before(&conn, 4, 2);
+        assert_eq!(ids(&page), vec![1, 2]);
+    }
+
+    #[test]
     fn an_incremental_load_past_the_newest_row_is_empty() {
         let conn = log_db(&[1, 2, 3]);
 
         assert!(load_request_logs_after(&conn, 99, 10).is_empty());
         assert!(load_request_logs_after(&conn, 0, 0).is_empty());
+    }
+
+    #[test]
+    fn a_failure_body_survives_the_round_trip() {
+        let conn = log_db(&[]);
+        let entry = crate::metrics::RequestLogEntry {
+            error: Some("all providers failed".into()),
+            error_body: Some(r#"{"error":"quota exceeded"}"#.into()),
+            ..crate::metrics::entry_with_id(1)
+        };
+
+        insert_request_log(&conn, &entry).unwrap();
+
+        let rows = load_request_logs_after(&conn, 0, 10);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].error.as_deref(), Some("all providers failed"));
+        assert_eq!(
+            rows[0].error_body.as_deref(),
+            Some(r#"{"error":"quota exceeded"}"#)
+        );
+    }
+
+    #[test]
+    fn an_old_schema_log_loses_its_body_columns_and_keeps_its_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE request_log (
+                 id            INTEGER PRIMARY KEY,
+                 timestamp_ms  INTEGER NOT NULL,
+                 provider_name TEXT NOT NULL,
+                 model         TEXT NOT NULL DEFAULT '',
+                 status        INTEGER NOT NULL,
+                 latency_ms    INTEGER NOT NULL DEFAULT 0,
+                 input_tokens  INTEGER NOT NULL DEFAULT 0,
+                 output_tokens INTEGER NOT NULL DEFAULT 0,
+                 is_stream     INTEGER NOT NULL DEFAULT 0,
+                 error         TEXT,
+                 request_body  TEXT,
+                 response_body TEXT
+             );
+             INSERT INTO request_log
+                 (id, timestamp_ms, provider_name, model, status, request_body)
+                 VALUES (1, 1, 'p', 'm', 200, '{\"big\":\"body\"}');",
+        )
+        .unwrap();
+
+        init_schema(&conn).unwrap();
+
+        assert!(!has_column(&conn, "request_log", "request_body").unwrap());
+        assert!(!has_column(&conn, "request_log", "response_body").unwrap());
+        assert!(has_column(&conn, "request_log", "error_body").unwrap());
+        let rows = load_request_logs_after(&conn, 0, 10);
+        assert_eq!(rows.len(), 1, "the row survives the migration");
+        assert!(rows[0].error_body.is_none());
+    }
+
+    #[test]
+    fn nothing_trims_rows_out_of_the_table() {
+        let conn = log_db(&[]);
+        for id in 1..=250 {
+            insert_request_log(&conn, &crate::metrics::entry_with_id(id)).unwrap();
+        }
+
+        assert_eq!(load_request_logs_after(&conn, 0, 1000).len(), 250);
     }
 
     #[test]
@@ -1210,7 +1302,7 @@ mod log_sync_tests {
     }
 
     #[test]
-    fn a_patched_rows_request_body_is_left_alone_by_the_usage_read() {
+    fn the_usage_read_leaves_the_stored_model_alone() {
         let conn = log_db(&[5]);
 
         let usage = load_request_log_usage(&conn, 5);

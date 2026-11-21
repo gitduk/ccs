@@ -95,7 +95,7 @@ Configuration is stored in `~/.ccs/config.json`. Set `CCS_CONFIG_DIR` to use a d
 {
   "current": "anthropic-official",
   "listen": "127.0.0.1:7896",
-  "request_log_limit": 100,
+  "request_log_limit": 10000,
   "providers": {
     "anthropic-official": {
       "id": "0f0b1e9e-…",
@@ -139,7 +139,7 @@ Configuration is stored in `~/.ccs/config.json`. Set `CCS_CONFIG_DIR` to use a d
 | `listen` | `127.0.0.1:7896` | Global listen address |
 | `providers` | — | Ordered map of provider name → provider |
 | `db_path` | `~/.ccs/ccs.db` | SQLite file holding stats, request log and model lists |
-| `request_log_limit` | `100` | How many recent requests the TUI keeps |
+| `request_log_limit` | `10000` | Size of the TUI request-log window (the DB keeps every request) |
 | `global_routes` | `[]` | Global model routing (see "Global Routing" below) |
 
 ### Provider fields

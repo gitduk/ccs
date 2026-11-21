@@ -67,8 +67,6 @@ pub type SharedMetrics = Arc<Mutex<TokenMetrics>>;
 
 // ─── Request Log ─────────────────────────────────────────────────────────────
 
-const REQUEST_LOG_CAPACITY: usize = 200;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestLogEntry {
     pub id: u64,
@@ -81,11 +79,10 @@ pub struct RequestLogEntry {
     pub output_tokens: u64,
     pub is_stream: bool,
     pub error: Option<String>,
-    /// JSON body sent to the upstream provider. `Arc<str>` so the in-memory
-    /// log, DB persistence, and per-frame rendering share one allocation.
-    pub request_body: Option<Arc<str>>,
-    /// JSON body returned by the upstream provider (error or success).
-    pub response_body: Option<Arc<str>>,
+    /// Head of the upstream error body, set only when the request failed: on
+    /// failure its text is the only diagnostic the gateway holds. `Arc<str>`
+    /// so the in-memory log and DB persistence share one allocation.
+    pub error_body: Option<Arc<str>>,
 }
 
 /// Token/model values of one stored request, read back after a stream patched
@@ -104,15 +101,13 @@ pub struct RequestLog {
 }
 
 impl RequestLog {
-    /// Push an entry, assigning a unique ID. Returns the assigned ID for
-    /// later back-fill lookups.
-    pub fn push(&mut self, mut entry: RequestLogEntry) -> u64 {
+    /// Push an entry, assigning a unique ID and keeping the newest `keep`.
+    /// Returns the assigned ID for later back-fill lookups.
+    pub fn push(&mut self, mut entry: RequestLogEntry, keep: usize) -> u64 {
         let id = NEXT_REQUEST_LOG_ID.fetch_add(1, Ordering::Relaxed);
         entry.id = id;
-        if self.entries.len() >= REQUEST_LOG_CAPACITY {
-            self.entries.pop_front();
-        }
         self.entries.push_back(entry);
+        self.trim_to(keep);
         id
     }
 
@@ -129,10 +124,6 @@ impl RequestLog {
 
     pub fn entries(&self) -> &VecDeque<RequestLogEntry> {
         &self.entries
-    }
-
-    pub fn entries_mut(&mut self) -> &mut VecDeque<RequestLogEntry> {
-        &mut self.entries
     }
 
     /// Id of the newest entry held, or 0 when the log is empty.
@@ -239,8 +230,7 @@ pub(crate) fn entry_with_id(id: u64) -> RequestLogEntry {
         output_tokens: 0,
         is_stream: false,
         error: None,
-        request_body: None,
-        response_body: None,
+        error_body: None,
     }
 }
 
@@ -251,10 +241,13 @@ mod tests {
     #[test]
     fn backfill_updates_to_final_response_model() {
         let mut log = RequestLog::default();
-        let id = log.push(RequestLogEntry {
-            model: "sonnet-4-6".into(),
-            ..entry_with_id(0)
-        });
+        let id = log.push(
+            RequestLogEntry {
+                model: "sonnet-4-6".into(),
+                ..entry_with_id(0)
+            },
+            200,
+        );
 
         log.backfill(id, 1234, 5678, Some("gpt-5.4"));
 
@@ -269,7 +262,7 @@ mod tests {
         let mut log = RequestLog::default();
         log.replace(vec![entry_with_id(1_000_000)], 200);
 
-        let next_id = log.push(entry_with_id(0));
+        let next_id = log.push(entry_with_id(0), 200);
         assert!(next_id > 1_000_000);
     }
 

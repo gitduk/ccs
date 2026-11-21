@@ -165,7 +165,8 @@ pub struct AppConfig {
     pub providers: IndexMap<String, Provider>,
     #[serde(default)]
     pub db_path: Option<String>,
-    /// Maximum number of recent requests shown in the TUI. Default: 100.
+    /// Size of the TUI's request-log window. The DB keeps every request, so
+    /// this only bounds what the panel can scroll back to. Default: 10000.
     #[serde(default = "default_request_log_limit")]
     pub request_log_limit: usize,
     /// Global model routes: a matching request is pinned to one provider.
@@ -179,7 +180,7 @@ fn default_listen() -> String {
 }
 
 fn default_request_log_limit() -> usize {
-    100
+    10000
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

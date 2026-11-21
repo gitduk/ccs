@@ -4,10 +4,6 @@ use crate::catalog::{CatalogModel, ModelAttr};
 use crate::db::{self, SharedDb};
 use crate::metrics::{TokenMetrics, sync_next_request_log_id};
 
-/// Trim the request log every this many requests to amortize the SQL cost.
-/// Log size stays within `request_log_limit + TRIM_INTERVAL` rows.
-const TRIM_INTERVAL: u64 = 50;
-
 /// Repository wraps the shared DB connection and owns all locking and SQL dispatch.
 /// Callers never touch `SharedDb` or `crate::db::*` directly.
 #[derive(Clone)]
@@ -218,29 +214,19 @@ impl Repository {
 
     // ─── Request Log ─────────────────────────────────────────────────────────
 
-    /// Fire-and-forget: persist a request log entry, then trim to `keep` rows.
-    /// `keep` should be at least as large as the TUI display limit; a minimum of
-    /// 200 is enforced so a small `request_log_limit` never truncates history too aggressively.
-    pub(crate) fn persist_request_log_async(
-        &self,
-        entry: crate::metrics::RequestLogEntry,
-        keep: usize,
-    ) {
+    /// Fire-and-forget: persist a request log entry. Nothing is trimmed here —
+    /// rows are tiny now that bodies are not stored.
+    pub(crate) fn persist_request_log_async(&self, entry: crate::metrics::RequestLogEntry) {
         let repo = self.clone();
-        let keep = keep.max(200);
         tokio::task::spawn_blocking(move || {
-            if let Ok(conn) = repo.0.lock() {
-                if let Err(e) = db::insert_request_log(&conn, &entry) {
-                    tracing::warn!(
-                        provider = %entry.provider,
-                        model = %entry.model,
-                        "Failed to persist request log entry {}: {e}", entry.id
-                    );
-                }
-                // Amortize trim cost: run every 50 requests rather than on every insert.
-                if entry.id.is_multiple_of(TRIM_INTERVAL) {
-                    db::trim_request_log(&conn, keep).ok();
-                }
+            if let Ok(conn) = repo.0.lock()
+                && let Err(e) = db::insert_request_log(&conn, &entry)
+            {
+                tracing::warn!(
+                    provider = %entry.provider,
+                    model = %entry.model,
+                    "Failed to persist request log entry {}: {e}", entry.id
+                );
             }
         });
     }
@@ -252,22 +238,14 @@ impl Repository {
         input: u64,
         output: u64,
         model: Option<String>,
-        keep: usize,
     ) {
         let repo = self.clone();
-        let keep = keep.max(200);
         tokio::task::spawn_blocking(move || {
-            if let Ok(conn) = repo.0.lock() {
-                if let Err(e) =
+            if let Ok(conn) = repo.0.lock()
+                && let Err(e) =
                     db::update_request_log_tokens(&conn, id, input, output, model.as_deref())
-                {
-                    tracing::warn!("Failed to update request log tokens for id {id}: {e}");
-                }
-                // Trim only on every 50th request to amortize the cost; the insert
-                // path already trimmed once, so log size stays within ~keep+50 rows.
-                if id.is_multiple_of(TRIM_INTERVAL) {
-                    db::trim_request_log(&conn, keep).ok();
-                }
+            {
+                tracing::warn!("Failed to update request log tokens for id {id}: {e}");
             }
         });
     }
@@ -292,6 +270,22 @@ impl Repository {
             Ok(conn) => db::load_request_logs_after(&conn, after_id, limit),
             Err(_) => {
                 tracing::warn!("DB mutex poisoned in load_request_logs_after");
+                vec![]
+            }
+        }
+    }
+
+    /// Load the newest `limit` request-log rows ending at `before_id`,
+    /// oldest-first; the paging counterpart of `load_request_logs_after`.
+    pub fn load_request_logs_before(
+        &self,
+        before_id: u64,
+        limit: usize,
+    ) -> Vec<crate::metrics::RequestLogEntry> {
+        match self.0.lock() {
+            Ok(conn) => db::load_request_logs_before(&conn, before_id, limit),
+            Err(_) => {
+                tracing::warn!("DB mutex poisoned in load_request_logs_before");
                 vec![]
             }
         }
