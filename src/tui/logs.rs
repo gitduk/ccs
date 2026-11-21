@@ -8,13 +8,13 @@ use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::state::{App, LogsState, MessageKind, Mode, list_move, step};
+use super::state::{App, LogsState, MessageKind, Mode, keep_visible, list_move, step};
 use super::theme::{self as t};
 use super::ui::format::{fmt_latency, format_tokens, shorten_model_name, truncate_width};
 use super::ui::layout::{BORDER_INNER_DIVIDER, DASH, TITLE_SIDE, centered_rect};
@@ -35,7 +35,7 @@ pub(super) fn handle_key(
     if let Some('g') = prev
         && code == KeyCode::Char('g')
     {
-        app.logs.detail_scroll = 0;
+        app.logs.error_scroll = 0;
         return Ok(());
     }
 
@@ -43,7 +43,7 @@ pub(super) fn handle_key(
         let next = step(app.logs.selected, dir.delta(), total);
         if next != app.logs.selected {
             app.logs.selected = next;
-            app.logs.detail_scroll = 0;
+            app.logs.error_scroll = 0;
         }
         return Ok(());
     }
@@ -52,37 +52,34 @@ pub(super) fn handle_key(
         KeyCode::Esc | KeyCode::Char('q') => {
             app.mode = Mode::Normal;
         }
-        KeyCode::Char('G') => {
-            app.logs.detail_scroll = u16::MAX;
+        KeyCode::Char('G') | KeyCode::End => {
+            app.logs.error_scroll = u16::MAX;
         }
         KeyCode::Char('g') => {
             app.logs.pending_key = Some(('g', Instant::now()));
         }
         KeyCode::Home => {
-            app.logs.detail_scroll = 0;
-        }
-        KeyCode::End => {
-            app.logs.detail_scroll = u16::MAX;
+            app.logs.error_scroll = 0;
         }
         KeyCode::Char('J') => {
-            let step = detail_scroll_half_page(app);
-            app.logs.detail_scroll = app.logs.detail_scroll.saturating_add(step);
+            let step = error_scroll_half_page(app);
+            app.logs.error_scroll = app.logs.error_scroll.saturating_add(step);
         }
         KeyCode::Char('K') => {
-            let step = detail_scroll_half_page(app);
-            app.logs.detail_scroll = app.logs.detail_scroll.saturating_sub(step);
+            let step = error_scroll_half_page(app);
+            app.logs.error_scroll = app.logs.error_scroll.saturating_sub(step);
         }
         _ => {}
     }
     Ok(())
 }
 
-fn detail_scroll_half_page(app: &App) -> u16 {
-    (app.logs.detail_view_height / 2).max(1)
+fn error_scroll_half_page(app: &App) -> u16 {
+    (app.logs.error_view_height / 2).max(1)
 }
 
 pub(super) fn draw_popup(f: &mut Frame, app: &mut App) {
-    let area = centered_rect(90, 80, f.area());
+    let area = popup_area(f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
@@ -113,179 +110,227 @@ pub(super) fn draw_popup(f: &mut Frame, app: &mut App) {
     let selected = app.logs.selected.min(total.saturating_sub(1));
     app.logs.selected = selected;
 
-    let viewport_height = inner.height.saturating_sub(1) as usize;
+    // The error section takes height from the table, so the selected row is
+    // read before the viewport is known.
+    let selected_entry = match app.request_log.lock() {
+        Ok(log) => log.entries().iter().rev().nth(selected).cloned(),
+        Err(_) => None,
+    };
+    let error_lines = selected_entry
+        .as_ref()
+        .map(|entry| error_section_lines(entry, inner.width as usize))
+        .unwrap_or_default();
+    let error_height = error_section_height(error_lines.len(), inner.height);
+    let table_area = Rect {
+        height: inner.height - error_height,
+        ..inner
+    };
+
+    let viewport = table_area.height.saturating_sub(1) as usize;
     let scroll = {
         let mut scroll = app.logs.scroll;
-        crate::tui::state::keep_visible(selected, &mut scroll, viewport_height);
+        keep_visible(selected, &mut scroll, viewport);
         app.logs.scroll = scroll;
         scroll as usize
     };
 
-    // The list paints [scroll, scroll + viewport) and the detail pane the
-    // selected row, so clone those rows only, not the whole window.
+    // The table paints [scroll, scroll + viewport) and the error section the
+    // selected row only, so clone those rows, not the whole window.
     let rows = match app.request_log.lock() {
         Ok(log) => log
             .entries()
             .iter()
             .rev()
             .skip(scroll)
-            .take(viewport_height)
+            .take(viewport)
             .cloned()
             .collect::<Vec<_>>(),
         Err(_) => vec![],
     };
+    f.render_widget(
+        Paragraph::new(log_table_lines(
+            &rows,
+            scroll,
+            selected,
+            table_area.width as usize,
+        )),
+        table_area,
+    );
 
-    // Require at least 10 cols for the detail pane; fall back to list-only below that.
-    const LIST_WIDTH: u16 = 37;
-    if inner.width <= LIST_WIDTH + 10 {
-        render_log_list(f, &rows, scroll, selected, inner);
-        let footer = format!(" {} requests  [j/k] navigate  [q/Esc] close", total);
-        draw_footer(f, area, &footer);
-        return;
-    }
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(LIST_WIDTH), Constraint::Min(0)])
-        .split(inner);
-    let list_area = chunks[0];
-    let detail_area = chunks[1];
-
-    render_log_list(f, &rows, scroll, selected, list_area);
-
-    let detail_block = Block::default()
-        .borders(Borders::LEFT)
-        .border_style(Style::default().fg(t::MUTED))
-        .padding(Padding::new(1, 0, 0, 0));
-    let detail_inner = detail_block.inner(detail_area);
-    f.render_widget(detail_block, detail_area);
-    if let Some(entry) = rows.get(selected.saturating_sub(scroll)) {
-        draw_detail(f, entry, detail_inner, &mut app.logs);
+    if error_height > 0 {
+        let error_area = Rect {
+            y: table_area.y + table_area.height,
+            height: error_height,
+            ..inner
+        };
+        draw_error_section(f, error_lines, error_area, &mut app.logs);
     }
 
     let footer = format!(
-        " {} requests  [j/k] navigate  [Shift+J/K] half-page detail  [gg/G] detail top/bottom  [q/Esc] close",
+        " {} requests  [j/k] navigate  [Shift+J/K] error text  [gg/G] error top/bottom  [q/Esc] close",
         total
     );
     draw_footer(f, area, &footer);
 }
 
-/// Paint the visible page of the log list; `rows` starts at absolute index
+/// Past this width the table only gains empty space between provider/model and
+/// the numeric columns, so the popup stops growing.
+const POPUP_MAX_WIDTH: u16 = 110;
+
+/// Centered popup, narrowed to [`POPUP_MAX_WIDTH`].
+fn popup_area(area: Rect) -> Rect {
+    let centered = centered_rect(90, 80, area);
+    let width = centered.width.min(POPUP_MAX_WIDTH);
+    Rect {
+        x: centered.x + (centered.width - width) / 2,
+        width,
+        ..centered
+    }
+}
+
+/// Widths of the columns that always fit; provider/model takes the rest.
+const COL_RESPONSE: usize = 11;
+const COL_TOKENS: usize = 16;
+/// Token sub-columns: the prompt count right-aligned, so the slashes of
+/// consecutive rows line up, the completion count left-aligned.
+const TOKENS_IN_WIDTH: usize = 6;
+const TOKENS_OUT_WIDTH: usize = 6;
+const COL_STREAM: usize = 7;
+const COL_AGE: usize = 4;
+/// Popup widths below which an optional column would squeeze provider/model.
+const TOKENS_MIN_WIDTH: usize = 58;
+const STREAM_MIN_WIDTH: usize = 72;
+
+/// Lines of the full-width request table; `rows` starts at absolute index
 /// `first` in newest-first order.
-fn render_log_list(
-    f: &mut Frame,
+fn log_table_lines(
     rows: &[RequestLogEntry],
     first: usize,
     selected: usize,
-    area: Rect,
-) {
-    let viewport_height = area.height.saturating_sub(1) as usize;
-    let hdr = Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD);
-    let mut lines: Vec<Line> = vec![Line::from(vec![
-        Span::styled(format!("{:<11}", "Response"), hdr),
-        Span::styled(format!("{:<22}", "Provider/Model"), hdr),
-        Span::styled("Age", hdr),
-    ])];
-    for (i, entry) in rows.iter().enumerate().take(viewport_height) {
+    width: usize,
+) -> Vec<Line<'static>> {
+    let tokens_width = if width >= TOKENS_MIN_WIDTH {
+        COL_TOKENS
+    } else {
+        0
+    };
+    let stream_width = if width >= STREAM_MIN_WIDTH {
+        COL_STREAM
+    } else {
+        0
+    };
+    let widths = [
+        COL_RESPONSE,
+        width.saturating_sub(COL_RESPONSE + tokens_width + stream_width + COL_AGE),
+        tokens_width,
+        stream_width,
+        COL_AGE,
+    ];
+    let header = Style::default().fg(t::MUTED).add_modifier(Modifier::BOLD);
+    let mut lines = vec![table_line(
+        ["Response", "Provider/Model", "Tokens", "Stream", "Age"],
+        widths,
+        [header; 5],
+    )];
+    for (i, entry) in rows.iter().enumerate() {
         let is_selected = first + i == selected;
-        let base_status = entry_status_style(entry);
-        let (status_style, row_style) = if is_selected {
-            let rev = Modifier::REVERSED;
-            (
-                base_status.add_modifier(rev),
-                Style::default().add_modifier(rev),
-            )
+        let row = if is_selected {
+            Style::default().add_modifier(Modifier::REVERSED)
         } else {
-            (base_status, Style::default())
+            Style::default()
         };
-        let (response, pm) = entry_cells(entry, 10, 21);
-        lines.push(Line::from(vec![
-            Span::styled(format!("{:<11}", response), status_style),
-            Span::styled(format!("{:<22}", pm), row_style.fg(t::TEXT)),
-            Span::styled(format_time(entry.timestamp), row_style.fg(t::MUTED)),
-        ]));
+        let mut status = entry_status_style(entry);
+        if is_selected {
+            status = status.add_modifier(Modifier::REVERSED);
+        }
+        let response = format!("{} {}", entry.status, fmt_latency(entry.latency_ms));
+        let provider_model = format!("{}/{}", entry.provider, entry.model);
+        let tokens = tokens_cell(entry);
+        lines.push(table_line(
+            [
+                &response,
+                &provider_model,
+                &tokens,
+                if entry.is_stream { "yes" } else { "no" },
+                &format_time(entry.timestamp),
+            ],
+            widths,
+            [
+                status,
+                row.fg(t::TEXT),
+                row.fg(t::MUTED),
+                row.fg(t::MUTED),
+                row.fg(t::MUTED),
+            ],
+        ));
     }
-    f.render_widget(Paragraph::new(lines), area);
+    lines
 }
 
-fn draw_detail(f: &mut Frame, entry: &RequestLogEntry, area: Rect, logs: &mut LogsState) {
-    logs.detail_view_height = area.height;
+fn tokens_cell(entry: &RequestLogEntry) -> String {
+    if entry.input_tokens == 0 && entry.output_tokens == 0 {
+        return "—".to_string();
+    }
+    format!(
+        "{:>TOKENS_IN_WIDTH$} / {:<TOKENS_OUT_WIDTH$}",
+        format_tokens(entry.input_tokens),
+        format_tokens(entry.output_tokens),
+    )
+}
 
-    let avail = area.width as usize;
-    let text = Style::default().fg(t::TEXT);
-    let mut lines: Vec<Line> = Vec::new();
-    push_field(
-        &mut lines,
-        "Status",
-        &format!("{} {}", entry.status, fmt_latency(entry.latency_ms)),
-        avail,
-        entry_status_style(entry),
-    );
-    push_field(&mut lines, "Provider", &entry.provider, avail, text);
-    push_field(&mut lines, "Model", &entry.model, avail, text);
-    push_field(
-        &mut lines,
-        "Tokens",
-        &format!("{} in / {} out", entry.input_tokens, entry.output_tokens),
-        avail,
-        text,
-    );
-    push_field(
-        &mut lines,
-        "Stream",
-        if entry.is_stream { "yes" } else { "no" },
-        avail,
-        text,
-    );
-    push_field(
-        &mut lines,
-        "Age",
-        &format_time(entry.timestamp),
-        avail,
-        text,
-    );
+/// One table line: each cell is truncated to its column and padded to fill it;
+/// a zero-width column is dropped.
+fn table_line(cells: [&str; 5], widths: [usize; 5], styles: [Style; 5]) -> Line<'static> {
+    let mut spans = Vec::with_capacity(5);
+    for ((cell, width), style) in cells.iter().zip(widths).zip(styles) {
+        if width == 0 {
+            continue;
+        }
+        // One column of gap keeps neighbouring truncation markers apart.
+        let text = truncate_width(cell, width.saturating_sub(1));
+        spans.push(Span::styled(format!("{text:<width$}"), style));
+    }
+    Line::from(spans)
+}
 
+fn error_section_lines(entry: &RequestLogEntry, width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
     if let Some(error) = &entry.error {
-        lines.push(Line::raw(""));
-        push_field(
-            &mut lines,
-            "Error",
-            error,
-            avail,
-            Style::default().fg(t::ERROR),
-        );
+        push_wrapped_lines(&mut lines, error, width, Style::default().fg(t::ERROR));
     }
     // Upstream's own error text, capped when the row was written.
     if let Some(body) = &entry.error_body {
-        lines.push(Line::raw(""));
-        push_wrapped_lines(&mut lines, body, avail, Style::default().fg(t::MUTED));
+        push_wrapped_lines(&mut lines, body, width, Style::default().fg(t::MUTED));
     }
-
-    let max_scroll = lines.len().saturating_sub(area.height as usize) as u16;
-    logs.detail_scroll = logs.detail_scroll.min(max_scroll);
-
-    f.render_widget(Paragraph::new(lines).scroll((logs.detail_scroll, 0)), area);
+    lines
 }
 
-/// One `label  value` line: two-tone while it fits, wrapped by the shared
-/// wrapper when the pane is too narrow for the layout.
-fn push_field<'a>(
-    lines: &mut Vec<Line<'a>>,
-    label: &'static str,
-    value: &str,
-    avail: usize,
-    value_style: Style,
-) {
-    let label = format!("{label:<10}");
-    let value = sanitize(value);
-    let text = format!("{label} {value}");
-    if text.width() <= avail {
-        lines.push(Line::from(vec![
-            Span::styled(label, Style::default().fg(t::MUTED)),
-            Span::styled(value.into_owned(), value_style),
-        ]));
-    } else {
-        push_wrapped_lines(lines, &text, avail, Style::default().fg(t::MUTED));
+/// Height the error section takes from the table, top border included; zero
+/// when the selected row carries no error text.
+fn error_section_height(needed: usize, inner_height: u16) -> u16 {
+    if needed == 0 {
+        return 0;
     }
+    let cap = (inner_height as usize / 3).max(3);
+    let body = needed.min(cap) as u16;
+    // The table keeps its header and two rows.
+    (body + 1).min(inner_height.saturating_sub(3))
+}
+
+fn draw_error_section(f: &mut Frame, lines: Vec<Line<'static>>, area: Rect, logs: &mut LogsState) {
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(t::MUTED))
+        .title(" Error ")
+        .title_style(Style::default().fg(t::ERROR))
+        .padding(Padding::new(1, 1, 0, 0));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    logs.error_view_height = inner.height;
+    let max_scroll = lines.len().saturating_sub(inner.height as usize) as u16;
+    logs.error_scroll = logs.error_scroll.min(max_scroll);
+    f.render_widget(Paragraph::new(lines).scroll((logs.error_scroll, 0)), inner);
 }
 
 fn push_wrapped_lines<'a>(lines: &mut Vec<Line<'a>>, text: &str, avail: usize, style: Style) {
@@ -545,46 +590,66 @@ fn format_time(ts: std::time::SystemTime) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{push_field, push_wrapped_lines};
-    use ratatui::style::Style;
+    use super::{error_section_lines, log_table_lines};
+    use crate::metrics::{RequestLogEntry, entry_with_id};
+    use ratatui::text::Line;
     use unicode_width::UnicodeWidthStr;
+
+    fn failing_entry() -> RequestLogEntry {
+        RequestLogEntry {
+            error: Some("upstream 429".into()),
+            error_body: Some(
+                format!(
+                    "\tupstream said:\u{7} rate limit exceeded {}…",
+                    "more ".repeat(20)
+                )
+                .into(),
+            ),
+            model: "deepseek\tv4.1-flash-an-unusually-long-alias".into(),
+            input_tokens: 220_828,
+            output_tokens: 134,
+            ..entry_with_id(1)
+        }
+    }
+
+    fn text_of(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
 
     /// Every rendered line must fit `width`; ratatui clips, it does not wrap.
     #[test]
-    fn detail_lines_never_exceed_width() {
-        let body = format!(
-            "\tupstream said:\u{7} rate limit exceeded {}…",
-            "more ".repeat(20)
-        );
+    fn error_lines_never_exceed_width() {
+        let entry = failing_entry();
 
         for width in [10usize, 12, 24, 60, 100] {
-            let mut lines = Vec::new();
-            push_field(
-                &mut lines,
-                "Model",
-                "deepseek\tv4.1-flash-an-unusually-long-alias",
-                width,
-                Style::default(),
-            );
-            push_field(
-                &mut lines,
-                "Tokens",
-                "9876543 in / 2109876 out",
-                width,
-                Style::default(),
-            );
-            push_wrapped_lines(&mut lines, &body, width, Style::default());
-            for line in &lines {
-                let text = line
-                    .spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>();
+            for line in error_section_lines(&entry, width) {
+                let text = text_of(&line);
                 assert!(
                     text.width() <= width,
                     "width={width} got={}: |{text}|",
                     text.width()
                 );
+            }
+        }
+    }
+
+    /// A table line pads to the popup width, so rows stay column-aligned and
+    /// nothing spills past the frame.
+    #[test]
+    fn table_lines_fill_the_popup_width() {
+        let rows = [
+            failing_entry(),
+            RequestLogEntry {
+                is_stream: true,
+                model: "claude-sonnet-4-6".into(),
+                ..entry_with_id(2)
+            },
+        ];
+
+        for width in [40usize, 62, 76, 120, 171] {
+            for line in log_table_lines(&rows, 0, 1, width) {
+                let text = text_of(&line);
+                assert_eq!(text.width(), width, "width={width}: |{text}|");
             }
         }
     }

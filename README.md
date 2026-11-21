@@ -361,8 +361,8 @@ Fields: Name, Base URL, API Key, Format, then the Routes section. The Format fie
 | Key | Action |
 | --- | --- |
 | `j` / `k`, `↑/↓` | Select request |
-| `J` / `K` | Scroll the detail view half a page |
-| `gg` / `G`, `Home` / `End` | Detail view to top / bottom |
+| `J` / `K` | Scroll the selected row's error text half a page |
+| `gg` / `G`, `Home` / `End` | Error text to top / bottom |
 | `q` / `Esc` | Back to the provider list |
 
 ### Models panel (`m`)

@@ -161,13 +161,7 @@ pub(crate) mod tests {
             request_log: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::metrics::RequestLog::default(),
             )),
-            logs: LogsState {
-                selected: 0,
-                scroll: 0,
-                detail_scroll: 0,
-                detail_view_height: 0,
-                pending_key: None,
-            },
+            logs: LogsState::default(),
             message_log: std::collections::VecDeque::new(),
             seen_provider_errors: std::collections::HashMap::new(),
             pending_key: None,

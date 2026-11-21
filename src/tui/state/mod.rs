@@ -288,15 +288,16 @@ impl AttrEdit {
 }
 
 /// Request log viewer state.
+#[derive(Debug, Default)]
 pub struct LogsState {
     /// Index of the highlighted entry (0 = most recent).
     pub selected: usize,
     /// Scroll offset (rows) for the log list.
     pub scroll: u16,
-    /// Scroll offset (rows) for the detail panel.
-    pub detail_scroll: u16,
-    /// Last rendered detail viewport height, used for half-page scrolling.
-    pub detail_view_height: u16,
+    /// Scroll offset (rows) for the selected row's error section.
+    pub error_scroll: u16,
+    /// Last rendered error viewport height, used for half-page scrolling.
+    pub error_view_height: u16,
     /// Pending first key of a two-key sequence inside the logs panel.
     pub pending_key: Option<(char, std::time::Instant)>,
 }
@@ -926,13 +927,7 @@ mod tests {
             request_log: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::metrics::RequestLog::default(),
             )),
-            logs: super::LogsState {
-                selected: 0,
-                scroll: 0,
-                detail_scroll: 0,
-                detail_view_height: 0,
-                pending_key: None,
-            },
+            logs: super::LogsState::default(),
             message_log: std::collections::VecDeque::new(),
             seen_provider_errors: std::collections::HashMap::new(),
             pending_key: None,
