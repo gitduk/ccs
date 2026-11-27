@@ -48,3 +48,6 @@ lto = "thin"
 # Ship only GitHub Releases, never crates.io
 [package.metadata.release]
 publish = false
+pre-release-replacements = [
+  { file = "CHANGELOG.md", search = "## Unreleased", replace = "## {{version}} - {{date}}", min = 1 },
+]
